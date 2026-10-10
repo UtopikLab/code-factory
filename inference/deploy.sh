@@ -6,6 +6,10 @@
 # k8s-node01.md. Applies the NVIDIA device-plugin (GPU discovery) and the
 # llama.cpp server stack, and pulls the required containerd images.
 #
+# Also applies the overnight-agent orchestration stack (orchestrator namespace)
+# and the telemetry stack (monitoring namespace). The inference stack itself is
+# unchanged by these additions.
+#
 # Usage:
 #   sudo ./inference/deploy.sh                # dry-run
 #   sudo ./inference/deploy.sh apply          # apply everything
@@ -36,9 +40,21 @@ apply() {
   kubectl apply -f "${ROOT}/models-pvc.yaml"
   kubectl apply -f "${ROOT}/deployment.yaml"
 
+  # Overnight-agent orchestration stack (always-on supervisor + workers).
+  echo "--> Applying orchestrator stack (namespace 'orchestrator')..."
+  kubectl apply -f "${ROOT}/orchestrator/namespace.yaml"
+  kubectl apply -f "${ROOT}/orchestrator/supervisor.yaml"
+  kubectl apply -f "${ROOT}/orchestrator/workers.yaml"
+
+  # Telemetry stack: node-exporter (host metrics) + iDRAC (hardware health).
+  echo "--> Applying monitoring stack (namespace 'monitoring')..."
+  kubectl apply -f "${ROOT}/monitoring/node-exporter.yaml"
+  kubectl apply -f "${ROOT}/monitoring/idrac.yaml"
+
   echo "--> Waiting for GPU pods / PVC..."
   kubectl wait --for=condition=ready pod -l app=nvidia-device-plugin -n gpu --timeout=120s || true
   kubectl -n llm wait --for=condition=ready pod --all --timeout=180s || true
+  kubectl -n orchestrator wait --for=condition=ready pod -l app=orchestrator --timeout=120s || true
 }
 
 remove() {
@@ -47,6 +63,15 @@ remove() {
   kubectl delete -f "${ROOT}/models-pvc.yaml" >/dev/null
   echo ">--> Removing GPU device-plugin..."
   kubectl delete -f "${ROOT}/nvidia-device-plugin.yaml" >/dev/null
+
+  echo "--> Removing orchestrator stack (namespace 'orchestrator')..."
+  kubectl delete -f "${ROOT}/orchestrator/workers.yaml" >/dev/null
+  kubectl delete -f "${ROOT}/orchestrator/supervisor.yaml" >/dev/null
+  kubectl delete -f "${ROOT}/orchestrator/namespace.yaml" >/dev/null
+
+  echo "--> Removing monitoring stack (namespace 'monitoring')..."
+  kubectl delete -f "${ROOT}/monitoring/idrac.yaml" >/dev/null
+  kubectl delete -f "${ROOT}/monitoring/node-exporter.yaml" >/dev/null
 }
 
 case "${MODE}" in

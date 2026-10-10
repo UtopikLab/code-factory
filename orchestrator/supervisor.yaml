@@ -1,0 +1,148 @@
+# ---------------------------------------------------------------------------
+# The LangGraph orchestrator runtime (supervisor / judge).
+# ---------------------------------------------------------------------------
+# Always-on, CPU-only Deployment. This is the overnight supervisor runtime:
+#   - holds the LangGraph state machine (the agent loop),
+#   - runs the supervisor/judge tool-calling agent, and
+#   - spawns coder worker pods on demand.
+#
+# It is a long-running server, NOT a batch job: it sits idle and listening,
+# wakes for a task, runs the loop, opens a PR, then idles again.
+#
+# Image / runtime selection (Open Question O8) is parameterized below so the
+# manifest does not hard-code a specific LangGraph runtime image.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: orchestrator
+  labels:
+    app: orchestrator
+    component: supervisor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestrator
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+        component: supervisor
+    spec:
+      containers:
+        - name: orchestrator
+          image: "${IMAGE:-ghcr.io/autonomous/langgraph-orchestrator:latest}"
+          # Pull latest so the supervisor loop / tool-calling code stays current
+          # after an autonomous build cycle; the tag can be pinned if desired.
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            # The runtime stays resident. In steady state it tails the loop
+            # state file and waits; when a task arrives it runs the LangGraph
+            # loop and then returns to the waiting state.
+            - exec
+            - python3
+            - -m
+            - langgraph.cli
+            - serve
+            - --state-dir
+            - /data/loop-state
+            - --task-wait-seconds
+            - "${TASK_WAIT:-30}"
+            - --max-iterations
+            - "${MAX_ITERATIONS:-8}"
+            - --judge-url
+            - "${JUDGE_URL:-https://llm.local/v1}"
+            - --judge-model
+            - "${JUDGE_MODEL:-qwen2.5-<judge>@64k}"
+            - --openai-key
+            - "${OPENAI_API_KEY:-}"
+          # CPU/RAM limits fit the node budget (orchestrator ~2-3 cores, 4-6 GiB).
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: "2.5"
+              memory: 5Gi
+          env:
+            # Secrets are injected as env vars / a mounted secret — never
+            # hardcoded in the manifest. See the README for how to rotate.
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-secrets
+                  key: openai-api-key
+            # Networking — the supervisor calls the judge brain over the
+            # network (no GPU needed here). Swap the host when connecting
+            # through a different ingress / VPN.
+            - name: JUDGE_HOST
+              value: "llm-server-gpu1"
+            - name: JUDGE_PORT
+              value: "8000"
+            # Loop tuning (Open Questions O4 / O5). Parameterized so policy can
+            # change without editing the Deployment spec.
+            - name: MAX_ITERATIONS
+              valueFrom:
+                configMapKeyRef:
+                  name: orchestrator-config
+                  key: max-iterations
+            - name: TASK_WAIT_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: orchestrator-config
+                  key: task-wait-seconds
+            # Persistence mount for the loop state (see below).
+            - name: LOOP_STATE_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: orchestrator-config
+                  key: loop-state-dir
+          volumeMounts:
+            - name: loop-state
+              mountPath: /data/loop-state
+              # Persistent so a node restart resumes the loop where it stopped
+              # instead of re-planning from scratch (design requirement §6.2).
+              mountPropagation: None
+          readinessProbe:
+            # The process must be up; the loop itself may be idle between tasks.
+            # Fall back to a TCP check once the runtime exposes a health port.
+            exec:
+              command:
+                - sh
+                - -c
+                - 'pgrep -f langgraph >/dev/null 2>&1 || exit 1'
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - 'pgrep -f langgraph >/dev/null 2>&1 || exit 1'
+            initialDelaySeconds: 60
+            periodSeconds: 30
+      # Pure CPU workload — no GPU requested or limited. The coder/judge models
+      # live on the llama.cpp servers in the `llm` namespace.
+      restartPolicy: Always
+
+---
+# ClusterIP Service so the supervisor can be addressed by the worker-spawn
+# mechanism (and by tool-calling glue that needs to reach it by name).
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator
+  namespace: orchestrator
+  labels:
+    app: orchestrator
+    component: supervisor
+spec:
+  selector:
+    app: orchestrator
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000
+      targetPort: 8000

@@ -121,6 +121,16 @@ inference/
 ├── deployment.yaml              # llama.cpp server (2 pods, one GPU each) + Service + Ingress
 └── models/
     └── README.md                # weight layout + download instructions
+orchestrator/
+├── namespace.yaml               # Namespace 'orchestrator'
+├── supervisor.yaml              # always-on supervisor/judge Deployment + Service
+├── workers.yaml                 # policy ConfigMap + coder-worker Job (spawn mechanism)
+└── secrets.yaml                 # OpenAI key (never hardcoded)
+monitoring/
+├── namespace.yaml               # Namespace 'monitoring'
+├── node-exporter.yaml           # host metrics DaemonSet → central Prometheus (TrueNAS)
+├── idrac.yaml                   # iDRAC/PERC Redfish exporter + ConfigMap (transport param.)
+└── secrets.yaml                 # iDRAC admin credentials (never hardcoded)
 ```
 
 ### 4.1 GPU scheduling (namespace `gpu`)
@@ -157,6 +167,81 @@ PVs); NVMe is only worth it for the tiny metadata/log dirs.
 
 ---
 
+## 4.4 Overnight agent stack (namespace `orchestrator`)
+
+[`orchestrator/`](orchestrator/) is the always-on agent orchestration runtime.
+It is a **supervisor / judge** that spawns **coder** worker pods on demand. It
+sits alongside — and is independent of — the `llm` inference stack:
+
+| Kind | File | Namespace | Role |
+| :--- | :--- | :--- | :--- |
+| `Namespace` | `orchestrator/namespace.yaml` | `orchestrator` | Isolates the agent runtime. |
+| `Deployment` | `orchestrator/supervisor.yaml` | `orchestrator` | **Always-on** supervisor + judge (the agent loop). |
+| `ConfigMap` | `orchestrator/workers.yaml` | `orchestrator` | Policy knobs (max-iterations, task-wait, worker count). |
+| `Job` | `orchestrator/workers.yaml` | `orchestrator` | **Worker spawn** — N parallel coder agents per task. |
+| `Secret` | `orchestrator/secrets.yaml` | `orchestrator` | OpenAI key for the judge (never hardcoded). |
+
+### 4.4.1 How the pieces relate to the inference stack
+
+- **Supervisor (`orchestrator/supervisor.yaml`)** — an always-on Deployment that
+  runs the LangGraph supervisor/judge loop. It is **CPU-only**: it talks to the
+  judge and coder brains over the network (the `llm` servers), it does not hold
+  a GPU. Resources are capped (~2-3 cores, 4-6 GiB) so it never starves the GPU
+  servers.
+- **Workers (`orchestrator/workers.yaml`)** — the **spawn mechanism**. The
+  supervisor triggers a `Job` that runs N parallel **coder** agents (pure CPU,
+  no GPU). `N` (the worker count) is a policy knob in the ConfigMap so it can be
+  tuned without editing the manifest. This is how the overnight agent gets work
+  done: the supervisor plans and judges, the workers execute.
+- **The judge brain** — the supervisor's judge tool-calling agent is served by
+  the **`llm-server-gpu1`** pod in the `llm` namespace (over `https://llm.local/
+  v1`, OpenAI-compatible). The coder brain uses `llm-server-gpu0`.
+
+### 4.4.2 Overnight workflow
+
+1. The supervisor is always resident (idle, listening for a task).
+2. A task arrives (webhook / cron / user). The supervisor runs the LangGraph
+   loop: plan → spawn coder workers → judge the result → retry / escalate,
+   bounded by `max-iterations` (Open Question O5, default 8).
+3. Workers execute code, emit output; the judge approves/rejects.
+4. The supervisor opens a PR (or emits an event) and returns to idle.
+5. Node-exporter + iDRAC telemetry report health to central Prometheus
+   (TrueNAS), so overnight runs are monitored (§4.5).
+
+### 4.4.3 Telemetry (namespace `monitoring`)
+
+[`monitoring/`](monitoring/) reports hardware health to the **central
+Prometheus on TrueNAS** (not a second Prometheus on the box):
+
+| Kind | File | Namespace | Role |
+| :--- | :--- | :--- | :--- |
+| `Namespace` | `monitoring/node-exporter.yaml` | `monitoring` | Isolates the telemetry stack. |
+| `DaemonSet` | `monitoring/node-exporter.yaml` | `monitoring` | Host CPU/RAM/GPU/disk metrics → Prometheus. |
+| `DaemonSet` | `monitoring/idrac.yaml` | `monitoring` | iDRAC/PERC hardware health (Redfish or IPMI). |
+| `ConfigMap` | `monitoring/idrac.yaml` | `monitoring` | iDRAC transport + target (parameterized). |
+| `Secret` | `monitoring/secrets.yaml` | `monitoring` | iDRAC admin credentials (never hardcoded). |
+
+- **node-exporter** — one DaemonSet process per node exposing `/proc` metrics on
+  `:9100`. It does **not** run a separate Prometheus; it scrapes into the
+  existing central Prometheus on TrueNAS (`http://truenas.utopiklab.lan:9090`).
+  CPU/RAM limited (~1 core, ~1 GiB).
+- **iDRAC exporter** — `grafana/redfish-exporter` reads the iDRAC/PERC
+  (H730P/H740P) hardware health (temp, fan, power, SMART) via **Redfish
+  Remote Write** (recommended for iDRAC 9.5+/10.5+) and forwards it to the same
+  central Prometheus. The iDRAC **version → transport choice** (Redfish vs IPMI)
+  is **parameterized** in the ConfigMap (Open Question O3), so the manifest is
+  valid regardless of firmware.
+
+### 4.4.4 Deploying the new namespaces
+
+`inference/deploy.sh` now applies the orchestrator and monitoring stacks
+alongside the inference stack (see §5.1). The new namespaces are:
+
+- **`orchestrator`** — supervisor, workers, secrets.
+- **`monitoring`** — node-exporter, iDRAC exporter, secrets.
+
+---
+
 ## 5. Operating the stack
 
 ```bash
@@ -188,6 +273,14 @@ curl -s https://llm.local/v1/chat/completions \
 | `nvidia-device-plugin.yaml` | DaemonSet, CRDs, RBAC | `gpu` | image `nvcr.io/nvidia/k8s-device-plugin:2.18.0` |
 | `models-pvc.yaml` | PVC | `llm` | `k8s-sc-ssd-replicated`, 50Gi |
 | `deployment.yaml` | ConfigMap ×2, Deployment ×2, Service ×1, Ingress | `llm` | `nvidia.com/gpu:1`, `memory:23Gi`, port 8000 |
+| `orchestrator/namespace.yaml` | Namespace | `orchestrator` | |
+| `orchestrator/supervisor.yaml` | Deployment, Service | `orchestrator` | CPU-only, limits cpu `2.5`/mem `5Gi`, port 8000 |
+| `orchestrator/workers.yaml` | ConfigMap, Job | `orchestrator` | limits cpu `6.5`/mem `7Gi`, parallelism `1` |
+| `orchestrator/secrets.yaml` | Secret | `orchestrator` | `orchestrator-secrets` (OpenAI key) |
+| `monitoring/namespace.yaml` | Namespace | `monitoring` | |
+| `monitoring/node-exporter.yaml` | Namespace, DaemonSet, Service, SA | `monitoring` | hostNetwork, limits cpu `1`/mem `1Gi`, :9100 |
+| `monitoring/idrac.yaml` | ConfigMap, DaemonSet, Service, SA | `monitoring` | transport `redfish`, limits cpu `200m`/mem `256Mi` |
+| `monitoring/secrets.yaml` | Secret | `monitoring` | `idrac-credentials` (iDRAC admin) |
 
 ---
 

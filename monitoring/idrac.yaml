@@ -1,0 +1,169 @@
+# ---------------------------------------------------------------------------
+# iDRAC telemetry -> central Prometheus.
+# ---------------------------------------------------------------------------
+#
+# The iDRAC version on k8s-node01 is STILL-OPEN (Open Question O3), so the
+# transport is PARAMETERIZED and not hardcoded:
+#
+#   iDRAC 9.5+ / 10.5+  ->  Redfish Remote Write  (recommended, richer data)
+#   older iDRAC         ->  IPMI               (ipmi_exporter)
+#
+# HOW TO CHOOSE:
+#   1. Confirm the iDRAC version on k8s-node01 (iDRAC web UI / `ipmitool`).
+#   2. Set the `TRANSPORT` value in this ConfigMap to `redfish` or `ipmi`.
+#   3. Edit the container image / args accordingly (the DaemonSet picks the
+#      transport from the ConfigMap value).
+#
+# Default below assumes `redfish` (matches the design doc's recommendation
+# for 9.5+/10.5+). Flip it to `ipmi` if the box runs older firmware.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: idrac-config
+  namespace: monitoring
+  labels:
+    app: idrac-telemetry
+data:
+  # Redfish vs IPMI — pick based on the iDRAC version (O3).
+  transport: "redfish"
+  # iDRAC management IP (the PERC controller is exposed via iDRAC).
+  idrac-ip: "192.168.1.100"
+  # iDRAC admin credentials (redfish-exporter reads these from env, injected
+  # here without hardcoding the secret — rotate via the secret reference).
+  idrac-user: "Administrator"
+  idrac-password-secret: "idrac-credentials"
+  idrac-password-key: "password"
+  # Central Prometheus endpoint (same host as node-exporter).
+  prometheus-url: "http://truenas.utopiklab.lan:9090"
+  # Redfish API root on the iDRAC (default for Dell chassis).
+  idrac-api-root: "/redfish/v1/"
+  # Chassis / system to report on.
+  chassis-id: "Chassis.1"
+
+---
+# ---------------------------------------------------------------------------
+# iDRAC Redfish Remote Write exporter (Dell chassis).
+# ---------------------------------------------------------------------------
+#
+# `grafana/redfish-exporter` exposes the iDRAC/Redfish system metrics over an
+# HTTP endpoint; Prometheus scrapes it and forwards to the central Prometheus.
+# Secrets are injected from a Secret (no hardcoded credentials).
+#
+# The image is a STILL-OPEN image pin (O8-adjacent); keep `:latest` and bump
+# after an autonomous build cycle, or pin to a specific tag.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: idrac-redfish-exporter
+  namespace: monitoring
+  labels:
+    app: idrac-telemetry
+    transport: redfish
+spec:
+  selector:
+    matchLabels:
+      name: idrac-redfish-exporter
+  template:
+    metadata:
+      labels:
+        name: idrac-redfish-exporter
+    spec:
+      hostNetwork: true
+      hostPID: true
+      hostIPC: true
+      serviceAccountName: idrac-redfish-exporter
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: idrac-redfish-exporter
+          image: "${IMAGE:-grafana/redfish-exporter:latest}"
+          imagePullPolicy: IfNotPresent
+          args:
+            - --prometheus-url
+            - "${PROMETHEUS_URL:-http://truenas.utopiklab.lan:9090}"
+            - --IDRAC_IP
+            - "${IDRAC_IP:-}"
+            - --IDRAC_IDRAC_USER
+            - "${IDRAC_IDRAC_USER:-}"
+            - --IDRAC_IDRAC_PASSWORD
+            - "${IDRAC_IDRAC_PASSWORD:-}"
+            - --IDRAC_IDRAC_API_ROOT
+            - "${IDRAC_IDRAC_API_ROOT:-/redfish/v1/}"
+            - --IDRAC_IDRAC_CHASSIS_ID
+            - "${IDRAC_IDRAC_CHASSIS_ID:-Chassis.1}"
+            - --log-level
+            - info
+          env:
+            # Credentials are injected from a Secret — never hardcoded.
+            - name: IDRAC_IP
+              valueFrom:
+                configMapKeyRef:
+                  name: idrac-config
+                  key: idrac-ip
+            - name: IDRAC_IDRAC_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: idrac-config
+                  key: idrac-user
+            - name: IDRAC_IDRAC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: "${IDRAC_SECRET_NAME:-idrac-credentials}"
+                  key: "${IDRAC_SECRET_KEY:-password}"
+            - name: IDRAC_IDRAC_API_ROOT
+              valueFrom:
+                configMapKeyRef:
+                  name: idrac-config
+                  key: idrac-api-root
+            - name: IDRAC_IDRAC_CHASSIS_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: idrac-config
+                  key: chassis-id
+            - name: PROMETHEUS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: idrac-config
+                  key: prometheus-url
+          resources:
+            requests:
+              cpu: 50m
+              memory: 100Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          ports:
+            - name: metrics
+              containerPort: 8080
+      volumes:
+        - name: certs
+          hostPath:
+            path: /etc/ssl/certs
+            type: Directory
+
+---
+# Service for the Redfish exporter.
+apiVersion: v1
+kind: Service
+metadata:
+  name: idrac-redfish-exporter
+  namespace: monitoring
+  labels:
+    app: idrac-telemetry
+spec:
+  selector:
+    name: idrac-redfish-exporter
+  ports:
+    - name: metrics
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+
+---
+# ServiceAccount for the iDRAC exporter.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: idrac-redfish-exporter
+  namespace: monitoring

@@ -1,0 +1,15 @@
+# Namespace for the LangGraph orchestrator (the overnight AI-agent supervisor).
+#
+# The `orchestrator` namespace holds two kinds of workload:
+#   - the always-on `orchestrator` Deployment (the LangGraph supervisor/judge
+#     runtime with tool-calling), which is CPU-only, and
+#   - the on-demand worker pods (coder agents) that the supervisor spawns.
+#
+# Nothing here touches a GPU — the coder/judge models live on the llama.cpp
+# servers in the `llm` namespace and are reached over the network.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orchestrator
+  labels:
+    app: orchestrator

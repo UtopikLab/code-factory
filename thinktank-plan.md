@@ -1,11 +1,12 @@
 # Thinktank Planning Document — AI Agent Orchestration on k8s-node01
 
-**Status:** `WIP — DO NOT BUILD YET` · **For user validation** · **Date:** 2026-10-09
+**Status:** `BUILDING` · **For user validation** · **Date:** 2026-10-10
 
-> This is a **work-in-progress design document**, not final documentation. Every
-> decision below is tagged **`CONFIRMED`** (go-ahead to build) or **`STILL-OPEN`**
-> (needs your sign-off or a data point before we build). **Do not start building
-> anything until this doc has been reviewed and approved.**
+> This document started life as a WIP design that needed your sign-off. It has now
+> been **approved and the manifests are being built** (`orchestrator/`, `monitoring/`,
+> and the `inference/deploy.sh` wiring). The remaining `STILL-OPEN` items are tracked
+> in §8 and are **parameterized** in the manifests (env / ConfigMap) so policy can
+> change without editing the specs.
 
 **One-line summary:** Turn `k8s-node01` into an always-on, autonomous AI software
 factory — a Qwen2.5 **supervisor/judge** on P40-1 orchestrates Qwen2.5 **coder

@@ -1,0 +1,167 @@
+# ---------------------------------------------------------------------------
+# Worker pods (coder agents).
+# ---------------------------------------------------------------------------
+#
+# The supervisor (always-on `orchestrator` Deployment) spawns these on demand
+# to run coder agents — editing / running code. They are pure CPU, no GPU.
+#
+# Spawn mechanism (design point, Open Question O6):
+#   - The simplest correct model is a `Job` that the supervisor triggers
+#     (via a webhook / in-cluster call) with a configurable parallelism `N`.
+#     Each parallel pod is one coder agent. They run for minutes, emit an
+#     output, and are then garbage-collected.
+#   - `N` (the worker count) is a STILL-OPEN policy knob; it is parameterized
+#     here via the `spec.template.spec.parallelism` field and the
+#     `orchestrator-config` ConfigMap so it can be changed without editing this
+#     manifest.
+#
+# Resource limits fit the budget (~6-7 cores, 6-8 GiB per worker). Because the
+# agents are `limits`-capped and the node has 80 cores, a small fleet never
+# steals from the inference GPUs. Do not exceed the ~10-core combined budget
+# for the agent fleet.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orchestrator-config
+  namespace: orchestrator
+  labels:
+    app: orchestrator
+data:
+  # Policy knobs for the overnight agent. Changing these does not require
+  # editing the Deployment — the supervisor reads them at runtime.
+  max-iterations: "8"          # O5 — bound the retry budget / overnight runtime
+  task-wait-seconds: "30"      # how long the idle supervisor waits for a task
+  loop-state-dir: "/data/loop-state"
+---
+# ---------------------------------------------------------------------------
+# Worker Job: a single spawn of N coder agents (parallel).
+# ---------------------------------------------------------------------------
+#
+# Apply this to create the spawn template. The supervisor drives it on demand.
+# `parallelism` = number of coder agents spawned for one task. It is
+# intentionally small (parameterized via the ConfigMap `max-workers` below) so
+# the combined CPU footprint stays well inside the ~10-core budget.
+#
+# NOTE: `parallelism` is set to 1 here by default. To make the supervisor
+# spawn N agents, set the `max-workers` value in this ConfigMap and either:
+#   - edit this field, or
+#   - patch the job template from the supervisor runtime:
+#       kubectl patch job coder-workers -n orchestrator \
+#         -p '{"spec":{"template":{"spec":{"parallelism": <N>}}}}'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: coder-workers
+  namespace: orchestrator
+  labels:
+    app: orchestrator
+    component: worker
+spec:
+  # BackoffLimit 0 => the Job runs once for the task and completes (success or
+  # failure) without retrying; the supervisor decides whether to loop.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+        component: worker
+    spec:
+      # --- Spawn N parallel coder agents. N is a policy knob (see ConfigMap). ---
+      # Defaults to 1 agent here; raise max-workers in orchestrator-config to
+      # allow the supervisor to spawn a burst of N parallel workers.
+      parallelism: 1
+      completions: 1
+      restartPolicy: Never
+      # Pure CPU pod — no GPU. Coder agents only edit / run code.
+      containers:
+        - name: coder-worker
+          image: "${IMAGE:-ghcr.io/autonomous/langgraph-orchestrator:latest}"
+          imagePullPolicy: IfNotPresent
+          # Each agent runs the LangGraph coder tool-calling loop for one
+          # sub-task and emits an output. The command is parameterized in the
+          # README (task / tool / work-dir are injected by the supervisor).
+          command: ["/bin/sh", "-c"]
+          args:
+            - exec
+            - python3
+            - -m
+            - langgraph.cli
+            - serve
+            - --mode
+            - coder
+            - --state-dir
+            - /data/loop-state
+            - --judge-url
+            - "${JUDGE_URL:-https://llm.local/v1}"
+            - --judge-model
+            - "${JUDGE_MODEL:-qwen2.5-<judge>@64k}"
+            - --openai-key
+            - "${OPENAI_API_KEY:-}"
+            - --task
+            - "${TASK:-}"
+          # CPU/RAM limits fit the budget (~6-7 cores, 6-8 GiB). These are
+          # LIMITS: the scheduler never gives the agents more than this, so a
+          # burst of workers cannot steal CPU/RAM from the inference GPUs.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 3Gi
+            limits:
+              cpu: "6.5"
+              memory: 7Gi
+          env:
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-secrets
+                  key: openai-api-key
+            - name: JUDGE_URL
+              value: "${JUDGE_URL:-https://llm.local/v1}"
+            - name: JUDGE_MODEL
+              value: "${JUDGE_MODEL:-qwen2.5-<judge>@64k}"
+            - name: TASK
+              value: "${TASK:-}"
+            - name: WORK_DIR
+              value: "${WORK_DIR:-/workspace}"
+            - name: LOOP_STATE_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: orchestrator-config
+                  key: loop-state-dir
+          volumeMounts:
+            - name: loop-state
+              mountPath: /data/loop-state
+              mountPropagation: None
+            - name: workspace
+              mountPath: /workspace
+          readinessProbe:
+            exec:
+              command: [sh, -c, 'pgrep -f langgraph >/dev/null 2>&1 || exit 1']
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: [sh, -c, 'pgrep -f langgraph >/dev/null 2>&1 || exit 1']
+            initialDelaySeconds: 30
+            periodSeconds: 15
+      # Workspace for the agent's working files (scratch, not weights).
+      volumes:
+        - name: loop-state
+          emptyDir: {}
+        - name: workspace
+          emptyDir: {}
+      # Keep the combined CPU footprint modest: with parallelism=1 this is one
+      # 6.5-core-capped agent. Raise parallelism carefully to stay within the
+      # ~10-core / 12-15 GiB agent budget.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values: ["orchestrator"]
+                topologyKey: kubernetes.io/hostname

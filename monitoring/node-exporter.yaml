@@ -1,0 +1,136 @@
+# ---------------------------------------------------------------------------
+# Monitoring: node-exporter DaemonSet -> central Prometheus (TrueNAS).
+# ---------------------------------------------------------------------------
+#
+# Exports whole-box CPU / RAM / GPU / disk metrics to the EXISTING central
+# Prometheus on TrueNAS (NOT a second Prometheus on the box). The Prometheus
+# endpoint and the iDRAC transport are parameterized (env / ConfigMap) so the
+# manifest is valid regardless of the iDRAC version — see iDRAC.yaml for the
+# Redfish-vs-IPMI choice.
+#
+# CPU/RAM limited (~1 core, ~1 GiB) per the budget table.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app: monitoring
+
+---
+# ---------------------------------------------------------------------------
+# node-exporter DaemonSet.
+# ---------------------------------------------------------------------------
+#
+# One process per node (k8s-node01) exposing the host's /proc metrics via
+# text exposition on :9100. Prometheus scrapes it (or it Remote-Write's). The
+# scrape endpoint URL and the central Prometheus endpoint are injected as env
+# vars so nothing is hardcoded.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: monitoring
+  labels:
+    app: node-exporter
+spec:
+  selector:
+    matchLabels:
+      name: node-exporter
+  template:
+    metadata:
+      labels:
+        name: node-exporter
+    spec:
+      hostNetwork: true
+      hostPID: true
+      hostIPC: true
+      serviceAccountName: node-exporter
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: node-exporter
+          image: "${IMAGE:-prom/node-exporter:v1.9.1}"
+          imagePullPolicy: IfNotPresent
+          # hostNetwork lets us reach the node's own /proc and the Prometheus
+          # scrape endpoint on the host network namespace.
+          args:
+            - --path.procfs=/host/proc/procfs
+            - --path.sysfs=/host/sys/sysfs
+            - --path.rootfs=/host/root/rootfs
+          env:
+            # Where Prometheus scrapes (and where the node advertises itself).
+            # Defaults point at the central Prometheus host on :9100; override
+            # for a different topology.
+            - name: PROMETHEUS_SCRAPE_PORT
+              value: "9100"
+            - name: CENTRAL_PROMETHEUS_URL
+              value: "http://truenas.utopiklab.lan:9090"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 200Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            privileged: true
+          ports:
+            # Expose the metrics endpoint on the host network so Prometheus can
+            # scrape it. (Replace the hostPort with an in-cluster Service if
+            # hostPort is undesirable.)
+            - name: metrics
+              containerPort: 9100
+              hostPort: 9100
+          volumeMounts:
+            - name: proc
+              mountPath: /host/proc/procfs
+              readOnly: true
+            - name: sys
+              mountPath: /host/sys/sysfs
+              readOnly: true
+            - name: root
+              mountPath: /host/root/rootfs
+              readOnly: true
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: root
+          hostPath:
+            path: /
+            type: Directory
+
+---
+# Service for node-exporter (used if scraping goes through an in-cluster path).
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-exporter
+  namespace: monitoring
+  labels:
+    app: node-exporter
+spec:
+  selector:
+    name: node-exporter
+  ports:
+    - name: metrics
+      protocol: TCP
+      port: 9100
+      targetPort: 9100
+
+---
+# ServiceAccount for node-exporter.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-exporter
+  namespace: monitoring
