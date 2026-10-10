@@ -1,0 +1,17 @@
+# Python virtual environments
+.venv/
+*.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS / editor
+.DS_Store
+Thumbs.db
+
+# Local caches / scratch
+*.log
+.cache/
+.pytest_cache/
