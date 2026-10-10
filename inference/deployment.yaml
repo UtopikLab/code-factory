@@ -1,0 +1,275 @@
+# llama.cpp OpenAI-compatible serving stack for k8s-node01.
+#
+# Two GPU-bound server pods, one per Tesla P40:
+#   - llm-server-gpu0 : Qwen2.5-14B-Instruct-AWQ (~9 GB @4-bit) on GPU 0
+#   - llm-server-gpu1 : Qwen2.5-7B-Instruct-AWQ  (~4 GB @4-bit) on GPU 1
+#
+# Each pod runs the llama.cpp server with the OpenAI-compatible API enabled.
+# The exact per-model CLI arguments are stored as ConfigMaps (mounted at
+# /etc/llama-server-args) so they can be edited without touching the Deployment.
+
+---
+# ---------------------------------------------------------------------------
+# Per-GPU server argument ConfigMaps.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llama-server-args-gpu0
+  namespace: llm
+data:
+  args.txt: |
+    --model-dir /models/checkpoints/qwen2.5-14b-instruct-awq
+    --model-format awq
+    --model-name qwen2.5-14b-instruct-awq
+    --ctx-size 4096
+    --flash-attn
+    --main-args tensor-type=f8_e4m3
+    --main-args rope-freq-base=500000.0
+    --main-args rope-freq-scale=1.0
+    --port 8000
+    --host 0.0.0.0
+    --keep-ctx 0
+    --no-display
+    --override-gguf-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llama-server-args-gpu1
+  namespace: llm
+data:
+  args.txt: |
+    --model-dir /models/checkpoints/qwen2.5-7b-instruct-awq
+    --model-format awq
+    --model-name qwen2.5-7b-instruct-awq
+    --ctx-size 4096
+    --flash-attn
+    --main-args tensor-type=f8_e4m3
+    --main-args rope-freq-base=500000.0
+    --main-args rope-freq-scale=1.0
+    --port 8000
+    --host 0.0.0.0
+    --keep-ctx 0
+    --no-display
+    --override-gguf-config
+
+---
+# ---------------------------------------------------------------------------
+# Storage: weights on the replicated SSD class (see models-pvc.yaml).
+# (The llm-models PVC is defined once in models-pvc.yaml; applying both
+#  files together must not re-declare it.)
+
+---
+# ---------------------------------------------------------------------------
+# GPU 0 server: Qwen2.5-14B-Instruct-AWQ
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-server-gpu0
+  namespace: llm
+  labels:
+    app: llm-server
+    gpu: "0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-server
+      gpu: "0"
+  template:
+    metadata:
+      labels:
+        app: llm-server
+        gpu: "0"
+      annotations:
+        # Pin this pod to the P40 at Bus-Id 0000:AF:00.0 (/dev/nvidia0).
+        nvidia.com/gpu-device-id: "0"
+    spec:
+      # Single-node cluster: spread one pod per GPU so both cards are used.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values: ["llm-server"]
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: llama-server
+          image: ghcr.io/ggerganov/llama.cpp:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - /etc/llama-server-args/args.txt
+          volumeMounts:
+            - name: args
+              mountPath: /etc/llama-server-args
+              readOnly: true
+            - name: models
+              mountPath: /models
+          # We ask for the full card: the P40 idles at 0%, and a 14B/4-bit model
+          # (~9 GB) plus KV cache needs most of the 23 GB. Requesting the full
+          # 23Gi stops the scheduler from packing another GPU-bound pod onto the
+          # same node (there is none anyway, but it prevents oversubscription if
+          # the cluster grows).
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+              memory: 23Gi
+            limits:
+              nvidia.com/gpu: "1"
+              memory: 23Gi
+          securityContext:
+            capabilities:
+              - all
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+
+---
+# ---------------------------------------------------------------------------
+# GPU 1 server: Qwen2.5-7B-Instruct-AWQ
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-server-gpu1
+  namespace: llm
+  labels:
+    app: llm-server
+    gpu: "1"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-server
+      gpu: "1"
+  template:
+    metadata:
+      labels:
+        app: llm-server
+        gpu: "1"
+      annotations:
+        # Pin this pod to the P40 at Bus-Id 0000:D8:00.0 (/dev/nvidia1).
+        nvidia.com/gpu-device-id: "1"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values: ["llm-server"]
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: llama-server
+          image: ghcr.io/ggerganov/llama.cpp:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - /etc/llama-server-args/args.txt
+          volumeMounts:
+            - name: args
+              mountPath: /etc/llama-server-args
+              readOnly: true
+            - name: models
+              mountPath: /models
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+              memory: 23Gi
+            limits:
+              nvidia.com/gpu: "1"
+              memory: 23Gi
+          securityContext:
+            capabilities:
+              - all
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+
+---
+# ---------------------------------------------------------------------------
+# Namespace.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm
+  labels:
+    app: llm-server
+
+---
+# ---------------------------------------------------------------------------
+# Headless Service: the two servers share the same port (8000) per-pod; a
+# router picks one model. Kept simple: one round-robin Service.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-server
+  namespace: llm
+spec:
+  selector:
+    app: llm-server
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000
+      targetPort: 8000
+
+---
+# ---------------------------------------------------------------------------
+# OpenAI-compatible endpoint exposed via the K3s default Traefik Ingress.
+#   GET  https://llm.local/v1/models
+#   POST https://llm.local/v1/chat/completions
+#   POST https://llm.local/v1/completions
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llm-ingress
+  namespace: llm
+  annotations:
+    # Traefik (shipped by K3s) — swap for your ingress-controller as needed.
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default@kubernetes/tcp-security
+    # Route every /v1/* path to the llm-server Service (round-robin between
+    # the two model pods).
+    traefik.ingress.kubernetes.io/rule: Host:`llm.local` && PathPrefix(`/v1`)
+    traefik.ingress.kubernetes.io/service.method: ANY
+spec:
+  rules:
+    - host: llm.local
+      http:
+        paths:
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: llm-server
+                namespace: llm

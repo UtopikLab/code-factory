@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-server-gpu0
+  namespace: llm
+  labels:
+    app: llm-server
+    gpu: '0'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-server
+      gpu: '0'
+  template:
+    metadata:
+      labels:
+        app: llm-server
+        gpu: '0'
+      annotations:
+        nvidia.com/gpu-device-id: '0'
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - llm-server
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: llama-server
+        image: ghcr.io/ggerganov/llama.cpp:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - /etc/llama-server-args/args.txt
+        volumeMounts:
+        - name: args
+          mountPath: /etc/llama-server-args
+          readOnly: true
+        - name: models
+          mountPath: /models
+        volumes:
+        - name: args
+          configMap:
+            name: llama-server-args-gpu0
+        - name: models
+          persistentVolumeClaim:
+            claimName: llm-models
+        resources:
+          requests:
+            nvidia.com/gpu: '1'
+            memory: 23Gi
+          limits:
+            nvidia.com/gpu: '1'
+            memory: 23Gi
+        securityContext:
+          capabilities:
+            add:
+            - all
+        readinessProbe:
+          httpGet:
+            path: /v1/models
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /v1/models
+            port: 8000
+          initialDelaySeconds: 20
+          periodSeconds: 30

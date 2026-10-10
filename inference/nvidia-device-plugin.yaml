@@ -1,0 +1,156 @@
+# NVIDIA GPU device-plugin for k8s-node01 (2x Tesla P40).
+#
+# Runs on the single-node K3s / containerd host and exposes the two P40s as
+# `nvidia.com/gpu` resources to the Kubernetes scheduler. No NVIDIA GPU Operator
+# is required (it is heavier and unnecessary on a single bare-metal node).
+#
+# The two cards are found by nvidia-smi as:
+#   GPU 0  Tesla P40  Bus-Id 0000:AF:00.0   (/dev/nvidia0)
+#   GPU 1  Tesla P40  Bus-Id 0000:D8:00.0   (/dev/nvidia1)
+
+---
+# Namespace + RBAC for the device-plugin.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nvidia-gpu-device-plugin:role
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups:
+      - gpu.nvidia.com
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups:
+      - gpu.nvidia.com
+    resources: ["nodes/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups:
+      - gpu.nvidia.com
+      - gpu.nvidia.com/metrics
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups:
+      - gpu.nvidia.com
+    resources: ["device-plugins"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups:
+      - gpu.nvidia.com
+      - gpu.nvidia.com/metrics
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "update", "patch", "create", "delete"]
+  - apiGroups:
+      - gpu.nvidia.com
+    resources: ["device-plugin-mirror"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nvidia-gpu-device-plugin:clusterrolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nvidia-gpu-device-plugin:role
+subjects:
+  - kind: ServiceAccount
+    name: nvidia-gpu-device-plugin:serviceaccount
+    namespace: gpu
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nvidia-gpu-device-plugin:serviceaccount
+  namespace: gpu
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin
+  namespace: gpu
+  labels:
+    app: nvidia-device-plugin
+spec:
+  selector:
+    matchLabels:
+      name: nvidia-device-plugin
+  template:
+    metadata:
+      labels:
+        name: nvidia-device-plugin
+    spec:
+      serviceAccountName: nvidia-gpu-device-plugin:serviceaccount
+      hostNetwork: true
+      hostIPC: true
+      hostPID: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: nvidia-device-plugin-daemonset
+          image: nvcr.io/nvidia/k8s-device-plugin:2.18.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 6Mi
+          volumeMounts:
+            - name: device-dir
+              mountPath: /var/lib/kubelet
+            - name: device-plugin-dir
+              mountPath: /var/lib/kubelet/device-plugins
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - >
+                    sleep 10
+      volumes:
+        - name: device-dir
+          hostPath:
+            path: /dev
+            type: DirectoryOrCreate
+        - name: device-plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: DirectoryOrCreate
+---
+# Node problem detector: surfaces GPU/hardware faults on the node status.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-node-problem-detector
+  namespace: gpu
+  labels:
+    app: nvidia-node-problem-detector
+spec:
+  selector:
+    matchLabels:
+      name: nvidia-node-problem-detector
+  template:
+    metadata:
+      labels:
+        name: nvidia-node-problem-detector
+    spec:
+      serviceAccountName: nvidia-gpu-device-plugin:serviceaccount
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: nvidia-node-problem-detector
+          image: nvcr.io/nvidia/k8s-node-problem-detector:0.18.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 6Mi

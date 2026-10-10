@@ -1,0 +1,22 @@
+# Persistent volume claim for LLM model weights.
+#
+# Storage: k8s-sc-ssd-replicated  ->  /mnt/k8s-data-ssd
+#   (the default, 1.9 TB xfs RAID5 class from k8s-node01.md)
+#   Chosen because weights are large and rarely mutated -> durability > speed.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llm-models
+  namespace: llm
+  labels:
+    app: llm-server
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: k8s-sc-ssd-replicated
+  resources:
+    requests:
+      storage: 50Gi
+  # Bind to whichever node the server pods schedule on (single-node cluster).
+  # Use "WaitForFirstConsumer" semantics by keeping the class as-is; the
+  # replica count is 1 per GPU so there is no multi-node binding issue.
