@@ -1,12 +1,11 @@
 # Thinktank Planning Document — AI Agent Orchestration on k8s-node01
 
-**Status:** `BUILDING` · **For user validation** · **Date:** 2026-10-10
+**Status:** `APPROVED` · **For user validation** · **Date:** 2026-10-10
 
 > This document started life as a WIP design that needed your sign-off. It has now
-> been **approved and the manifests are being built** (`orchestrator/`, `monitoring/`,
-> and the `inference/deploy.sh` wiring). The remaining `STILL-OPEN` items are tracked
-> in §8 and are **parameterized** in the manifests (env / ConfigMap) so policy can
-> change without editing the specs.
+> been **approved** (content sign-off, 2026-10-10) but **is not being built**. The
+> remaining `STILL-OPEN` items are tracked in §8 and are **parameterized** in the
+> manifests (env / ConfigMap) so policy can change without editing the specs.
 
 **One-line summary:** Turn `k8s-node01` into an always-on, autonomous AI software
 factory — a Qwen2.5 **supervisor/judge** on P40-1 orchestrates Qwen2.5 **coder
@@ -39,7 +38,7 @@ All facts in this section are **verified on the actual hardware** of
 
 | Namespace | Component | Detail |
 | :--- | :--- | :--- |
-| `llm` | 2x llama.cpp OpenAI-compatible server pods | · P40-0: Qwen2.5-Coder-7B-Instruct-GGUF (coder brain) | · P40-1: Qwen2.5-Coder-7B-Instruct-GGUF (judge brain) |
+yes| `llm` | 2x llama.cpp OpenAI-compatible server pods | · P40-0: Qwen2.5-Coder-7B-Instruct-GGUF (coder brain) | · P40-1: Qwen2.5-Coder-7B-Instruct-GGUF (judge brain) |
 | `gpu` | NVIDIA device-plugin DaemonSet | GPU discovery; exposes `nvidia.com/gpu` |
 |  | Traefik Ingress | → `https://llm.local/v1/*` (OpenAI-compatible) |
 |  | Model weights | on PVC `/models/checkpoints/` (PVC `/mnt/k8s-data-ssd`) |
@@ -158,7 +157,7 @@ your sign-off or a data point before we build.
 | 3 | **Always-on vs scheduled** | ✅ CONFIRMED | **Always-on `Deployment`** (not CronJob). | Must be ready the instant a task arrives; survives restarts with persistent state. |
 | 4 | **Overnight agent & VS Code** | ✅ CONFIRMED | Overnight agent runs in `orchestrator` Deployment with its own tool-calling; **independent of VS Code / Copilot Chat**. | Copilot Chat is the interactive cloud design/chat path — separate and left untouched. Qwen doesn't drive VS Code tools in that setup, but that does **not** constrain the overnight agent. |
 | 5 | **Interactive chat model** | ✅ CONFIRMED | Keep the **desktop RTX 3080 10 GB** for interactive chat: **Ornith-1.5-9B-GGUF, 64K context**. | 3080 is faster (~20–40 tok/s for a 9B) than CPU and is the interactive path. 7–9B is the sweet spot for a 10 GB card — don't reach for 14B/16B. **Its 64K context is a desktop-interactive concern, unrelated to the overnight agent's context size.** |
-| 6 | **Monitoring** | ✅ CONFIRMED | Reuse **existing central Prometheus + Grafana** on TrueNAS. Add **node-exporter** (whole box) and **iDRAC telemetry** (Redfish Remote Write). | Do **not** add a second Prometheus/Grafana on the box. iDRAC 9.5+/10.5 → Redfish; older → IPMI. |
+| 6 | **Monitoring** | ✅ CONFIRMED | Reuse **existing central Prometheus + Grafana** on TrueNAS. Add **node-exporter** (whole box) and **iDRAC telemetry** (IPMI — iDRAC9 Enterprise 7.00.00.184, IPMI Version 2.0). | Do **not** add a second Prometheus/Grafana on the box. iDRAC9 Enterprise (IPMI 2.0) → IPMI path chosen; Redfish not used. |
 | 7 | **Resource budget** | ✅ CONFIRMED | Ample headroom; agents CPU/Ram limited by `limits` so they never steal from inference. GPU is the only hard constraint. | CPU 80 cores (orchestrator+workers ~10), RAM 91 GiB (inference holds ~9.4 GiB), 1.9 TB SSD. GPU P40s dedicated to inference/judge. |
 
 ### 3.1 The context-window question — re-evaluated
@@ -183,21 +182,19 @@ context window does the agent need for quality?" We can now explore **smaller
 models (7B–14B) at a modest context (8K–16K)** comfortably on a single P40, and
 free the VRAM that 64K + a large model would have consumed.
 
-> **RESOLVED (model):** the concrete candidate is **Qwen2.5-Coder-7B-Instruct-GGUF
-> at Q4_K_M quantization** (~**4.68 GB** at 32768 ctx, comfortably within one P40's
-> 23 GB). Both the coder and judge stay in the Qwen2.5-Coder family (judge =
-> Qwen2.5-Coder-7B). **Context window: re-evaluate** — the 32768 figure is a
-> *candidate*, not a final decision; a smaller window (8K–16K) also fits and frees
-> VRAM. **NOT YET CONFIRMED — do not lock to 32768 until validated on-device.**
-> The VRAM-fit constraint (§3.1) relaxes the moment we drop from 64K to a smaller
-> window, because smaller context + smaller model fits comfortably on one P40.
-> This **no longer gates** worker/supervisor development on a 64K-fit, since the
-> manifests ship `${IMAGE}` as a placeholder.
+> **RESOLVED (model + context):** the model is **Qwen2.5-Coder-7B-Instruct-GGUF at
+> Q4_K_M** (~4.68 GB, per O1/O2), and the **context window is locked at 32K
+> (32768)** for **both** the coder and judge brains. VRAM fit is **not** the
+> gating constraint — both 7B models fit comfortably on a single 23 GB P40 with ~18
+> GB spare, so 32K context is a free choice, not a candidate to be validated on
+> device. The judge stays in the Qwen2.5-Coder family (judge = Qwen2.5-Coder-7B).
+> The manifests ship `${IMAGE}` as a placeholder, so worker/supervisor development
+> is not gated on any particular context fit.
 
 ### 3.2 Model preferences (design constraints)
 
-- HF-hosted, **8K–32K** context (re-evaluated per the agent's actual needs, not
-  a fixed 64K default).
+- HF-hosted, **32K (32768)** context — **the chosen window** (locked; VRAM fit is
+  not the gate — both 7B models fit a single P40).
 - Qwen-compatible (so the judge stays in the same family as the coder).
 - Preference for HF-preferring quantizations.
 - Quality floor: "35B and less gives satisfying quality."
@@ -336,7 +333,7 @@ Namespace-by-namespace inventory of what each piece is. New components are marke
 | `orchestrator` | `orchestrator` Deployment | the LangGraph supervisor/judge runtime + tool-calling agent | CPU (0 GPU) | `[NEW]` |
 | `orchestrator` | worker pod(s) | coder agents driven by the supervisor (spawns on demand) | CPU (0 GPU) | `[NEW]` |
 | `monitoring` | `node-exporter` DaemonSet | whole-box CPU/RAM/GPU/disk metrics → central Prometheus | (host) | `[NEW]` |
-| `monitoring` | iDRAC Redfish Remote Write / exporter | PERC array, cache battery, SMART, temps, fans, power, events | (host mgmt) | `[NEW]` |
+| `monitoring` | iDRAC IPMI exporter / Grafana IPMI plugin (iDRAC9 Enterprise, IPMI v2.0) | PERC array, cache battery, SMART, temps, fans, power, events | (host mgmt) | `[NEW]` |
 | `trueNAS` | Prometheus + Grafana | central monitoring (existing) | — | `[EXISTING]` |
 
 > The judge brain (§5, `llm-server-gpu1`) is the **same llama.cpp server image**
@@ -424,14 +421,15 @@ One DaemonSet exporting whole-box metrics to the central Prometheus:
 - **GPU:** per-P40 utilization, VRAM used, power, temperature (if exposed).
 - **Disk:** `/mnt/k8s-data-ssd` + `/mnt/k8s-local-nvme` usage + I/O.
 
-### 7.2 iDRAC telemetry (Redfish Remote Write)
+### 7.2 iDRAC telemetry (IPMI — IPMI Version 2.0)
 
-Target controller: **PERC H730P / H740P**, exposed via **iDRAC**.
+Target controller: **PERC H730P / H740P**, exposed via **iDRAC9 Enterprise**
+(firmware **7.00.00.184**, hardware version **0.01**).
 
 | iDRAC version | Transport | What it exposes |
 | :--- | :--- | :--- |
-| **9.5+ / 10.5+** | **Redfish Remote Write** | PERC array state, cache battery health, drive faults, SMART, temps, fans, power, voltages, system events |
-| **older** | IPMI (`ipmi_exporter` or Grafana IPMI plugin) | same fields via IPMI dump |
+| **9 Enterprise** (firmware **7.00.00.184**, hw v**0.01**), IPMI v**2.0** | **IPMI** (`ipmi_exporter` or Grafana IPMI plugin) — **chosen on this node** | PERC array state, cache battery health, drive faults, SMART, temps, fans, power, voltages, system events |
+| 9.5+ / 10.5+ | Redfish Remote Write | same fields via Redfish (not used on this node) |
 
 **Grafana panels (design intent):**
 
@@ -444,8 +442,8 @@ Target controller: **PERC H730P / H740P**, exposed via **iDRAC**.
 
 ### 7.3 Open questions on monitoring
 
-- **iDRAC version check** — confirm 9.5+/10.5+ vs older to pick Redfish vs IPMI.
-- Which iDRAC transport the central Prometheus can receive (Remote Write vs IPMI).
+- **iDRAC version check — RESOLVED:** `k8s-node01` runs iDRAC9 Enterprise (firmware 7.00.00.184, IPMI Version 2.0) ⇒ IPMI path (see §8 O3).
+- Which iDRAC transport the central Prometheus can receive (Remote Write vs IPMI) — IPMI chosen.
 - Whether the existing Grafana has a suitable dashboard, or a new one is built.
 
 ---
@@ -454,38 +452,39 @@ Target controller: **PERC H730P / H740P**, exposed via **iDRAC**.
 
 | # | Question | Why it gates building | Status |
 | :--- | :--- | :--- | :--- |
-| O1 | **Coder model + context window** | Pick the coder model and its context window based on the agent's actual needs. **64K was never a requirement** (it came from the desktop RTX 3080 interactive-chat model). | **RESOLVED — Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M (~4.68 GB, fits one P40). Context window is a *candidate* (32768) to be validated on-device; a smaller window (8K–16K) also fits and frees VRAM — not yet locked.** |
-| O2 | **Judge/supervisor model + context window** | Same family as O1 for the judge (P40-1). Re-evaluated per the agent's needs, not held at 64K. | **RESOLVED — same Qwen2.5-Coder family (judge = Qwen2.5-Coder-7B), same VRAM fit (@ Q4_K_M on the P40). Context window a *candidate* to be tuned later.** |
-| O3 | **iDRAC version** | Redfish (9.5+/10.5+) vs IPMI (older) changes the whole monitoring ingest path. | **RESEARCHED — Redfish is too old on this node, so the IPMI path is used (monitoring ingest stays IPMI-based).** |
-| O4 | **Human gate policy** | Which PR trigger, reviewer, allowed branches, how the gate is enforced. | **CONFIRMED — human gate via Pull Request (open the agent's work as a PR for human review).** |
-| O5 | **Max loop iterations** | Bounds the retry budget / overnight runtime. | **CONFIRMED — 8 loop iterations.** |
-| O6 | **Worker count N** | Parallelism budget vs CPU `limits`. | **GUESSED — `N` workers (parallelism to be tuned vs the ~10-core CPU budget / CPU `limits`).** |
-| O7 | **Tool set for the overnight agent** | Which tools the autonomous agent may call (file ops, git, shell, kubectl, PR). | **GUESSED — the agent's tool set (file ops, git, shell, kubectl, PR) to be finalized.** |
-| O8 | **LangGraph runtime image / deps** | Confirm the runtime that hosts the supervisor + coder tool-calling. | **RESEARCHED — needs more details (runtime image + deps to be pinned; manifests keep `${IMAGE}` as a placeholder).** |
+| O1 | **Coder model + context window** | Pick the coder model and its context window based on the agent's actual needs. **64K was never a requirement** (it came from the desktop RTX 3080 interactive-chat model). | **RESOLVED — model Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M (~4.68 GB, fits one P40); context window locked at 32K (32768) for both brains. VRAM fit is not the gate — both 7B models fit a 23 GB P40 with ~18 GB spare. 32K is chosen, not a candidate to be validated on-device.** |
+| O2 | **Judge/supervisor model + context window** | Same family as O1 for the judge (P40-1). Re-evaluated per the agent's needs, not held at 64K. | **RESOLVED — same Qwen2.5-Coder family (judge = Qwen2.5-Coder-7B), same VRAM fit (@ Q4_K_M on the P40). Context window locked at 32K (32768), matching the coder.** |
+| O3 | **iDRAC version** | Redfish (9.5+/10.5+) vs IPMI (older) changes the whole monitoring ingest path. | **RESOLVED — `k8s-node01` runs **iDRAC9 Enterprise, firmware 7.00.00.184, hardware version 0.01, IPMI Version 2.0**. IPMI Version 2.0 ⇒ the **IPMI** path is chosen (NOT Redfish); monitoring ingest is IPMI-based via `ipmi_exporter` / Grafana IPMI plugin.** |
+| O4 | **Human gate policy** | Which PR trigger, reviewer, allowed branches, how the gate is enforced. | **CONFIRMED — human gate via Pull Request (open the agent's work as a PR for human review). Agents may use a **git worktree** if that is more efficient.** |
+| O5 | **Max loop iterations** | Bounds the retry budget / overnight runtime. | **CONFIRMED — 8 loop iterations (auto-tune if possible).** |
+| O6 | **Worker count N** | Parallelism budget vs CPU `limits`. | **CONFIRMED — auto-tune if possible (worker count N to be tuned vs the ~10-core CPU budget / CPU `limits`).** |
+| O7 | **Tool set for the overnight agent** | Which tools the autonomous agent may call (file ops, git, shell, kubectl, PR). | **RESOLVED — **minimal tools as possible**, with **specialized / role-based agents** as possible.** |
+| O8 | **LangGraph runtime image / deps** | Confirm the runtime that hosts the supervisor + coder tool-calling. | **STILL-OPEN (research needed) — the LangGraph runtime image + deps still need research (runtime image + deps to be pinned; manifests keep `${IMAGE}` as a placeholder).** |
 
-**Summary:** O1/O2 **resolved** — best-fit model is **Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M (~4.68 GB, fits comfortably on one 23 GB P40)**; the 32768 context is a *candidate* to be validated on-device (a smaller window 8K–16K also fits and frees VRAM — not yet locked). O3 researched — Redfish is too old on this node, so the **IPMI** monitoring path is used. O5 confirmed at **8 loop iterations**. O6 is a *guess* for worker count `N`. O7 is a *guess* for the overnight tool set. O8 needs more details (runtime image + deps). O4 confirmed — **human gate via PR**. Net: O1/O2/O3/O4/O5 are resolved, leaving only parameterized guesses (context window, `N`, tool set) and one research pass (O8). The manifests ship `${IMAGE}` as a placeholder, so worker/supervisor code can be developed against any model pick.
+**Summary:** O1/O2 **resolved** — model is **Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M (~4.68 GB, fits comfortably on one 23 GB P40)** and the context window is **locked at 32K (32768)** for both brains (VRAM fit is not the gate — both 7B models fit a P40 with ~18 GB spare). O3 resolved — `k8s-node01` runs **iDRAC9 Enterprise 7.00.00.184, IPMI Version 2.0**, so the **IPMI** monitoring path is chosen (not Redfish). O4 confirmed — **human gate via PR** (agents may use a git worktree if more efficient). O5 confirmed at **8 loop iterations (auto-tune if possible)**. O6 confirmed — **auto-tune if possible**. O7 resolved — **minimal tools, specialized/role-based agents**. O8 still needs research (LangGraph runtime image + deps). Net: O1–O7 resolved, leaving a single research pass (O8). The manifests ship `${IMAGE}` as a placeholder, so worker/supervisor code can be developed against the pinned model + 32K context.
 
 ---
 
 ## 9. Next steps (gated on your validation — DO NOT BUILD YET)
 
 1. **Review this document and approve it.** No building starts until you sign off.
-2. **Validate the context window** for the coder + judge models already chosen
-   (Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M) — resolves O1/O2. The 32768 window
-   is a *candidate* to be validated on-device; a smaller window (8K–16K) also fits
-   one P40 and frees VRAM. VRAM fit is **no longer the gate** (the 7B already fits
-   comfortably, with ~18 GB spare).
-3. **Confirm the iDRAC version** on `k8s-node01` (Redfish vs IPMI — resolves O3;
-   research indicates Redfish is too old → IPMI path).
+2. **Confirm the 32K (32768) context window** for the coder + judge models already
+   chosen (Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M) — resolves O1/O2. **32K is the
+   chosen window for both brains; VRAM fit is not the gate** (both 7B models fit a
+   single P40 with ~18 GB spare).
+3. **Confirm the iDRAC version** on `k8s-node01` — resolves O3: it runs **iDRAC9
+   Enterprise, firmware 7.00.00.184, IPMI Version 2.0**, so the **IPMI** path is
+   chosen (not Redfish).
 4. **Decide the human-gate policy** — PR trigger, reviewer, allowed branches (O4;
    confirmed: human gate via PR).
-5. **Set the loop parameters** — max iterations (O5; confirmed: 8) and worker
-   count `N` (O6; to be tuned vs the ~10-core CPU budget / CPU `limits`).
-6. **Enumerate the overnight agent's tool set** (O7; to be finalized) and pin
-   the LangGraph runtime image + deps (O8; needs more details).
+5. **Set the loop parameters** — max iterations (O5; confirmed: 8, auto-tune if
+   possible) and worker count `N` (O6; auto-tune if possible).
+6. **Finalize the overnight agent's tool set** (O7; resolved: minimal tools,
+   specialized/role-based agents) and research the LangGraph runtime image + deps
+   (O8; still needs research).
 7. **Approve the design.** Once signed off, proceed to build in the usual
    8h-design / 16h-autonomous-agent / 8h-validate cadence.
 
 ---
 
-*WIP — for validation only. Do not build until approved.*
+*APPROVED (2026-10-10) — for validation only. Not building.*

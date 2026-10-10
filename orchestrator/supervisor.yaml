@@ -32,7 +32,7 @@ spec:
     spec:
       containers:
         - name: orchestrator
-          image: "${IMAGE:-ghcr.io/autonomous/langgraph-orchestrator:latest}"
+          image: "${IMAGE:-ghcr.io/UtopikLab/langgraph-orchestrator:latest}"
           # Pull latest so the supervisor loop / tool-calling code stays current
           # after an autonomous build cycle; the tag can be pinned if desired.
           imagePullPolicy: IfNotPresent
@@ -43,7 +43,7 @@ spec:
           # orchestrator/supervisor-task-acceptor.py).
           command: ["/bin/sh", "-c"]
           args:
-            - sh -c 'mkdir -p /data/loop-state; python3 -m langgraph.cli serve --state-dir /data/loop-state --task-wait-seconds "${TASK_WAIT:-30}" --max-iterations "${MAX_ITERATIONS:-8}" --judge-url "${JUDGE_URL:-https://llm.local/v1}" --judge-model "${JUDGE_MODEL:-qwen2.5-<judge>@64k}" --openai-key "${OPENAI_API_KEY:-}" & echo $! > /var/run/langgraph.pid; exec python3 orchestrator/supervisor-task-acceptor.py --port 8000'
+            - sh -c 'mkdir -p /data/loop-state; python3 -m langgraph.cli serve --state-dir /data/loop-state --task-wait-seconds "${TASK_WAIT:-30}" --max-iterations "${MAX_ITERATIONS:-8}" --judge-url "${JUDGE_URL:-https://llm.local/v1}" --judge-model "${JUDGE_MODEL:-qwen2.5-<judge>@32k}" --openai-key "${OPENAI_API_KEY:-}" & echo $! > /var/run/langgraph.pid; exec python3 orchestrator/supervisor-task-acceptor.py --port 8000'
 
           # CPU/RAM limits fit the node budget (orchestrator ~2-3 cores, 4-6 GiB).
           resources:
@@ -117,7 +117,7 @@ spec:
                   key: github-token
             # Image reference for agent Jobs (overridable at deploy time).
             - name: IMAGE
-              value: "${IMAGE:-ghcr.io/autonomous/langgraph-orchestrator:latest}"
+              value: "${IMAGE:-ghcr.io/UtopikLab/langgraph-orchestrator:latest}"
           volumeMounts:
             - name: loop-state
               mountPath: /data/loop-state

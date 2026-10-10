@@ -37,7 +37,7 @@ data:
   # reach it over the network via Traefik; swap the host when the ingress
   # / VPN changes.
   judge-url: "https://llm.local/v1"
-  judge-model: "qwen2.5-coder-7b-instruct-q5-kn@64k"
+  judge-model: "qwen2.5-coder-7b-instruct-q5-kn@32k"
 ---
 # ---------------------------------------------------------------------------
 # Worker Job: a single spawn of N coder agents (parallel).
@@ -81,7 +81,7 @@ spec:
       # Pure CPU pod — no GPU. Coder agents only edit / run code.
       containers:
         - name: coder-worker
-          image: "${IMAGE:-ghcr.io/autonomous/langgraph-orchestrator:latest}"
+          image: "${IMAGE:-ghcr.io/UtopikLab/langgraph-orchestrator:latest}"
           imagePullPolicy: IfNotPresent
           # Each agent runs the LangGraph coder tool-calling loop for one
           # sub-task and emits an output. The command is parameterized in the
@@ -100,7 +100,7 @@ spec:
             - --judge-url
             - "${JUDGE_URL:-https://llm.local/v1}"
             - --judge-model
-            - "${JUDGE_MODEL:-qwen2.5-<judge>@64k}"
+            - "${JUDGE_MODEL:-qwen2.5-<judge>@32k}"
             - --openai-key
             - "${OPENAI_API_KEY:-}"
             - --task
@@ -124,7 +124,7 @@ spec:
             - name: JUDGE_URL
               value: "${JUDGE_URL:-https://llm.local/v1}"
             - name: JUDGE_MODEL
-              value: "${JUDGE_MODEL:-qwen2.5-<judge>@64k}"
+              value: "${JUDGE_MODEL:-qwen2.5-<judge>@32k}"
             - name: TASK
               value: "${TASK:-}"
             - name: WORK_DIR

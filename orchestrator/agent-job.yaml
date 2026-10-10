@@ -42,7 +42,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: orchestrator-agent
-          image: "${IMAGE:-ghcr.io/autonomous/langgraph-orchestrator:latest}"
+          image: "${IMAGE:-ghcr.io/UtopikLab/langgraph-orchestrator:latest}"
           imagePullPolicy: IfNotPresent
           # The drain mode consumes a single task (issue) to completion and
           # then exits — the supervisor re-uses the same long-running process
@@ -63,7 +63,7 @@ spec:
             - --judge-url
             - "${JUDGE_URL:-https://llm.local/v1}"
             - --judge-model
-            - "${JUDGE_MODEL:-qwen2.5-coder-7b-instruct-q5-kn@64k}"
+            - "${JUDGE_MODEL:-qwen2.5-coder-7b-instruct-q5-kn@32k}"
             - --openai-key
             - "${OPENAI_API_KEY:-}"
             - --work-dir
@@ -140,7 +140,7 @@ spec:
               command:
                 - sh
                 - -c
-                - 'pgrep -f langgraph >/dev/null 2>&1 || exit 1'
+                - "pgrep -f langgraph >/dev/null 2>&1 || exit 1"
             initialDelaySeconds: 15
             periodSeconds: 15
       volumes:

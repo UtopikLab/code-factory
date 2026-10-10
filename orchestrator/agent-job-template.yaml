@@ -64,8 +64,10 @@ spec:
             - "${ISSUE_URL:-}"
             - --judge-url
             - "${JUDGE_URL:-https://llm.local/v1}"
+            # Judge model: @32k default matches the O1/O2 locked 32768 context
+            # window for both brains (override via orchestrator-config).
             - --judge-model
-            - "${JUDGE_MODEL:-qwen2.5-coder-7b-instruct-q5-kn@64k}"
+            - "${JUDGE_MODEL:-qwen2.5-coder-7b-instruct-q5-kn@32k}"
             - --openai-key
             - "${OPENAI_API_KEY:-}"
             - --work-dir
