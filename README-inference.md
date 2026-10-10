@@ -179,7 +179,7 @@ sits alongside — and is independent of — the `llm` inference stack:
 | `Deployment` | `orchestrator/supervisor.yaml` | `orchestrator` | **Always-on** supervisor + judge (the agent loop). |
 | `ConfigMap` | `orchestrator/workers.yaml` | `orchestrator` | Policy knobs (max-iterations, task-wait, worker count). |
 | `Job` | `orchestrator/workers.yaml` | `orchestrator` | **Worker spawn** — N parallel coder agents per task. |
-| `Secret` | `orchestrator/secrets.yaml` | `orchestrator` | OpenAI key for the judge (never hardcoded). |
+| `Secret` | `orchestrator/secrets.yaml` | `orchestrator` | OpenAI key + workflow-scoped GitHub PAT (never hardcoded). |
 
 ### 4.4.1 How the pieces relate to the inference stack
 
@@ -188,6 +188,23 @@ sits alongside — and is independent of — the `llm` inference stack:
   judge and coder brains over the network (the `llm` servers), it does not hold
   a GPU. Resources are capped (~2-3 cores, 4-6 GiB) so it never starves the GPU
   servers.
+  - The Deployment runs the loop in the background (resident, idle most of the
+    time) and `exec`s a lightweight **task-acceptor sidecar** (`supervisor-task-acceptor.py`,
+    ~800 lines) sharing the same pod and the same `:8000` port the Service
+    routes to. The sidecar is a plain `ThreadingHTTPServer`; it has **no
+    persistent HTTP surface** — it only binds `:8000` while a task is being
+    accepted and rendered, then releases it (so it never competes with the
+    resident loop for the port).
+  - The sidecar's `do_POST` handles a single endpoint,
+    **`/api/v1/tasks/spawn`**, gated by `Authorization: token <PAT>` (the
+    workflow-scoped PAT from `orchestrator-secrets/github-token`). It validates
+    the body `{name, ref, payload:{issue_number, issue_title, issue_url, repo,
+    default_branch}}`, refuses any task naming a repo other than the one it was
+    spawned for, renders `agent-job-template.yaml` (substituting `${IMAGE}`,
+    `${TASK_ID}`, `${ISSUE_URL}`, `${REPO}`, `${GITHUB_TOKEN}`), creates the
+    `Job`, and waits (`kubectl wait --for=jobcomplete`, 1800s) for it to finish
+    before deleting the Job and returning `{uid, task_id, issue_number,
+    status}`. `do_GET` returns `200` for any path (liveness).
 - **Workers (`orchestrator/workers.yaml`)** — the **spawn mechanism**. The
   supervisor triggers a `Job` that runs N parallel **coder** agents (pure CPU,
   no GPU). `N` (the worker count) is a policy knob in the ConfigMap so it can be
@@ -200,7 +217,12 @@ sits alongside — and is independent of — the `llm` inference stack:
 ### 4.4.2 Overnight workflow
 
 1. The supervisor is always resident (idle, listening for a task).
-2. A task arrives (webhook / cron / user). The supervisor runs the LangGraph
+2. A task arrives (webhook / cron / user). It is POSTed to the supervisor's
+   task-acceptor at `https://<svc>/api/v1/tasks/spawn` with
+   `Authorization: token <PAT>` and a JSON body naming the repo + issue.
+3. The acceptor renders the Job template, creates the `Job`, and waits for it to
+   complete (`kubectl wait --for=jobcomplete`).
+4. The supervisor runs the LangGraph
    loop: plan → spawn coder workers → judge the result → retry / escalate,
    bounded by `max-iterations` (Open Question O5, default 8).
 3. Workers execute code, emit output; the judge approves/rejects.
@@ -276,7 +298,7 @@ curl -s https://llm.local/v1/chat/completions \
 | `orchestrator/namespace.yaml` | Namespace | `orchestrator` | |
 | `orchestrator/supervisor.yaml` | Deployment, Service | `orchestrator` | CPU-only, limits cpu `2.5`/mem `5Gi`, port 8000 |
 | `orchestrator/workers.yaml` | ConfigMap, Job | `orchestrator` | limits cpu `6.5`/mem `7Gi`, parallelism `1` |
-| `orchestrator/secrets.yaml` | Secret | `orchestrator` | `orchestrator-secrets` (OpenAI key) |
+| `orchestrator/secrets.yaml` | Secret | `orchestrator` | `orchestrator-secrets` (OpenAI key + GitHub PAT) |
 | `monitoring/namespace.yaml` | Namespace | `monitoring` | |
 | `monitoring/node-exporter.yaml` | Namespace, DaemonSet, Service, SA | `monitoring` | hostNetwork, limits cpu `1`/mem `1Gi`, :9100 |
 | `monitoring/idrac.yaml` | ConfigMap, DaemonSet, Service, SA | `monitoring` | transport `redfish`, limits cpu `200m`/mem `256Mi` |

@@ -41,7 +41,10 @@ apply() {
   kubectl apply -f "${ROOT}/deployment.yaml"
 
   # Overnight-agent orchestration stack (always-on supervisor + workers).
-  echo "--> Applying orchestrator stack (namespace 'orchestrator')..."
+  # The agent-job-template.yaml ships in the supervisor image
+  # (/opt/orchestrator/agent-job-template.yaml) and is rendered by the
+  # task-acceptor sidecar at task time, so it is NOT re-applied here.
+  echo ">--> Applying orchestrator stack (namespace 'orchestrator')..."
   kubectl apply -f "${ROOT}/orchestrator/namespace.yaml"
   kubectl apply -f "${ROOT}/orchestrator/supervisor.yaml"
   kubectl apply -f "${ROOT}/orchestrator/workers.yaml"
@@ -64,7 +67,8 @@ remove() {
   echo ">--> Removing GPU device-plugin..."
   kubectl delete -f "${ROOT}/nvidia-device-plugin.yaml" >/dev/null
 
-  echo "--> Removing orchestrator stack (namespace 'orchestrator')..."
+  echo ">--> Removing orchestrator stack (namespace 'orchestrator')..."
+  # (agent-job-template.yaml lives in the image, nothing to delete here.)
   kubectl delete -f "${ROOT}/orchestrator/workers.yaml" >/dev/null
   kubectl delete -f "${ROOT}/orchestrator/supervisor.yaml" >/dev/null
   kubectl delete -f "${ROOT}/orchestrator/namespace.yaml" >/dev/null

@@ -1,0 +1,154 @@
+# ---------------------------------------------------------------------------
+# The autonomous drain-loop agent (batch Job).
+# ---------------------------------------------------------------------------
+#
+# This is the WORK unit of the drain loop. The always-on supervisor
+# (`orchestrator/supervisor.yaml`) accepts a task via its HTTP endpoint
+# (`POST /api/v1/tasks/spawn`) and creates this Job once. The Job runs the
+# LangGraph drain pass for ONE issue: read it, plan, spawn coder workers,
+# judge the result, open a PR (human gate), and finally label the issue
+# `done` (the loop's kill-switch).
+#
+# Key properties:
+#   - batch Job, backoffLimit 0, restartPolicy Never (one-shot, no retries —
+#     the supervisor owns failure/retry at the loop level).
+#   - pure CPU (no GPU): the judge + coder brains live on the llama.cpp
+#     servers in the `llm` namespace; this pod only runs the orchestrator loop.
+#   - the GITHUB_TOKEN opens the PR (scoped by the triggering workflow's
+#     permissions — see .github/workflows/drain.yaml). The supervisor injects
+#     it into this Job from the task payload, so no dedicated secret/PAT is
+#     needed.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: orchestrator-agent
+  namespace: orchestrator
+  labels:
+    app: orchestrator
+    component: agent
+spec:
+  # One-shot: the supervisor creates exactly one Job per task. Do NOT retry —
+  # the LangGraph loop is internally bounded (max-iterations) and the
+  # supervisor handles re-planning on failure. A stuck Job is a bug to fix,
+  # not a transient to back off from.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+        component: agent
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: orchestrator-agent
+          image: "${IMAGE:-ghcr.io/autonomous/langgraph-orchestrator:latest}"
+          imagePullPolicy: IfNotPresent
+          # The drain mode consumes a single task (issue) to completion and
+          # then exits — the supervisor re-uses the same long-running process
+          # for the next task (no cold start per issue).
+          command: ["/bin/sh", "-c"]
+          args:
+            - exec
+            - python3
+            - -m
+            - langgraph.cli
+            - serve
+            - --mode
+            - drain
+            - --task-id
+            - "${TASK_ID:-}"
+            - --issue-url
+            - "${ISSUE_URL:-}"
+            - --judge-url
+            - "${JUDGE_URL:-https://llm.local/v1}"
+            - --judge-model
+            - "${JUDGE_MODEL:-qwen2.5-coder-7b-instruct-q5-kn@64k}"
+            - --openai-key
+            - "${OPENAI_API_KEY:-}"
+            - --work-dir
+            - "${TASK_WORK_DIR:-/data/task-work}"
+            - --repo
+            - "${REPO:-}"
+            - --gh-token
+            - "${GITHUB_TOKEN:-}"
+          # Pure CPU. The node budget is ~10 cores for the agent fleet; this
+          # Job is the one always-on worker of the drain pass. Cap it so a long
+          # loop cannot starve the supervisor / judge.
+          resources:
+            requests:
+              cpu: 1
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 6Gi
+          env:
+            # Secrets — never hardcoded. OPENAI_API_KEY for the judge, the
+            # workflow-scoped GITHUB_TOKEN for the PR (injected by the
+            # supervisor from the task payload).
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-secrets
+                  key: openai-api-key
+            # Networking — judge brain lives on the llama.cpp server (no GPU).
+            - name: JUDGE_HOST
+              value: "llm-server-gpu1"
+            - name: JUDGE_PORT
+              value: "8000"
+            # Loop tuning (policy knobs — see orchestrator/workers.yaml).
+            - name: MAX_ITERATIONS
+              valueFrom:
+                configMapKeyRef:
+                  name: orchestrator-config
+                  key: max-iterations
+            - name: TASK_WAIT_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: orchestrator-config
+                  key: task-wait-seconds
+            - name: LOOP_STATE_DIR
+              valueFrom:
+                configMapKeyRef:
+                  name: orchestrator-config
+                  key: loop-state-dir
+            # Per-task identity (set by the supervisor at spawn time).
+            - name: TASK_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations["orchestrator.io/task-id"]
+            - name: ISSUE_URL
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations["orchestrator.io/issue-url"]
+            - name: REPO
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations["orchestrator.io/repo"]
+            - name: GITHUB_TOKEN
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations["orchestrator.io/gh-token"]
+          volumeMounts:
+            - name: task-work
+              mountPath: /data/task-work
+            - name: loop-state
+              mountPath: /data/loop-state
+              mountPropagation: None
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - 'pgrep -f langgraph >/dev/null 2>&1 || exit 1'
+            initialDelaySeconds: 15
+            periodSeconds: 15
+      volumes:
+        - name: task-work
+          emptyDir: {}
+        - name: loop-state
+          persistentVolumeClaim:
+            claimName: loop-state-pvc
+      # Per-task annotations are injected by the supervisor's spawn endpoint.
+      # They carry the workflow-scoped token + issue identity into the Job
+      # metadata; the Job reads them via metadata.annotations (above).

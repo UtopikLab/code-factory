@@ -1,0 +1,167 @@
+# NOTE: GitHub Actions workflow files intentionally omit apiVersion/kind
+# (kubectl flags them — that's expected for this file format).
+
+# ---------------------------------------------------------------------------
+# Autonomous drain-loop trigger workflow.
+# ---------------------------------------------------------------------------
+#
+# PROPOSAL (thinktank design discussion, not settled).
+#
+# This workflow fires on an issue `opened` or `assigned` event and drives ONE
+# autonomous drain pass: it reads the issue, POSTs the task to the in-cluster
+# SUPERVISOR Service (the always-on orchestrator pod, port 8000), waits for
+# the PR, and the agent itself marks the issue `done`.
+#
+# There is NO separate always-on runner pod. Task acceptance is handled by the
+# long-running supervisor Deployment, which already keeps a Service at
+# `orchestrator.orchestrator.svc:8000`. This is the most resource-efficient
+# topology: one always-on pod (supervisor) + ephemeral drain Jobs, no dedicated
+# runner, no RUNNER_TOKEN secret, no keepalive wrapper.
+#
+# Auth uses the built-in $GITHUB_TOKEN (already scoped by this workflow's
+# permissions: contents/actions/issues: write). No one-time RUNNER_TOKEN is
+# needed — the token is a permanent PAT that is only used by the machine token
+# GitHub issues these on operate with.
+#
+# === THE `done`-LABEL KILL-SWITCH (idempotency + loop termination) ===
+#
+# The agent's work (opening a PR) does NOT close the issue. So "pending = open
+# issues" can NEVER be satisfied by GitHub alone -> infinite loop. We add an
+# EXPLICIT terminal state: the agent labels the issue `done` only AFTER it
+# opens the PR successfully.
+#   - "pending"     = issues WITHOUT the `done` label  (what the loop works on)
+#   - "terminal"    = issues WITH the `done` label      (what the loop ignores)
+#   - the `done` label is the loop's kill-switch.
+#
+# Dedup by issue number + task id: if issue X's event fires a new run while X
+# is mid-flight, that run sees X is already `done` and skips to the next task —
+# no double-processing, no race. See orchestrator/agent-job.yaml for the Job's
+# dedup-by-TASK_ID detail.
+---
+name: Autonomous drain loop
+
+on:
+  issues:
+    types: [opened, assigned]
+
+# Scoped permissions — NOT a free-for-all PAT. The workflow operates on the
+# implicit machine token GitHub issues these on; no RUNNER_TOKEN secret is
+# needed (built-in $GITHUB_TOKEN is used for every API call below).
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+concurrency:
+  # Let one pass per issue complete before another event for the same issue
+  # re-queues it (dedup on the issue level).
+  group: autonomous-drain-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  drain:
+    runs-on: [group: autonomous]
+
+    steps:
+      - name: Check issue state
+        # Guard: skip if the issue is already `done` (mid-flight or completed).
+        # This is the event-level dedup for the kill-switch.
+        id: issue-state
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              const { data: label } = await github.rest.issues.listLabelsOnIssue({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+              });
+              if (label.some(l => l.name === "done")) {
+                core.info(`Issue #${context.issue.number} already marked "done" — skipping this run.`);
+                core.setOutput("skip", "true");
+              }
+            } catch (e) {
+              core.setFailed(e.message);
+            }
+
+      - name: Skip if already done
+        if: steps.issue-state.outputs.skip == 'true'
+        run: exit 0
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read issue payload
+        # Capture issue identity from the event payload for logging / tracing.
+        id: issue
+        run: |
+          echo "issue-number=${{ github.event.issue.number }}"
+          echo "issue-title=${{ github.event.issue.title }}"
+          echo "issue-url=${{ github.event.issue.html_url }}"
+          echo "issue-number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          echo "issue-title=${{ github.event.issue.title }}" >> "$GITHUB_OUTPUT"
+          echo "issue-url=${{ github.event.issue.html_url }}" >> "$GITHUB_OUTPUT"
+
+      - name: POST task to supervisor
+        # Ask the always-on supervisor to run the autonomous drain pass for this
+        # issue. The supervisor accepts a task payload, runs the LangGraph drain
+        # loop, opens a PR, and labels the issue `done`. Auth uses the built-in
+        # $GITHUB_TOKEN (scoped by this workflow's permissions) — no RUNNER_TOKEN.
+        # The supervisor's in-cluster Service is `orchestrator.orchestrator.svc:8000`.
+        run: |
+          set -euo pipefail
+          REF="${{ github.ref }}"
+          REPO="${{ github.repository }}"
+          ISSUE_NUM="${{ github.event.issue.number }}"
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+          ISSUE_URL="${{ github.event.issue.html_url }}"
+          SUPERVISOR_URL="${SUPERVISOR_URL:-https://supervisor.orchestrator.svc.cluster.local:8000}"
+          RESPONSE=$(curl -fsS -X POST "${SUPERVISOR_URL}/api/v1/tasks/spawn" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"orchestrator-agent\",\"ref\":\"${REF}\",\"payload\":{\"issue_number\":${ISSUE_NUM},\"issue_title\":\"${ISSUE_TITLE}\",\"issue_url\":\"${ISSUE_URL}\",\"repo\":\"${REPO}\",\"default_branch\":\"${{ github.event.repository.default_branch }}\"}}")
+          echo "Spawn response: $RESPONSE"
+          # The supervisor returns a Job UID; poll its status (see next step).
+          JOB_UID=$(echo "$RESPONSE" | jq -r '.uid // empty')
+          echo "JOB_UID=${JOB_UID}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for PR
+        # Wait until the agent opens its PR. The agent owns the loop; this just
+        # blocks until the PR is visible so the human gatekeeper can
+        # review/merge/reject. Uses the built-in $GITHUB_TOKEN (scoped by the
+        # workflow permissions) — no RUNNER_TOKEN secret reference.
+        run: |
+          set +e
+          REPO="${{ github.repository }}"
+          ISSUE_NUM="${{ github.event.issue.number }}"
+          deadline=$(( $(date +%s) + 3600 )) # 1h
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            PR_NUM=$(curl -fsS "${GITHUB_SERVER_URL}/api/v3/repos/${REPO}/pulls" \
+                      -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                      --data "{\"state\":\"open\",\"head\":{\"ref\":\"refs/heads/fix-${ISSUE_NUM}\",\"repo\":{\"owner\":{\"login\":\"${GITHUB_REPOSITORY_OWNER}\"},\"name\":\"${REPO#*/}\"}}}" \
+                      | jq -r '.[0].number // empty' 2>/dev/null)
+            if [ -n "$PR_NUM" ]; then
+              echo "PR #$PR_NUM opened for issue #$ISSUE_NUM — awaiting human review."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Timed out waiting for PR; the agent will report final state."
+          exit 1
+
+      - name: Comment on issue
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `🤖 Autonomous drain pass triggered by issue #${{ github.event.issue.number }}. ` +
+                      (process.exitCode === 0 ? 'PR opened — awaiting your review.' : 'No PR opened — see the job logs for details.')
+              });
+            } catch (e) {
+              core.setFailed(e.message);
+            }

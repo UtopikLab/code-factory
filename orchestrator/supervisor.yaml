@@ -36,28 +36,15 @@ spec:
           # Pull latest so the supervisor loop / tool-calling code stays current
           # after an autonomous build cycle; the tag can be pinned if desired.
           imagePullPolicy: IfNotPresent
+          # The supervisor runs the LangGraph loop (the long-running part) and
+          # hosts a lightweight HTTP sidecar that accepts tasks. The two share
+          # this pod but are independent: the loop stays resident and waiting;
+          # the sidecar re-binds the port on each task (see
+          # orchestrator/supervisor-task-acceptor.py).
           command: ["/bin/sh", "-c"]
           args:
-            # The runtime stays resident. In steady state it tails the loop
-            # state file and waits; when a task arrives it runs the LangGraph
-            # loop and then returns to the waiting state.
-            - exec
-            - python3
-            - -m
-            - langgraph.cli
-            - serve
-            - --state-dir
-            - /data/loop-state
-            - --task-wait-seconds
-            - "${TASK_WAIT:-30}"
-            - --max-iterations
-            - "${MAX_ITERATIONS:-8}"
-            - --judge-url
-            - "${JUDGE_URL:-https://llm.local/v1}"
-            - --judge-model
-            - "${JUDGE_MODEL:-qwen2.5-<judge>@64k}"
-            - --openai-key
-            - "${OPENAI_API_KEY:-}"
+            - sh -c 'mkdir -p /data/loop-state; python3 -m langgraph.cli serve --state-dir /data/loop-state --task-wait-seconds "${TASK_WAIT:-30}" --max-iterations "${MAX_ITERATIONS:-8}" --judge-url "${JUDGE_URL:-https://llm.local/v1}" --judge-model "${JUDGE_MODEL:-qwen2.5-<judge>@64k}" --openai-key "${OPENAI_API_KEY:-}" & echo $! > /var/run/langgraph.pid; exec python3 orchestrator/supervisor-task-acceptor.py --port 8000'
+
           # CPU/RAM limits fit the node budget (orchestrator ~2-3 cores, 4-6 GiB).
           resources:
             requests:
@@ -88,39 +75,79 @@ spec:
                 configMapKeyRef:
                   name: orchestrator-config
                   key: max-iterations
-            - name: TASK_WAIT_SECONDS
+            - name: TASK_WAIT
               valueFrom:
                 configMapKeyRef:
                   name: orchestrator-config
                   key: task-wait-seconds
+            - name: JUDGE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: orchestrator-config
+                  key: judge-url
+            - name: JUDGE_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: orchestrator-config
+                  key: judge-model
             # Persistence mount for the loop state (see below).
             - name: LOOP_STATE_DIR
               valueFrom:
                 configMapKeyRef:
                   name: orchestrator-config
                   key: loop-state-dir
+            # The path to the Job template the acceptor renders per task. It
+            # ships in the supervisor image (which also contains the
+            # acceptor); baked into the build so there is a single source of
+            # truth and no ConfigMap duplication.
+            - name: AGENT_JOB_TEMPLATE
+              value: "/opt/orchestrator/agent-job-template.yaml"
+            # Secrets
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-secrets
+                  key: openai-api-key
+            # The workflow-scoped PAT authenticates the /api/v1/tasks/spawn
+            # endpoint and is baked into every Job the supervisor renders.
+            - name: ACCEPTOR_GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-secrets
+                  key: github-token
+            # Image reference for agent Jobs (overridable at deploy time).
+            - name: IMAGE
+              value: "${IMAGE:-ghcr.io/autonomous/langgraph-orchestrator:latest}"
           volumeMounts:
             - name: loop-state
               mountPath: /data/loop-state
               # Persistent so a node restart resumes the loop where it stopped
               # instead of re-planning from scratch (design requirement §6.2).
               mountPropagation: None
+            # Local file holding the Job template (ships in the image).
+            - name: agent-job-template
+              mountPath: /opt/orchestrator
+              readOnly: true
+          # Readiness = the task-acceptor HTTP server is up on :8000 (the
+          # Service routes here). An HTTP GET is the right check because the
+          # loop process is deliberately idle most of the time and an exec
+          # probe would always succeed even when the acceptor is not listening.
           readinessProbe:
-            # The process must be up; the loop itself may be idle between tasks.
-            # Fall back to a TCP check once the runtime exposes a health port.
-            exec:
-              command:
-                - sh
-                - -c
-                - 'pgrep -f langgraph >/dev/null 2>&1 || exit 1'
-            initialDelaySeconds: 30
-            periodSeconds: 15
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Liveness = the loop runtime is resident (not just the HTTP sidecar).
+          # If the loop dies, restart the whole container so both come back.
           livenessProbe:
             exec:
               command:
                 - sh
                 - -c
-                - 'pgrep -f langgraph >/dev/null 2>&1 || exit 1'
+                - "pgrep -f langgraph >/dev/null 2>&1 || exit 1"
             initialDelaySeconds: 60
             periodSeconds: 30
       # Pure CPU workload — no GPU requested or limited. The coder/judge models

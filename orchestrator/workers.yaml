@@ -30,9 +30,14 @@ metadata:
 data:
   # Policy knobs for the overnight agent. Changing these does not require
   # editing the Deployment — the supervisor reads them at runtime.
-  max-iterations: "8"          # O5 — bound the retry budget / overnight runtime
-  task-wait-seconds: "30"      # how long the idle supervisor waits for a task
+  max-iterations: "8" # O5 — bound the retry budget / overnight runtime
+  task-wait-seconds: "30" # how long the idle supervisor waits for a task
   loop-state-dir: "/data/loop-state"
+  # Judge brain (llama.cpp server, no GPU). The supervisor + agent Jobs
+  # reach it over the network via Traefik; swap the host when the ingress
+  # / VPN changes.
+  judge-url: "https://llm.local/v1"
+  judge-model: "qwen2.5-coder-7b-instruct-q5-kn@64k"
 ---
 # ---------------------------------------------------------------------------
 # Worker Job: a single spawn of N coder agents (parallel).
@@ -137,12 +142,12 @@ spec:
               mountPath: /workspace
           readinessProbe:
             exec:
-              command: [sh, -c, 'pgrep -f langgraph >/dev/null 2>&1 || exit 1']
+              command: [sh, -c, "pgrep -f langgraph >/dev/null 2>&1 || exit 1"]
             initialDelaySeconds: 20
             periodSeconds: 10
           livenessProbe:
             exec:
-              command: [sh, -c, 'pgrep -f langgraph >/dev/null 2>&1 || exit 1']
+              command: [sh, -c, "pgrep -f langgraph >/dev/null 2>&1 || exit 1"]
             initialDelaySeconds: 30
             periodSeconds: 15
       # Workspace for the agent's working files (scratch, not weights).
