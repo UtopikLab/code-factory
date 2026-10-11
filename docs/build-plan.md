@@ -9,7 +9,7 @@
 > `crictl` only (no docker / nerdctl on this box).
 >
 > Namespace: `orchestrator`. Supervisor image:
-> `${IMAGE:-ghcr.io/UtopikLab/langgraph-orchestrator:latest}`.
+> `${IMAGE:-ghcr.io/utopiklab/langgraph-orchestrator:latest}`.
 
 ---
 
@@ -117,14 +117,14 @@ buildah login -u <gh-user> -p <gh-pat> ghcr.io
 
 # Build from the real Dockerfile (FROM python:3.11-slim + requirements.txt +
 # agent-job-template.yaml + supervisor-task-acceptor.py baked to /opt/orchestrator).
-buildah bud -f Dockerfile -t ghcr.io/UtopikLab/langgraph-orchestrator:latest .
+buildah bud -f Dockerfile -t ghcr.io/utopiklab/langgraph-orchestrator:latest .
 
 # Push to the registry.
-buildah push ghcr.io/UtopikLab/langgraph-orchestrator:latest \
-  ghcr.io/UtopikLab/langgraph-orchestrator:latest
+buildah push ghcr.io/utopiklab/langgraph-orchestrator:latest \
+  ghcr.io/utopiklab/langgraph-orchestrator:latest
 
 # Verify.
-buildah from ghcr.io/UtopikLab/langgraph-orchestrator:latest
+buildah from ghcr.io/utopiklab/langgraph-orchestrator:latest
 buildah run orchestrator-<digest> ls -l /opt/orchestrator
 ```
 
@@ -132,14 +132,14 @@ buildah run orchestrator-<digest> ls -l /opt/orchestrator
 ```bash
 # On the build host (NOT k8s-node01).
 git clone <repo-url> && cd k8s/orchestrator
-docker build -t ghcr.io/UtopikLab/langgraph-orchestrator:latest .
+docker build -t ghcr.io/utopiklab/langgraph-orchestrator:latest .
 
 docker login ghcr.io -u <gh-user> -p <gh-pat>
-docker push ghcr.io/UtopikLab/langgraph-orchestrator:latest
+docker push ghcr.io/utopiklab/langgraph-orchestrator:latest
 ```
 > `nerdctl` is a drop-in replacement for `docker` in both snippets.
 
-**Result:** `ghcr.io/UtopikLab/langgraph-orchestrator:latest` exists and is
+**Result:** `ghcr.io/utopiklab/langgraph-orchestrator:latest` exists and is
 CPU-only (no torch/transformers/langchain-openai — the judge runs elsewhere).
 
 ### Phase B — Cluster prerequisites (namespace, ConfigMap, Secret)

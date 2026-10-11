@@ -19,7 +19,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: agent
-          image: {{ .Values.IMAGE | default "ghcr.io/UtopikLab/langgraph-orchestrator:latest" }}
+          image: {{ .Values.IMAGE | default "ghcr.io/utopiklab/langgraph-orchestrator:latest" }}
           env:
             - name: TASK_ID
               value: {{ (index .Values.orchestrator.config "task-id") | default "orchestrator-task" | quote }}

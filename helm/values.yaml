@@ -20,7 +20,7 @@ global:
 #   - langgraph-orchestrator : built from the repo Dockerfile and published to GHCR.
 #   - prom/node-exporter     : override if v1.9.1 is unavailable in your mirror.
 #   - ipmi-exporter          : approved IPMI path for the node iDRAC.
-IMAGE: "ghcr.io/UtopikLab/langgraph-orchestrator:latest"
+IMAGE: "ghcr.io/utopiklab/langgraph-orchestrator:latest"
 
 # ---------------------------------------------------------------------------
 # Namespaces (created if not present).
@@ -126,10 +126,10 @@ inference:
 # Orchestrator (namespace: orchestrator). Image is the repo-owned GHCR image.
 # ---------------------------------------------------------------------------
 orchestrator:
-  image: "ghcr.io/UtopikLab/langgraph-orchestrator:latest"
+  image: "ghcr.io/utopiklab/langgraph-orchestrator:latest"
   imagePullPolicy: IfNotPresent
   real: true
-  verified: "Built from the repo Dockerfile and published to ghcr.io/UtopikLab/langgraph-orchestrator:latest."
+  verified: "Built from the repo Dockerfile and published to ghcr.io/utopiklab/langgraph-orchestrator:latest."
   # Supervisor env (from configmap / secret).
   config:
     max-iterations: "8"

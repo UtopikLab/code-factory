@@ -1,11 +1,11 @@
 # Build and push the LangGraph orchestrator runtime image to GHCR.
 #
 # Produces:
-#   ghcr.io/UtopikLab/langgraph-orchestrator:latest
-#   ghcr.io/UtopikLab/langgraph-orchestrator:<git-short-sha>
+#   ghcr.io/utopiklab/langgraph-orchestrator:latest
+#   ghcr.io/utopiklab/langgraph-orchestrator:<git-short-sha>
 #
 # This image is consumed by the k8s manifests under orchestrator/ (the
-# ${IMAGE:-ghcr.io/UtopikLab/langgraph-orchestrator:latest} placeholder).
+# ${IMAGE:-ghcr.io/utopiklab/langgraph-orchestrator:latest} placeholder).
 name: build-push-orchestrator-image
 
 on:
@@ -46,9 +46,9 @@ jobs:
           context: ./orchestrator
           push: true
           tags: |
-            ghcr.io/UtopikLab/langgraph-orchestrator:latest
-            ghcr.io/UtopikLab/langgraph-orchestrator:${{ github.sha }}
-            ghcr.io/UtopikLab/langgraph-orchestrator:${{ github.ref_name }}
+            ghcr.io/utopiklab/langgraph-orchestrator:latest
+            ghcr.io/utopiklab/langgraph-orchestrator:${{ github.sha }}
+            ghcr.io/utopiklab/langgraph-orchestrator:${{ github.ref_name }}
 
       - name: Image digest
         run: echo "docker_build.digest=${{ steps.docker_build.outputs.digest }}" >> "$GITHUB_OUTPUT"
