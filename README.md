@@ -113,7 +113,7 @@ and how to download.
 
 ```
 inference/
-├── README-inference.md          # this file
+├── README.md                   # this file
 ├── deploy.sh                    # install engine + apply manifests (containerd-aware)
 ├── common.sh                    # shared env (KUBECONFIG, containerd image pull)
 ├── nvidia-device-plugin.yaml    # GPU discovery on the node (namespace: gpu)

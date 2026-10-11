@@ -1,0 +1,31 @@
+{{/*
+Ingress for the inference namespace (Traefik, shipped by K3s).
+Faithful to inference/deployment.yaml (Ingress inference-ingress).
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Chart.Name }}-inference-ingress
+  namespace: inference
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default@kubernetes/tcp-security
+    traefik.ingress.kubernetes.io/rule: Host:`inference.local` && PathPrefix(`/v1`)
+    traefik.ingress.kubernetes.io/service.method: ANY
+  labels:
+    app.k8s.io/name: {{ .Chart.Name }}
+    app.k8s.io/instance: {{ .Release.Name }}
+    app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+    component: inference-server
+spec:
+  rules:
+    - host: inference.local
+      http:
+        paths:
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: inference-server
+                port:
+                  number: 8000

@@ -1,0 +1,22 @@
+{{/*
+Service for the inference namespace.
+Faithful to inference/deployment.yaml (Service inference-server port 8000).
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-server
+  namespace: inference
+  labels:
+    app.k8s.io/name: {{ .Chart.Name }}
+    app.k8s.io/instance: {{ .Release.Name }}
+    app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+    component: inference-server
+spec:
+  selector:
+    app: inference-server
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000
+      targetPort: 8000

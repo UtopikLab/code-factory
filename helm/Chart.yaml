@@ -1,0 +1,29 @@
+apiVersion: v2
+name: k8s-inference
+description: A single-node K3s (containerd) LLM inference stack for k8s-node01.
+version: 0.1.0
+appVersion: "0.1.0"
+type: application
+templates:
+  - helpers.tpl
+  - gpu/namespace.yaml
+  - gpu/device-plugin.yaml
+  - inference/namespace.yaml
+  - inference/configmaps.yaml
+  - debug-values.yaml
+  - inference/pvc.yaml
+  - inference/service.yaml
+  - inference/deployments.yaml
+  - inference/ingress.yaml
+  - orchestrator/namespace.yaml
+  - orchestrator/secrets.yaml
+  - orchestrator/supervisor.yaml
+  - orchestrator/workers.yaml
+  - orchestrator/agent-job.yaml
+  - monitoring/namespace.yaml
+  - monitoring/node-exporter.yaml
+  - monitoring/idrac.yaml
+  - monitoring/secrets.yaml
+maintainers:
+  - name: UtopikLab
+    url: https://github.com/UtopikLab

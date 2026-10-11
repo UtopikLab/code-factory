@@ -61,7 +61,7 @@ build host**.
 
 ### 1.1 Cluster connectivity
 ```bash
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml      # per k8s-node01.md §3
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml      # per docs/k8s-node01.md §3
 kubectl version --client && kubectl cluster-info
 kubectl get nodes -o wide                         # confirm k8s-node01 Ready
 ```

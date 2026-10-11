@@ -1,0 +1,198 @@
+{{/*
+Namespace gpu (static) + RBAC + device-plugin DaemonSets.
+Faithful to inference/nvidia-device-plugin.yaml.
+*/}}
+{{- if not (lookup "v1" "Namespace" "" "gpu") }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu
+  labels:
+    app.k8s.io/name: {{ .Chart.Name }}
+    app.k8s.io/instance: {{ .Release.Name }}
+    app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+    component: gpu
+{{- end }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Chart.Name }}-gpu-nvidia-device-plugin:role
+  labels:
+    app.k8s.io/name: {{ .Chart.Name }}
+    app.k8s.io/instance: {{ .Release.Name }}
+    app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+    component: gpu
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups:
+      - gpu.nvidia.com
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups:
+      - gpu.nvidia.com
+    resources: ["nodes/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups:
+      - gpu.nvidia.com
+      - gpu.nvidia.com/metrics
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups:
+      - gpu.nvidia.com
+    resources: ["device-plugins"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups:
+      - gpu.nvidia.com
+      - gpu.nvidia.com/metrics
+    resources: ["*"]
+    verbs: ["get", "list", "watch", "update", "patch", "create", "delete"]
+  - apiGroups:
+      - gpu.nvidia.com
+    resources: ["device-plugin-mirror"]
+    verbs: ["*"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Chart.Name }}-gpu-nvidia-device-plugin:clusterrolebinding
+  labels:
+    app.k8s.io/name: {{ .Chart.Name }}
+    app.k8s.io/instance: {{ .Release.Name }}
+    app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+    component: gpu
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Chart.Name }}-gpu-nvidia-device-plugin-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Chart.Name }}-gpu-nvidia-gpu-device-plugin-sa
+    namespace: gpu
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Chart.Name }}-gpu-nvidia-gpu-device-plugin-sa
+  namespace: gpu
+  labels:
+    app.k8s.io/name: {{ .Chart.Name }}
+    app.k8s.io/instance: {{ .Release.Name }}
+    app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+    component: gpu
+
+---
+# Device plugin: exposes the two Tesla P40s as nvidia.com/gpu.
+# No NVIDIA GPU Operator required (single bare-metal node).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Chart.Name }}-gpu-nvidia-device-plugin
+  namespace: gpu
+  labels:
+    app.k8s.io/name: {{ .Chart.Name }}
+    app.k8s.io/instance: {{ .Release.Name }}
+    app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+    component: gpu
+    gpu: "0"
+spec:
+  selector:
+    matchLabels:
+      name: {{ .Chart.Name }}-gpu-nvidia-device-plugin
+  template:
+    metadata:
+      labels:
+        name: {{ .Chart.Name }}-gpu-nvidia-device-plugin
+        app.k8s.io/name: {{ .Chart.Name }}
+        app.k8s.io/instance: {{ .Release.Name }}
+        app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+        component: gpu
+        gpu: "0"
+    spec:
+      serviceAccountName: {{ .Chart.Name }}-gpu-nvidia-gpu-device-plugin-sa
+      hostNetwork: true
+      hostIPC: true
+      hostPID: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: nvidia-device-plugin-daemonset
+          image: {{ .Values.gpu.devicePlugin.image | default "nvcr.io/nvidia/k8s-device-plugin:2.18.0" }}
+          imagePullPolicy: {{ .Values.gpu.devicePlugin.imagePullPolicy | default "IfNotPresent" }}
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 6Mi
+          volumeMounts:
+            - name: device-dir
+              mountPath: /var/lib/kubelet
+            - name: device-plugin-dir
+              mountPath: /var/lib/kubelet/device-plugins
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - >
+                    sleep 10
+      volumes:
+        - name: device-dir
+          hostPath:
+            path: /dev
+            type: DirectoryOrCreate
+        - name: device-plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: DirectoryOrCreate
+
+---
+# Node problem detector: surfaces GPU/hardware faults on the node status.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Chart.Name }}-gpu-nvidia-node-problem-detector
+  namespace: gpu
+  labels:
+    app.k8s.io/name: {{ .Chart.Name }}
+    app.k8s.io/instance: {{ .Release.Name }}
+    app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+    component: gpu
+    gpu: "0"
+spec:
+  selector:
+    matchLabels:
+      name: {{ .Chart.Name }}-gpu-nvidia-node-problem-detector
+  template:
+    metadata:
+      labels:
+        name: {{ .Chart.Name }}-gpu-nvidia-node-problem-detector
+        app.k8s.io/name: {{ .Chart.Name }}
+        app.k8s.io/instance: {{ .Release.Name }}
+        app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+        component: gpu
+        gpu: "0"
+    spec:
+      serviceAccountName: {{ .Chart.Name }}-gpu-nvidia-gpu-device-plugin-sa
+      hostNetwork: true
+      hostIPC: true
+      hostPID: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: nvidia-node-problem-detector
+          image: {{ .Values.gpu.nodeProblemDetector.image | default "nvcr.io/nvidia/k8s-node-problem-detector:0.18.0" }}
+          imagePullPolicy: {{ .Values.gpu.nodeProblemDetector.imagePullPolicy | default "IfNotPresent" }}
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 6Mi

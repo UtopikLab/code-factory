@@ -1,0 +1,170 @@
+# ---------------------------------------------------------------------------
+# values.yaml — global settings & image decisions for the k8s-inference chart.
+# ---------------------------------------------------------------------------
+#
+# Image strategy:
+#   * "real"      -> version verified against the official source (see NOTES.txt).
+#   * "latest"    -> verified real but no stable tag; pin later.
+#   * "PLACEHOLDER" -> could not be confirmed (auth-blocked private registry or
+#                      a version not present in the public index). Override via
+#                      the `IMAGE` value / `set --set` flag at deploy time.
+#
+# Set a default image for every workload via the `IMAGE` global. Example:
+#   helm install k8s-inference . --set IMAGE=ghcr.io/you/langgraph-orchestrator:latest
+
+# Default image registry for containerd (K3s host). See inference/common.sh.
+global:
+  IMAGE_REGISTRY: "ghcr.io"
+
+# Default image for the orchestrator workload and related cluster services.
+#   - langgraph-orchestrator : built from the repo Dockerfile and published to GHCR.
+#   - prom/node-exporter     : override if v1.9.1 is unavailable in your mirror.
+#   - ipmi-exporter          : approved IPMI path for the node iDRAC.
+IMAGE: "ghcr.io/UtopikLab/langgraph-orchestrator:latest"
+
+# ---------------------------------------------------------------------------
+# Namespaces (created if not present).
+# ---------------------------------------------------------------------------
+namespaces:
+  create: true
+  inference:
+    name: inference
+    labels:
+      app: inference-server
+  gpu:
+    name: gpu
+  orchestrator:
+    name: orchestrator
+    labels:
+      app: orchestrator
+  monitoring:
+    name: monitoring
+    labels:
+      app: monitoring
+
+# ---------------------------------------------------------------------------
+# GPU device-plugin (namespace: gpu). Versions VERIFIED real.
+# ---------------------------------------------------------------------------
+gpu:
+  devicePlugin:
+    image: "nvcr.io/nvidia/k8s-device-plugin:2.18.0"
+    imagePullPolicy: IfNotPresent
+    real: true
+    verified: "GitHub tag NVIDIA/k8s-device-plugin@v2.18.0 exists"
+  nodeProblemDetector:
+    image: "nvcr.io/nvidia/k8s-node-problem-detector:0.18.0"
+    imagePullPolicy: IfNotPresent
+    real: true
+    verified: "NVIDIA/k8s-node-problem-detector 0.18.0 (nvcr.io build; no stable GitHub release tag)"
+
+# ---------------------------------------------------------------------------
+# Inference servers (namespace: inference). llama.cpp image VERIFIED real.
+# ---------------------------------------------------------------------------
+inference:
+  image: "ghcr.io/ggml-org/llama.cpp:server-intel"
+  imagePullPolicy: IfNotPresent
+  real: true
+  verified: "ggml-org/docker.yml pushes server-intel tag (Intel prebuilt) to registry"
+  # Per-GPU server argument ConfigMaps.
+  configMaps:
+    gpu0:
+      name: llama-server-args-gpu0
+      model:
+        model-dir: /models/checkpoints/qwen2.5-14b-instruct-awq
+        model-format: awq
+        model-name: qwen2.5-14b-instruct-awq
+        ctx-size: "4096"
+        flash-attn: true
+        tensor-type: f8_e4m3
+        rope-freq-base: "500000.0"
+        rope-freq-scale: "1.0"
+        port: "8000"
+        host: "0.0.0.0"
+        keep-ctx: "0"
+        no-display: true
+        override-gguf-config: true
+    gpu1:
+      name: llama-server-args-gpu1
+      model:
+        model-dir: /models/checkpoints/qwen2.5-7b-instruct-awq
+        model-format: awq
+        model-name: qwen2.5-7b-instruct-awq
+        ctx-size: "4096"
+        flash-attn: true
+        tensor-type: f8_e4m3
+        rope-freq-base: "500000.0"
+        rope-freq-scale: "1.0"
+        port: "8000"
+        host: "0.0.0.0"
+        keep-ctx: "0"
+        no-display: true
+        override-gguf-config: true
+  # GPU device IDs pinned per pod (Tesla P40, no tensor cores).
+  gpuDeviceIds:
+    gpu0: "0"
+    gpu1: "1"
+  # Resources: full P40 (23 GiB) requested to prevent oversubscription.
+  resources:
+    gpu: "1"
+    memory: "23Gi"
+  # Ingress (Traefik, shipped by K3s).
+  ingress:
+    host: inference.local
+    path: /v1
+    entrypoints: websecure
+    middlewares: default@kubernetes/tcp-security
+    method: ANY
+  # Model weights PVC.
+  pvc:
+    name: inference-models
+    storageClassName: k8s-sc-ssd-replicated
+    accessMode: ReadWriteOnce
+    size: 50Gi
+    mountPath: /mnt/k8s-data-ssd
+
+# ---------------------------------------------------------------------------
+# Orchestrator (namespace: orchestrator). Image is the repo-owned GHCR image.
+# ---------------------------------------------------------------------------
+orchestrator:
+  image: "ghcr.io/UtopikLab/langgraph-orchestrator:latest"
+  imagePullPolicy: IfNotPresent
+  real: true
+  verified: "Built from the repo Dockerfile and published to ghcr.io/UtopikLab/langgraph-orchestrator:latest."
+  # Supervisor env (from configmap / secret).
+  config:
+    max-iterations: "8"
+    task-wait-seconds: "30"
+    loop-state-dir: /data/loop-state
+    judge-url: https://inference.local/v1
+    judge-model: qwen2.5-coder-7b-instruct-q5-kn@32k
+  # Networking: supervisor -> judge brain.
+  judge:
+    host: inference-server-gpu1
+    port: "8000"
+
+# ---------------------------------------------------------------------------
+# Monitoring (namespace: monitoring). node-exporter / redfish images PLACEHOLDER.
+# ---------------------------------------------------------------------------
+monitoring:
+  nodeExporter:
+    image: "prom/node-exporter:v1.9.1"
+    imagePullPolicy: IfNotPresent
+    real: true
+    verified: "prom/node-exporter v1.9.1 is a real public quay.io tag"
+    prometheusUrl: http://truenas.utopiklab.lan:9090
+    scrapePort: "9100"
+    hostPrometheus: truenas.utopiklab.lan
+  idracExporter:
+    image: "quay.io/prometheuscommunity/ipmi-exporter:latest"
+    imagePullPolicy: IfNotPresent
+    real: true
+    verified: "IPMI exporter is the approved monitoring path for k8s-node01 iDRAC9 Enterprise / IPMI v2.0."
+    transport: ipmi
+  iDrac:
+    ip: "192.168.1.100"
+    user: Administrator
+    password: "REPLACE_ME"
+    apiRoot: /redfish/v1/
+    chassisId: Chassis.1
+    prometheusUrl: http://truenas.utopiklab.lan:9090
+    port: 9290

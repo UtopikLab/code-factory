@@ -1,0 +1,12 @@
+{{/*
+Monitoring Namespace.
+Faithful to monitoring/node-exporter.yaml (Namespace monitoring).
+*/}}
+{{- if not (lookup "v1" "Namespace" "" "monitoring") }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app: monitoring
+{{- end }}

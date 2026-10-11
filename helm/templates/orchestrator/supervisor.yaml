@@ -1,0 +1,178 @@
+{{/*
+Supervisor Deployment + Service for the orchestrator workload.
+Faithful to the thinktank design: always-on supervisor + task-acceptor sidecar.
+*/}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Chart.Name }}-orchestrator-acceptor
+  namespace: orchestrator
+  labels:
+    app: orchestrator
+    component: acceptor
+data:
+  supervisor-task-acceptor.py: |
+    import json
+    import os
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    TOKEN = os.environ.get("GITHUB_TOKEN", "")
+    ALLOWED_REPO = os.environ.get("ALLOWED_REPO", "UtopikLab/llm-rig")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+
+        def do_POST(self):
+            auth = self.headers.get("Authorization", "")
+            if auth != f"token {TOKEN}":
+                self.send_response(401)
+                self.end_headers()
+                self.wfile.write(b'{"error":"unauthorized"}')
+                return
+
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length) if content_length else b"{}"
+            try:
+                payload = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b'{"error":"invalid-json"}')
+                return
+
+            repo = payload.get("repo") or payload.get("payload", {}).get("repo")
+            if repo and repo != ALLOWED_REPO:
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b'{"error":"repo-not-allowed"}')
+                return
+
+            response = {
+                "status": "accepted",
+                "task_id": payload.get("task_id") or payload.get("payload", {}).get("issue_number") or "unknown",
+                "repo": repo or ALLOWED_REPO,
+                "endpoint": "/api/v1/tasks/spawn",
+            }
+            self.send_response(202)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode("utf-8"))
+
+        def log_message(self, format, *args):
+            return
+
+    server = ThreadingHTTPServer(("0.0.0.0", 8000), Handler)
+    server.serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}-orchestrator
+  namespace: orchestrator
+  labels:
+    app: orchestrator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestrator
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+    spec:
+      containers:
+        - name: supervisor
+          image: {{ .Values.IMAGE | default "ghcr.io/UtopikLab/langgraph-orchestrator:latest" }}
+          command:
+            - sh
+            - -c
+            - |
+              exec langgraph.cli serve --state-dir {{ (index .Values.orchestrator.config "loop-state-dir") | default "/data/loop-state" }} \
+                --judge-url {{ (index .Values.orchestrator.config "judge-url") | default "https://inference.local/v1" }} \
+                --judge-model {{ (index .Values.orchestrator.config "judge-model") | default "qwen2.5-coder-7b-instruct-q5-kn@32k" }} &
+              exec sleep infinity
+          env:
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Chart.Name }}-orchestrator-secrets
+                  key: openai-api-key
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Chart.Name }}-orchestrator-secrets
+                  key: github-token
+            - name: ALLOWED_REPO
+              value: {{ (index .Values.orchestrator.config "repo") | default "UtopikLab/llm-rig" | quote }}
+            - name: ORCHESTRATOR_CONFIG
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Chart.Name }}-orchestrator-config
+                  key: orchestrator-config
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: "2.5"
+              memory: 5Gi
+        - name: task-acceptor
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              python3 - <<'PY'
+              import os
+              from pathlib import Path
+              path = Path('/tmp/supervisor-task-acceptor.py')
+              path.write_text(open('/etc/orchestrator/supervisor-task-acceptor.py').read())
+              os.execvp('python3', ['python3', str(path)])
+              PY
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Chart.Name }}-orchestrator-secrets
+                  key: github-token
+            - name: ALLOWED_REPO
+              value: {{ (index .Values.orchestrator.config "repo") | default "UtopikLab/llm-rig" | quote }}
+          ports:
+            - name: task-acceptor
+              containerPort: 8000
+          volumeMounts:
+            - name: orchestrator-acceptor
+              mountPath: /etc/orchestrator
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+      volumes:
+        - name: orchestrator-acceptor
+          configMap:
+            name: {{ .Chart.Name }}-orchestrator-acceptor
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-orchestrator
+  namespace: orchestrator
+spec:
+  selector:
+    app: orchestrator
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000
+      targetPort: 8000

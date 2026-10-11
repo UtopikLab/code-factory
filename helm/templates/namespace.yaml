@@ -1,0 +1,10 @@
+{{- if not (lookup "v1" "Namespace" "" (.Release.Namespace | default .Values.namespaces.inference.name)) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace | default .Values.namespaces.inference.name | quote }}
+  labels:
+    app.k8s.io/name: {{ .Chart.Name | quote }}
+    app.k8s.io/instance: {{ .Release.Name | default "k8s-inference" | quote }}
+    app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}

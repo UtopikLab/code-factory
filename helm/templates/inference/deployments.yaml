@@ -1,0 +1,92 @@
+{{/*
+Inference server Deployments (llama.cpp, one per Tesla P40).
+Faithful to inference/deployment.yaml (Deployments inference-server-gpu{0,1}).
+*/}}
+# ---------------------------------------------------------------------------
+# Inference server Deployments: two GPU-bound llama.cpp pods, one per P40.
+# Each pod runs the OpenAI-compatible server with the per-GPU args ConfigMap
+# mounted at /etc/llama-server-args and the model weights from the shared PVC.
+# ---------------------------------------------------------------------------
+{{- $ns := "inference" -}}
+{{- $inf := .Values.inference -}}
+{{- range $idx, $cfg := $inf.configMaps }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $cfg.name }}
+  namespace: {{ $ns }}
+  labels:
+    app.k8s.io/name: {{ $.Chart.Name | quote }}
+    app.k8s.io/instance: {{ $.Release.Name | default "k8s-inference" | quote }}
+    app.k8s.io/version: {{ $.Chart.AppVersion | quote }}
+    app.k8s.io/component: inference-server
+    component: inference-server
+    gpu: "{{ $idx }}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inference-server
+      gpu: "{{ $idx }}"
+  template:
+    metadata:
+      labels:
+        app: inference-server
+        gpu: "{{ $idx }}"
+    spec:
+      # Single-node cluster: spread one pod per GPU so both cards are used.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values: ["inference-server"]
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: llama-server
+          image: {{ $inf.image | default "ghcr.io/ggml-org/llama.cpp:server-intel" }}
+          imagePullPolicy: {{ $inf.imagePullPolicy | default "IfNotPresent" }}
+          args:
+            - /etc/llama-server-args/args.txt
+          volumeMounts:
+            - name: {{ $cfg.name }}-args
+              mountPath: /etc/llama-server-args
+              readOnly: true
+            - name: {{ $cfg.name }}-models
+              mountPath: /models
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              nvidia.com/gpu: {{ $inf.resources.gpu }}
+              memory: {{ $inf.resources.memory }}
+            limits:
+              nvidia.com/gpu: {{ $inf.resources.gpu }}
+              memory: {{ $inf.resources.memory }}
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+      volumes:
+        - name: {{ $cfg.name }}-args
+          configMap:
+            name: {{ $cfg.name }}
+        - name: {{ $cfg.name }}-models
+          persistentVolumeClaim:
+            claimName: {{ $inf.pvc.name }}
+{{- end }}

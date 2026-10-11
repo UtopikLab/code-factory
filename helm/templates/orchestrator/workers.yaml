@@ -1,0 +1,89 @@
+{{/*
+Workers: ConfigMap orchestrator-config + Job coder-workers.
+Faithful to orchestrator/workers.yaml (ConfigMap + Job coder-workers).
+*/}}
+{{- $m := dict
+  "max-iterations" (int (default (index .Values.orchestrator.config "max-iterations") 8))
+  "task-wait-seconds" (int (default (index .Values.orchestrator.config "task-wait-seconds") 30))
+  "loop-state-dir" (default (index .Values.orchestrator.config "loop-state-dir") "/data/loop-state")
+  "judge-url" (default (index .Values.orchestrator.config "judge-url") "https://inference.local/v1")
+  "judge-model" (default (index .Values.orchestrator.config "judge-model") "qwen2.5-coder-7b-instruct-q5-kn@32k")
+-}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Chart.Name }}-orchestrator-config
+  namespace: orchestrator
+  labels:
+    app: orchestrator
+  annotations:
+    created-by: helm
+data:
+  orchestrator-config: |-
+{{ toJson $m | indent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Chart.Name }}-coder-workers
+  namespace: orchestrator
+  labels:
+    app: orchestrator
+    component: worker
+spec:
+  parallelism: 1
+  completions: 4
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+        component: worker
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: coder
+          image: {{ .Values.IMAGE | default "ghcr.io/UtopikLab/langgraph-orchestrator:latest" }}
+          env:
+            - name: TASK_ID
+              value: {{ (index .Values.orchestrator.config "task-id") | default "orchestrator-task" | quote }}
+            - name: ISSUE_URL
+              value: {{ (index .Values.orchestrator.config "issue-url") | default "" | quote }}
+            - name: REPO
+              value: {{ (index .Values.orchestrator.config "repo") | default "UtopikLab/llm-rig" | quote }}
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Chart.Name }}-orchestrator-secrets
+                  key: github-token
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Chart.Name }}-orchestrator-secrets
+                  key: openai-api-key
+            - name: ORCHESTRATOR_CONFIG
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Chart.Name }}-orchestrator-config
+                  key: orchestrator-config
+          envFrom:
+            - configMapRef:
+                name: {{ .Chart.Name }}-orchestrator-config
+          volumeMounts:
+            - name: workspace
+              mountPath: /data/work
+            - name: loop-state
+              mountPath: /data/loop-state
+          resources:
+            requests:
+              cpu: 500m
+              memory: 3Gi
+            limits:
+              cpu: "6.5"
+              memory: 7Gi
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: loop-state
+          emptyDir: {}

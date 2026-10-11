@@ -1,0 +1,26 @@
+{{/*
+Inference server args ConfigMaps (llama.cpp, one per GPU).
+Two ConfigMaps: llama-server-args-gpu0 and llama-server-args-gpu1.
+Each contains the server args for the respective GPU.
+*/}}
+{{- $inf := .Values.inference -}}
+{{- $ns := .Release.Namespace | default "inference" -}}
+{{- range $idx, $cfg := $inf.configMaps }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $cfg.name }}
+  namespace: {{ $ns }}
+  labels:
+    app.k8s.io/name: {{ $.Chart.Name | quote }}
+    app.k8s.io/instance: {{ $cfg.name }}
+    app.k8s.io/version: {{ $.Chart.AppVersion | quote }}
+    app.k8s.io/component: llama-server-args
+    component: llama-server-args
+    gpu: "{{ $idx }}"
+data:
+{{ range $k, $v := $cfg.model }}
+  {{ $k }}: {{ $v | quote }}
+{{ end }}
+{{ end }}

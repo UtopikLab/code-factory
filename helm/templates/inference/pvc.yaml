@@ -1,0 +1,21 @@
+{{/*
+Model weights PVC for the inference namespace.
+Faithful to inference/deployment.yaml (PVC inference-models).
+*/}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.inference.pvc.name }}
+  namespace: inference
+  labels:
+    app.k8s.io/name: {{ .Chart.Name }}
+    app.k8s.io/instance: {{ .Release.Name }}
+    app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+    component: inference-server
+spec:
+  accessModes:
+    - {{ .Values.inference.pvc.accessMode }}
+  storageClassName: {{ .Values.inference.pvc.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.inference.pvc.size }}
