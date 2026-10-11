@@ -27,19 +27,10 @@ data:
   ipmi.yml: |
     modules:
       default:
-        interfaces:
-          - driver: "lanplus"
-            address: "{{ .Values.monitoring.iDrac.ip | default "192.168.1.100" }}"
-            username: "{{ .Values.monitoring.iDrac.user | default "Administrator" }}"
-            password: "{{ .Values.monitoring.iDrac.password | default "REPLACE_ME" }}"
+        # IPMI connection configuration
+        driver: "lanplus"
         collectors:
-          - bmc
-          - chassis
-          - dcmi
-          - fans
-          - psu
-          - sel
-          - sensors
+          - name: "ipmi"
 ---
 apiVersion: apps/v1
 kind: DaemonSet
