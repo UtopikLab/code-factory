@@ -152,6 +152,8 @@ spec:
           hostPath:
             path: /var/lib/kubelet/device-plugins
             type: DirectoryOrCreate
+      imagePullSecrets:
+        - name: nvidia-registry-creds
 
 ---
 # Node problem detector: surfaces GPU/hardware faults on the node status.
@@ -186,6 +188,8 @@ spec:
       hostPID: true
       tolerations:
         - operator: Exists
+      imagePullSecrets:
+        - name: nvidia-registry-creds
       containers:
         - name: nvidia-node-problem-detector
           image: {{ .Values.gpu.nodeProblemDetector.image | default "nvcr.io/nvidia/k8s-node-problem-detector:0.18.0" }}
