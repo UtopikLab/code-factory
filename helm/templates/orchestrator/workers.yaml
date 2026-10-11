@@ -87,3 +87,5 @@ spec:
           emptyDir: {}
         - name: loop-state
           emptyDir: {}
+      imagePullSecrets:
+        - name: ghcr-credentials

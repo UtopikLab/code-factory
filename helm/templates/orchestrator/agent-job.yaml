@@ -63,3 +63,5 @@ spec:
             claimName: orchestrator-loop-state
         - name: task-work
           emptyDir: {}
+      imagePullSecrets:
+        - name: ghcr-credentials
