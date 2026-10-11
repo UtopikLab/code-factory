@@ -1,8 +1,8 @@
 # llama.cpp OpenAI-compatible serving stack for k8s-node01.
 #
 # Two GPU-bound server pods, one per Tesla P40:
-#   - llm-server-gpu0 : Qwen2.5-14B-Instruct-AWQ (~9 GB @4-bit) on GPU 0
-#   - llm-server-gpu1 : Qwen2.5-7B-Instruct-AWQ  (~4 GB @4-bit) on GPU 1
+#   - inference-server-gpu0 : Qwen2.5-14B-Instruct-AWQ (~9 GB @4-bit) on GPU 0
+#   - inference-server-gpu1 : Qwen2.5-7B-Instruct-AWQ  (~4 GB @4-bit) on GPU 1
 #
 # Each pod runs the llama.cpp server with the OpenAI-compatible API enabled.
 # The exact per-model CLI arguments are stored as ConfigMaps (mounted at
@@ -16,7 +16,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: llama-server-args-gpu0
-  namespace: llm
+  namespace: inference
 data:
   args.txt: |
     --model-dir /models/checkpoints/qwen2.5-14b-instruct-awq
@@ -37,7 +37,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: llama-server-args-gpu1
-  namespace: llm
+  namespace: inference
 data:
   args.txt: |
     --model-dir /models/checkpoints/qwen2.5-7b-instruct-awq
@@ -57,7 +57,7 @@ data:
 ---
 # ---------------------------------------------------------------------------
 # Storage: weights on the replicated SSD class (see models-pvc.yaml).
-# (The llm-models PVC is defined once in models-pvc.yaml; applying both
+# (The inference-models PVC is defined once in models-pvc.yaml; applying both
 #  files together must not re-declare it.)
 
 ---
@@ -67,21 +67,21 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: llm-server-gpu0
-  namespace: llm
+  name: inference-server-gpu0
+  namespace: inference
   labels:
-    app: llm-server
+    app: inference-server
     gpu: "0"
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: llm-server
+      app: inference-server
       gpu: "0"
   template:
     metadata:
       labels:
-        app: llm-server
+        app: inference-server
         gpu: "0"
       annotations:
         # Pin this pod to the P40 at Bus-Id 0000:AF:00.0 (/dev/nvidia0).
@@ -97,11 +97,11 @@ spec:
                   matchExpressions:
                     - key: app
                       operator: In
-                      values: ["llm-server"]
+                      values: ["inference-server"]
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: llama-server
-          image: ghcr.io/ggerganov/llama.cpp:latest
+          image: ghcr.io/ggml-org/llama.cpp:server-intel
           imagePullPolicy: IfNotPresent
           args:
             - /etc/llama-server-args/args.txt
@@ -146,21 +146,21 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: llm-server-gpu1
-  namespace: llm
+  name: inference-server-gpu1
+  namespace: inference
   labels:
-    app: llm-server
+    app: inference-server
     gpu: "1"
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: llm-server
+      app: inference-server
       gpu: "1"
   template:
     metadata:
       labels:
-        app: llm-server
+        app: inference-server
         gpu: "1"
       annotations:
         # Pin this pod to the P40 at Bus-Id 0000:D8:00.0 (/dev/nvidia1).
@@ -175,11 +175,11 @@ spec:
                   matchExpressions:
                     - key: app
                       operator: In
-                      values: ["llm-server"]
+                      values: ["inference-server"]
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: llama-server
-          image: ghcr.io/ggerganov/llama.cpp:latest
+          image: ghcr.io/ggml-org/llama.cpp:server-intel
           imagePullPolicy: IfNotPresent
           args:
             - /etc/llama-server-args/args.txt
@@ -219,9 +219,9 @@ spec:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: llm
+  name: inference
   labels:
-    app: llm-server
+    app: inference-server
 
 ---
 # ---------------------------------------------------------------------------
@@ -231,11 +231,11 @@ metadata:
 apiVersion: v1
 kind: Service
 metadata:
-  name: llm-server
-  namespace: llm
+  name: inference-server
+  namespace: inference
 spec:
   selector:
-    app: llm-server
+    app: inference-server
   ports:
     - name: http
       protocol: TCP
@@ -245,31 +245,31 @@ spec:
 ---
 # ---------------------------------------------------------------------------
 # OpenAI-compatible endpoint exposed via the K3s default Traefik Ingress.
-#   GET  https://llm.local/v1/models
-#   POST https://llm.local/v1/chat/completions
-#   POST https://llm.local/v1/completions
+#   GET  https://inference.local/v1/models
+#   POST https://inference.local/v1/chat/completions
+#   POST https://inference.local/v1/completions
 # ---------------------------------------------------------------------------
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: llm-ingress
-  namespace: llm
+  name: inference-ingress
+  namespace: inference
   annotations:
     # Traefik (shipped by K3s) — swap for your ingress-controller as needed.
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.middlewares: default@kubernetes/tcp-security
-    # Route every /v1/* path to the llm-server Service (round-robin between
+    # Route every /v1/* path to the inference-server Service (round-robin between
     # the two model pods).
-    traefik.ingress.kubernetes.io/rule: Host:`llm.local` && PathPrefix(`/v1`)
+    traefik.ingress.kubernetes.io/rule: Host:`inference.local` && PathPrefix(`/v1`)
     traefik.ingress.kubernetes.io/service.method: ANY
 spec:
   rules:
-    - host: llm.local
+    - host: inference.local
       http:
         paths:
           - path: /v1
             pathType: Prefix
             backend:
               service:
-                name: llm-server
-                namespace: llm
+                name: inference-server
+                namespace: inference

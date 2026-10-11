@@ -63,7 +63,7 @@ spec:
             - --issue-url
             - "${ISSUE_URL:-}"
             - --judge-url
-            - "${JUDGE_URL:-https://llm.local/v1}"
+            - "${JUDGE_URL:-https://inference.local/v1}"
             # Judge model: @32k default matches the O1/O2 locked 32768 context
             # window for both brains (override via orchestrator-config).
             - --judge-model
@@ -95,9 +95,9 @@ spec:
                 secretKeyRef:
                   name: orchestrator-secrets
                   key: openai-api-key
-            # Networking — judge brain lives on the llama.cpp server (no GPU).
+            # Networking — judge brain lives on the inference server (no GPU).
             - name: JUDGE_HOST
-              value: "llm-server-gpu1"
+              value: "inference-server-gpu1"
             - name: JUDGE_PORT
               value: "8000"
             # Loop tuning (policy knobs — see orchestrator/workers.yaml).

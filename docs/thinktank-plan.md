@@ -38,9 +38,9 @@ All facts in this section are **verified on the actual hardware** of
 
 | Namespace | Component | Detail |
 | :--- | :--- | :--- |
-yes| `llm` | 2x llama.cpp OpenAI-compatible server pods | · P40-0: Qwen2.5-Coder-7B-Instruct-GGUF (coder brain) | · P40-1: Qwen2.5-Coder-7B-Instruct-GGUF (judge brain) |
+yes| `inference` | 2x inference OpenAI-compatible server pods | · P40-0: Qwen2.5-Coder-7B-Instruct-GGUF (coder brain) | · P40-1: Qwen2.5-Coder-7B-Instruct-GGUF (judge brain) |
 | `gpu` | NVIDIA device-plugin DaemonSet | GPU discovery; exposes `nvidia.com/gpu` |
-|  | Traefik Ingress | → `https://llm.local/v1/*` (OpenAI-compatible) |
+|  | Traefik Ingress | → `https://inference.local/v1/*` (OpenAI-compatible) |
 |  | Model weights | on PVC `/models/checkpoints/` (PVC `/mnt/k8s-data-ssd`) |
 |  | Current args | `--ctx-size 4096` · AWQ · f8_e4m3 |
 
@@ -68,7 +68,7 @@ family (Qwen2.5), which keeps the judge's evaluations meaningful.
 
 | GPU | Component | Model | Role | Interface | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| P40-0 | `llama.cpp` server (namespace: `llm`) | Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M | Writes code (interactive chat) | Serves `https://llm.local/v1/*` | Left as-is; we do **not** change its model/args. |
+| P40-0 | `inference` server (namespace: `inference`) | Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M | Writes code (interactive chat) | Serves `https://inference.local/v1/*` | Left as-is; we do **not** change its model/args. |
 | P40-1 | `llama.cpp` server (namespace: `orchestrator`) | Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M | Judge/supervisor: plan, evaluate, gate, orchestrate the loop | — | Language: LangGraph state machine (`orchestrator` Deployment). |
 
 - **Coder brain (P40-0):** a `llama.cpp` inference server running a Qwen2.5
@@ -221,7 +221,7 @@ agent is never starved of CPU/RAM while inference is pinned to the GPUs.
 
 | Namespace | GPUs | cores (req/lim) | GiB (req/lim) | notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **llm** (inference) | 2× P40 (coder+judge) | inference pins | ~4.7 GiB (VRAM, per model) | both brains are 7B @ Q4_K_M; GPUs hold weights in VRAM; node RAM is a separate pool, CPU/RAM is separate from VRAM |
+| **inference** (inference) | 2× P40 (coder+judge) | inference pins | ~4.7 GiB (VRAM, per model) | both brains are 7B @ Q4_K_M; GPUs hold weights in VRAM; node RAM is a separate pool, CPU/RAM is separate from VRAM |
 | **orchestrator** (supervisor/judge brain) | 0 | ~2–3 lim | ~4–6 lim | supervisor/judge brain |
 | **workers** (coder, N parallel) | 0 | ~6–7 lim | ~6–8 lim | coder agents |
 | **node-exporter / monitoring agents** | 0 | ~1 lim | ~1 lim | monitoring |
@@ -328,15 +328,15 @@ Namespace-by-namespace inventory of what each piece is. New components are marke
 | Namespace | Component | Role | GPU | State |
 | :--- | :--- | :--- | :--- | :--- |
 | `gpu` | NVIDIA device-plugin DaemonSet | exposes `nvidia.com/gpu` to the scheduler | (host) | `[EXISTING]` |
-| `llm` | `llm-server-gpu0` — llama.cpp coder server (**Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M**) | powers workers + interactive chat | P40-0 | `[EXISTING]` |
-| `llm` | `llm-server-gpu1` — llama.cpp judge/supervisor server (**Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M**) | the judge brain | P40-1 | `[NEW]` (same server image, new model) |
+| `inference` | `inference-server-gpu0` — inference server (**Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M**) | powers workers + interactive chat | P40-0 | `[EXISTING]` |
+| `inference` | `inference-server-gpu1` — inference judge/supervisor server (**Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M**) | the judge brain | P40-1 | `[NEW]` (same server image, new model) |
 | `orchestrator` | `orchestrator` Deployment | the LangGraph supervisor/judge runtime + tool-calling agent | CPU (0 GPU) | `[NEW]` |
 | `orchestrator` | worker pod(s) | coder agents driven by the supervisor (spawns on demand) | CPU (0 GPU) | `[NEW]` |
 | `monitoring` | `node-exporter` DaemonSet | whole-box CPU/RAM/GPU/disk metrics → central Prometheus | (host) | `[NEW]` |
 | `monitoring` | iDRAC IPMI exporter / Grafana IPMI plugin (iDRAC9 Enterprise, IPMI v2.0) | PERC array, cache battery, SMART, temps, fans, power, events | (host mgmt) | `[NEW]` |
 | `trueNAS` | Prometheus + Grafana | central monitoring (existing) | — | `[EXISTING]` |
 
-> The judge brain (§5, `llm-server-gpu1`) is the **same llama.cpp server image**
+> The judge brain (§5, `inference-server-gpu1`) is the **same inference server image**
 > as the coder — it only loads a different model and takes on planning/eval/gate
 > prompts. Its args ConfigMap is the same shape as the coder's but with a
 > re-evaluated context window (O1/O2), not a fixed 64K default.

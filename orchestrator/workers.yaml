@@ -33,10 +33,10 @@ data:
   max-iterations: "8" # O5 — bound the retry budget / overnight runtime
   task-wait-seconds: "30" # how long the idle supervisor waits for a task
   loop-state-dir: "/data/loop-state"
-  # Judge brain (llama.cpp server, no GPU). The supervisor + agent Jobs
+  # Judge brain (inference server, no GPU). The supervisor + agent Jobs
   # reach it over the network via Traefik; swap the host when the ingress
   # / VPN changes.
-  judge-url: "https://llm.local/v1"
+  judge-url: "https://inference.local/v1"
   judge-model: "qwen2.5-coder-7b-instruct-q5-kn@32k"
 ---
 # ---------------------------------------------------------------------------
@@ -98,7 +98,7 @@ spec:
             - --state-dir
             - /data/loop-state
             - --judge-url
-            - "${JUDGE_URL:-https://llm.local/v1}"
+            - "${JUDGE_URL:-https://inference.local/v1}"
             - --judge-model
             - "${JUDGE_MODEL:-qwen2.5-<judge>@32k}"
             - --openai-key
@@ -122,7 +122,7 @@ spec:
                   name: orchestrator-secrets
                   key: openai-api-key
             - name: JUDGE_URL
-              value: "${JUDGE_URL:-https://llm.local/v1}"
+              value: "${JUDGE_URL:-https://inference.local/v1}"
             - name: JUDGE_MODEL
               value: "${JUDGE_MODEL:-qwen2.5-<judge>@32k}"
             - name: TASK

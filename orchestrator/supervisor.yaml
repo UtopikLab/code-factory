@@ -43,7 +43,7 @@ spec:
           # orchestrator/supervisor-task-acceptor.py).
           command: ["/bin/sh", "-c"]
           args:
-            - sh -c 'mkdir -p /data/loop-state; python3 -m langgraph.cli serve --state-dir /data/loop-state --task-wait-seconds "${TASK_WAIT:-30}" --max-iterations "${MAX_ITERATIONS:-8}" --judge-url "${JUDGE_URL:-https://llm.local/v1}" --judge-model "${JUDGE_MODEL:-qwen2.5-<judge>@32k}" --openai-key "${OPENAI_API_KEY:-}" & echo $! > /var/run/langgraph.pid; exec python3 orchestrator/supervisor-task-acceptor.py --port 8000'
+            - sh -c 'mkdir -p /data/loop-state; python3 -m langgraph.cli serve --state-dir /data/loop-state --task-wait-seconds "${TASK_WAIT:-30}" --max-iterations "${MAX_ITERATIONS:-8}" --judge-url "${JUDGE_URL:-https://inference.local/v1}" --judge-model "${JUDGE_MODEL:-qwen2.5-<judge>@32k}" --openai-key "${OPENAI_API_KEY:-}" & echo $! > /var/run/langgraph.pid; exec python3 orchestrator/supervisor-task-acceptor.py --port 8000'
 
           # CPU/RAM limits fit the node budget (orchestrator ~2-3 cores, 4-6 GiB).
           resources:
@@ -65,7 +65,7 @@ spec:
             # network (no GPU needed here). Swap the host when connecting
             # through a different ingress / VPN.
             - name: JUDGE_HOST
-              value: "llm-server-gpu1"
+              value: "inference-server-gpu1"
             - name: JUDGE_PORT
               value: "8000"
             # Loop tuning (Open Questions O4 / O5). Parameterized so policy can
@@ -151,7 +151,7 @@ spec:
             initialDelaySeconds: 60
             periodSeconds: 30
       # Pure CPU workload — no GPU requested or limited. The coder/judge models
-      # live on the llama.cpp servers in the `llm` namespace.
+      # live on the inference servers in the `inference` namespace.
       restartPolicy: Always
 
 ---

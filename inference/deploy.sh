@@ -36,7 +36,7 @@ apply() {
   echo "--> Applying GPU device-plugin (namespace 'gpu')..."
   kubectl apply -f "${ROOT}/nvidia-device-plugin.yaml"
 
-  echo ">--> Applying llm stack (namespace 'llm')..."
+  echo ">--> Applying inference stack (namespace 'inference')..."
   kubectl apply -f "${ROOT}/models-pvc.yaml"
   kubectl apply -f "${ROOT}/deployment.yaml"
 
@@ -56,12 +56,12 @@ apply() {
 
   echo "--> Waiting for GPU pods / PVC..."
   kubectl wait --for=condition=ready pod -l app=nvidia-device-plugin -n gpu --timeout=120s || true
-  kubectl -n llm wait --for=condition=ready pod --all --timeout=180s || true
+  kubectl -n inference wait --for=condition=ready pod --all --timeout=180s || true
   kubectl -n orchestrator wait --for=condition=ready pod -l app=orchestrator --timeout=120s || true
 }
 
 remove() {
-  echo "--> Removing llm stack..."
+  echo "--> Removing inference stack..."
   kubectl delete -f "${ROOT}/deployment.yaml" >/dev/null
   kubectl delete -f "${ROOT}/models-pvc.yaml" >/dev/null
   echo ">--> Removing GPU device-plugin..."
@@ -89,5 +89,5 @@ esac
 
 echo "=== done (${MODE}) ==="
 echo "Check: kubectl get pods -A"
-echo "Check: kubectl get pvc -n llm -o wide"
-echo "Call:  https://llm.local/v1/chat/completions  (OpenAI-compatible)"
+echo "Check: kubectl get pvc -n inference -o wide"
+echo "Call:  https://inference.local/v1/chat/completions  (OpenAI-compatible)"

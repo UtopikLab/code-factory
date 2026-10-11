@@ -6,7 +6,7 @@ hardware of `k8s-node01`** and not a generic "best practice" template.
 ```
 Deploy:   ./inference/deploy.sh
 Apply:    kubectl apply -f inference/
-Endpoint: https://llm.local/v1/chat/completions   (OpenAI-compatible)
+Endpoint: https://inference.local/v1/chat/completions   (OpenAI-compatible)
 ```
 
 ---
@@ -140,12 +140,12 @@ the two P40s appear as `nvidia.com/gpu` resources so the scheduler can place the
 server pods. No NVIDIA GPU Operator is required (it is heavier and unnecessary on
 a single bare-metal node).
 
-### 4.2 The server (namespace `llm`)
+### 4.2 The server (namespace `inference`)
 [`deployment.yaml`](inference/deployment.yaml) deploys two `llama.cpp` server
 pods:
 
-- **`llm-server-gpu0`** → pinned to Bus-Id `0000:AF:00.0` (`nvidia.com/gpu-device-id: "0"`), model from §3.3.
-- **`llm-server-gpu1`** → pinned to Bus-Id `0000:D8:00.0` (`nvidia.com/gpu-device-id: "1"`), model from §3.3.
+- **`inference-server-gpu0`** → pinned to Bus-Id `0000:AF:00.0` (`nvidia.com/gpu-device-id: "0"`), model from §3.3.
+- **`inference-server-gpu1`** → pinned to Bus-Id `0000:D8:00.0` (`nvidia.com/gpu-device-id: "1"`), model from §3.3.
 
 Each pod:
 - requests & limits **`nvidia.com/gpu: 1`** and **`memory: 23Gi`** — we ask for a
@@ -156,10 +156,10 @@ Each pod:
 - serves an **OpenAI-compatible** API on port `8000`.
 
 Exposure: a ClusterIP `Service` + `Ingress` (Traefik, which K3s ships with)
-publish `https://llm.local/v1/*`. See the Ingress in `deployment.yaml`.
+publish `https://inference.local/v1/*`. See the Ingress in `deployment.yaml`.
 
 ### 4.3 Storage (consistent with the existing StorageClasses)
-[`models-pvc.yaml`](inference/models-pvc.yaml) creates `llm-models` on
+[`models-pvc.yaml`](inference/models-pvc.yaml) creates `inference-models` on
 **`k8s-sc-ssd-replicated`** (`/mnt/k8s-data-ssd`, 1.9 TB xfs, the default class).
 Weights are large and rarely mutated → replicated SSD is the right home. Do **not**
 use `k8s-sc-nvme-fast` for multi-GB model weights (it is for small/fast local
@@ -171,7 +171,7 @@ PVs); NVMe is only worth it for the tiny metadata/log dirs.
 
 [`orchestrator/`](orchestrator/) is the always-on agent orchestration runtime.
 It is a **supervisor / judge** that spawns **coder** worker pods on demand. It
-sits alongside — and is independent of — the `llm` inference stack:
+sits alongside — and is independent of — the `inference` inference stack:
 
 | Kind | File | Namespace | Role |
 | :--- | :--- | :--- | :--- |
@@ -185,7 +185,7 @@ sits alongside — and is independent of — the `llm` inference stack:
 
 - **Supervisor (`orchestrator/supervisor.yaml`)** — an always-on Deployment that
   runs the LangGraph supervisor/judge loop. It is **CPU-only**: it talks to the
-  judge and coder brains over the network (the `llm` servers), it does not hold
+  judge and coder brains over the network (the `inference` servers), it does not hold
   a GPU. Resources are capped (~2-3 cores, 4-6 GiB) so it never starves the GPU
   servers.
   - The Deployment runs the loop in the background (resident, idle most of the
@@ -211,8 +211,8 @@ sits alongside — and is independent of — the `llm` inference stack:
   tuned without editing the manifest. This is how the overnight agent gets work
   done: the supervisor plans and judges, the workers execute.
 - **The judge brain** — the supervisor's judge tool-calling agent is served by
-  the **`llm-server-gpu1`** pod in the `llm` namespace (over `https://llm.local/
-  v1`, OpenAI-compatible). The coder brain uses `llm-server-gpu0`.
+  the **`inference-server-gpu1`** pod in the `inference` namespace (over `https://inference.local/
+  v1`, OpenAI-compatible). The coder brain uses `inference-server-gpu0`.
 
 ### 4.4.2 Overnight workflow
 
@@ -272,15 +272,15 @@ alongside the inference stack (see §5.1). The new namespaces are:
 
 # GPU is now visible to the scheduler
 kubectl get pods -A
-kubectl get pvc -n llm -o wide
+kubectl get pvc -n inference -o wide
 
 # Load a model into a server pod (weights already on the PVC):
-kubectl exec -n llm deployment/llm-server-gpu0 -- \
+kubectl exec -n inference deployment/inference-server-gpu0 -- \
   llama-quantize /models/checkpoints/qwen2.5-14b-instruct-awq.gguf \
     /models/checkpoints/qwen2.5-14b-instruct-awq/
 
 # Talk to it (OpenAI-compatible)
-curl -s https://llm.local/v1/chat/completions \
+curl -s https://inference.local/v1/chat/completions \
   -H 'Authorization: Bearer $OPENAI_API_KEY' \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen2.5-14b-instruct-awq","messages":[{"role":"user","content":"ping"}]}'
@@ -293,8 +293,8 @@ curl -s https://llm.local/v1/chat/completions \
 | File | Kind(s) | Namespace | Key values |
 | :--- | :--- | :--- | :--- |
 | `nvidia-device-plugin.yaml` | DaemonSet, CRDs, RBAC | `gpu` | image `nvcr.io/nvidia/k8s-device-plugin:2.18.0` |
-| `models-pvc.yaml` | PVC | `llm` | `k8s-sc-ssd-replicated`, 50Gi |
-| `deployment.yaml` | ConfigMap ×2, Deployment ×2, Service ×1, Ingress | `llm` | `nvidia.com/gpu:1`, `memory:23Gi`, port 8000 |
+| `models-pvc.yaml` | PVC | `inference` | `k8s-sc-ssd-replicated`, 50Gi |
+| `deployment.yaml` | ConfigMap ×2, Deployment ×2, Service ×1, Ingress | `inference` | `nvidia.com/gpu:1`, `memory:23Gi`, port 8000 |
 | `orchestrator/namespace.yaml` | Namespace | `orchestrator` | |
 | `orchestrator/supervisor.yaml` | Deployment, Service | `orchestrator` | CPU-only, limits cpu `2.5`/mem `5Gi`, port 8000 |
 | `orchestrator/workers.yaml` | ConfigMap, Job | `orchestrator` | limits cpu `6.5`/mem `7Gi`, parallelism `1` |

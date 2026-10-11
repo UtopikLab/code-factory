@@ -37,7 +37,7 @@ ensure_images() {
   local images=(
     "nvcr.io/nvidia/k8s-device-plugin:2.18.0"
     "nvcr.io/nvidia/k8s-node-problem-detector:0.18.0"
-    "${IMAGE_REGISTRY}/ggerganov/llama.cpp:latest"
+    "${IMAGE_REGISTRY}/ggml-org/llama.cpp:server-intel"
   )
   local img
   for img in "${images[@]}"; do

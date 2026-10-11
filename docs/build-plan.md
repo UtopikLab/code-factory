@@ -90,12 +90,12 @@ kubectl create secret generic orchestrator-secrets \
 
 ### 1.4 Judge brain (llama.cpp) — prerequisite runtime service
 The supervisor and agent Jobs reach the judge at
-`https://llm.local/v1` (host `llm-server-gpu1`). It must be **running** before a
+`https://inference.local/v1` (host `inference-server-gpu1`). It must be **running** before a
 task can complete. This is the existing `inference/` stack — ensure it is
 deployed and serving (the deploy script covers it, see §2 phase F):
 ```bash
-kubectl wait --for=condition=ready pod --all -n llm --timeout=180s
-curl -fsS https://llm.local/v1/chat/completions \
+kubectl wait --for=condition=ready pod --all -n inference --timeout=180s
+curl -fsS https://inference.local/v1/chat/completions \
   -H "Authorization: Bearer $OPENAI_API_KEY" -H "Content-Type: application/json" \
   -d '{"model":"qwen2.5-coder-7b-instruct-q5-kn@32k","messages":[]}'
 ```
@@ -162,7 +162,7 @@ data:
   max-iterations: "8"
   task-wait-seconds: "30"
   loop-state-dir: "/data/loop-state"
-  judge-url: "https://llm.local/v1"
+  judge-url: "https://inference.local/v1"
   judge-model: "qwen2.5-coder-7b-instruct-q5-kn@32k"
 EOF
 

@@ -57,16 +57,16 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: nvidia-gpu-device-plugin:role
+  name: nvidia-gpu-device-plugin-role
 subjects:
   - kind: ServiceAccount
-    name: nvidia-gpu-device-plugin:serviceaccount
+    name: nvidia-gpu-device-plugin-sa
     namespace: gpu
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: nvidia-gpu-device-plugin:serviceaccount
+  name: nvidia-gpu-device-plugin-sa
   namespace: gpu
 ---
 apiVersion: apps/v1
@@ -85,7 +85,7 @@ spec:
       labels:
         name: nvidia-device-plugin
     spec:
-      serviceAccountName: nvidia-gpu-device-plugin:serviceaccount
+      serviceAccountName: nvidia-gpu-device-plugin-sa
       hostNetwork: true
       hostIPC: true
       hostPID: true
@@ -141,7 +141,7 @@ spec:
       labels:
         name: nvidia-node-problem-detector
     spec:
-      serviceAccountName: nvidia-gpu-device-plugin:serviceaccount
+      serviceAccountName: nvidia-gpu-device-plugin-sa
       tolerations:
         - operator: Exists
       containers:

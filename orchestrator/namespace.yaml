@@ -6,7 +6,7 @@
 #   - the on-demand worker pods (coder agents) that the supervisor spawns.
 #
 # Nothing here touches a GPU — the coder/judge models live on the llama.cpp
-# servers in the `llm` namespace and are reached over the network.
+# servers in the `inference` namespace and are reached over the network.
 apiVersion: v1
 kind: Namespace
 metadata:

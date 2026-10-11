@@ -13,7 +13,7 @@
 #   - batch Job, backoffLimit 0, restartPolicy Never (one-shot, no retries —
 #     the supervisor owns failure/retry at the loop level).
 #   - pure CPU (no GPU): the judge + coder brains live on the llama.cpp
-#     servers in the `llm` namespace; this pod only runs the orchestrator loop.
+#     servers in the `inference` namespace; this pod only runs the orchestrator loop.
 #   - the GITHUB_TOKEN opens the PR (scoped by the triggering workflow's
 #     permissions — see .github/workflows/drain.yaml). The supervisor injects
 #     it into this Job from the task payload, so no dedicated secret/PAT is
@@ -61,7 +61,7 @@ spec:
             - --issue-url
             - "${ISSUE_URL:-}"
             - --judge-url
-            - "${JUDGE_URL:-https://llm.local/v1}"
+            - "${JUDGE_URL:-https://inference.local/v1}"
             - --judge-model
             - "${JUDGE_MODEL:-qwen2.5-coder-7b-instruct-q5-kn@32k}"
             - --openai-key
@@ -91,9 +91,9 @@ spec:
                 secretKeyRef:
                   name: orchestrator-secrets
                   key: openai-api-key
-            # Networking — judge brain lives on the llama.cpp server (no GPU).
+            # Networking — judge brain lives on the inference server (no GPU).
             - name: JUDGE_HOST
-              value: "llm-server-gpu1"
+              value: "inference-server-gpu1"
             - name: JUDGE_PORT
               value: "8000"
             # Loop tuning (policy knobs — see orchestrator/workers.yaml).
