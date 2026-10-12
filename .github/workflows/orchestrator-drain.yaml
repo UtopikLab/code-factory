@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       issue_number:
-        description: 'Issue number to process'
+        description: "Issue number to process"
         required: false
         type: string
 
@@ -18,12 +18,12 @@ jobs:
     # Conditionals: uncomment as needed
     # Only run if issue has 'orchestrator' label:
     # if: contains(github.event.issue.labels.*.name, 'orchestrator')
-    
+
     # Only run on main branch PRs:
     # if: github.event.pull_request.base.ref == 'main'
-    
+
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Extract task info
         id: task-info
@@ -44,11 +44,11 @@ jobs:
             echo "No task info available"
             exit 1
           fi
-          
+
           echo "task_id=$TASK_ID" >> $GITHUB_OUTPUT
           echo "issue_title=$ISSUE_TITLE" >> $GITHUB_OUTPUT
           echo "issue_url=$ISSUE_URL" >> $GITHUB_OUTPUT
-      
+
       - name: Send task to orchestrator
         env:
           ORCHESTRATOR_URL: ${{ secrets.ORCHESTRATOR_URL }}
@@ -58,19 +58,19 @@ jobs:
             echo "ERROR: Missing ORCHESTRATOR_URL or ORCHESTRATOR_TOKEN secrets"
             exit 1
           fi
-          
+
           TASK_ID="${{ steps.task-info.outputs.task_id }}"
           ISSUE_TITLE="${{ steps.task-info.outputs.issue_title }}"
           ISSUE_URL="${{ steps.task-info.outputs.issue_url }}"
           REPO="${{ github.repository }}"
-          
+
           echo "Sending task to orchestrator:"
           echo "  Repo: $REPO"
           echo "  Issue: $TASK_ID"
           echo "  Title: $ISSUE_TITLE"
           echo "  URL: $ISSUE_URL"
           echo ""
-          
+
           # Send to orchestrator
           RESPONSE=$(curl -X POST "$ORCHESTRATOR_URL" \
             -H "Authorization: token $ORCHESTRATOR_TOKEN" \
@@ -86,14 +86,14 @@ jobs:
           }
           EOF
           )
-          
+
           # Extract HTTP status code (last line)
           HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
           BODY=$(echo "$RESPONSE" | head -n-1)
-          
+
           echo "Response: $HTTP_CODE"
           echo "$BODY"
-          
+
           # Check for success (200-299)
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
             echo "✓ Task accepted by orchestrator"
