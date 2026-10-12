@@ -2,6 +2,7 @@
 Namespace gpu (static) + RBAC + device-plugin DaemonSets.
 Faithful to inference/nvidia-device-plugin.yaml.
 */}}
+{{- if not .Values.gpu.externalManaged }}
 {{- if not (lookup "v1" "Namespace" "" "gpu") }}
 apiVersion: v1
 kind: Namespace
@@ -155,6 +156,7 @@ spec:
       imagePullSecrets:
         - name: nvidia-registry-creds
 
+{{- if .Values.gpu.nodeProblemDetector.enabled }}
 ---
 # Node problem detector: surfaces GPU/hardware faults on the node status.
 apiVersion: apps/v1
@@ -200,3 +202,5 @@ spec:
             requests:
               cpu: 10m
               memory: 6Mi
+{{- end }}
+{{- end }}

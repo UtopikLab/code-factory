@@ -20,7 +20,7 @@ app.k8s.io/component: {{ $r.Component }}
 {{- end -}}
 
 {{/*
-Host network / IPC / PID flags for K3s daemon pods (device-plugin, node-exporter, redfish-exporter).
+Host network / IPC / PID flags for K3s daemon pods (device-plugin, node-exporter).
 */}}
 {{- define "k8s-inference.hostAccess" -}}
 hostNetwork: {{ .hostNetwork | default true }}

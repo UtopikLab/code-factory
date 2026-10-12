@@ -32,7 +32,7 @@
 |---|---|---|
 | **3 — cluster tooling** | ✅ APPROVED | `kubectl`, `git` |
 | **4 — infra services** | ✅ APPROVED | NVIDIA device-plugin DaemonSet, Traefik Ingress, containerd, K3s |
-| **5 — external services** | ✅ APPROVED (official sources only) | llama.cpp (`ggerganov/llama.cpp` GitHub release binaries), GitHub, Prometheus+Grafana, iDRAC/IPMI (`ipmitool`), node-exporter (`prom/node-exporter`) |
+| **5 — external services** | ✅ APPROVED (official sources only) | llama.cpp (`ggerganov/llama.cpp` GitHub release binaries), GitHub, Prometheus+Grafana, hardware telemetry via Redfish/IPMI (`ipmitool`), node-exporter (`prom/node-exporter`) |
 | **6 — secrets** | ✅ NOTHING TO APPROVE | handled in-cluster only |
 | **1 — build tooling** | ⛔ NOT APPROVED | buildah / docker / nerdctl — see §4 |
 
@@ -82,10 +82,10 @@ kubectl create secret generic orchestrator-secrets \
 - **⚠️ The `github-token` value in that secret is the expired PAT** (see §5).
   Before any task can be accepted the secret must be refreshed — do **not**
   persist or echo the real values; recreate from the rotated PAT.
-- Also create the iDRAC secret (`monitoring/secrets.yaml`):
+- Also create the hardware telemetry secret (`monitoring/secrets.yaml`):
   ```bash
-  kubectl create secret generic idrac-credentials --namespace monitoring \
-    --from-literal=password=<the-idrac-password>
+  kubectl create secret generic hardware-telemetry-credentials --namespace monitoring \
+    --from-literal=password=<telemetry-endpoint-password>
   ```
 
 ### 1.4 Judge brain (llama.cpp) — prerequisite runtime service
@@ -211,7 +211,7 @@ kubectl -n orchestrator exec orchestrator-<pod> -- sh -c \
   'curl -fsS http://localhost:8000/healthz'
 ```
 
-### Phase E — Monitoring wiring (node-exporter, iDRAC)
+### Phase E — Monitoring wiring (node-exporter, hardware telemetry)
 Both manifests already exist in `monitoring/`; ensure they are applied and add
 the central-Prometheus (TrueNAS) wiring.
 
@@ -219,9 +219,9 @@ the central-Prometheus (TrueNAS) wiring.
 # node-exporter DaemonSet -> host :9100 (whole-box CPU/RAM/GPU/disk metrics).
 kubectl apply -f monitoring/node-exporter.yaml
 
-# iDRAC exporter -> central Prometheus (transport depends on the iDRAC version,
-# Open Question O3; default manifest assumes redfish).
-kubectl apply -f monitoring/idrac.yaml
+# Hardware telemetry exporter -> central Prometheus (transport depends on
+# controller capability; default manifest assumes redfish).
+kubectl apply -f <hardware-telemetry-manifest>
 ```
 
 Central Prometheus on TrueNAS (`http://truenas.utopiklab.lan:30104/`):
@@ -246,8 +246,8 @@ Central Prometheus on TrueNAS (`http://truenas.utopiklab.lan:30104/`):
            metrics_path: /metrics
            scheme: http
    ```
-2. Add an iDRAC hardware-health scrape job (the `grafana/redfish-exporter`
-   DaemonSet already remote-writes to Prometheus; if the iDRAC is IPMI (O3),
+2. Add a hardware-controller health scrape job (the `grafana/redfish-exporter`
+  DaemonSet already remote-writes to Prometheus; if the controller uses IPMI,
    use the official `ipmi-exporter` (Andy Polyakov) instead of redfish).
 3. Grafana (official) on TrueNAS: add a data source pointing at the Prometheus
    instance and import a node-exporter dashboard.
@@ -323,10 +323,9 @@ Job, and return `{"uid":..., "task_id":"UtopikLab/llm-rig#42", ...}`.
   2. **docker / nerdctl** on a build host with a containerd backend.
   Either option keeps the image build off the runtime node. **Decision pending.**
 
-- **iDRAC version (Open Question O3):** the iDRAC transport in
-  `monitoring/idrac.yaml` defaults to `redfish`. Confirm the actual iDRAC
-  version on k8s-node01; if it is older, switch to the IPMI path (`ipmitool`
-  → `ipmi-exporter`).
+- **Hardware telemetry transport (Open Question O3):** the manifest transport
+  defaults to `redfish`. Confirm the controller capability on the target node;
+  if unavailable, switch to the IPMI path (`ipmitool` → `ipmi-exporter`).
 
 - **Ingress exposure:** Phase C assumes a Traefik Ingress exposing the
   orchestrator Service. Confirm the routable host / domain before the manual

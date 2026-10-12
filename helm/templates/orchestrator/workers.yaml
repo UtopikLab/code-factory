@@ -45,6 +45,19 @@ spec:
       containers:
         - name: coder
           image: {{ .Values.IMAGE | default "ghcr.io/utopiklab/langgraph-orchestrator:latest" }}
+          command:
+            - python3
+            - -c
+            - |
+              import json
+              import os
+
+              summary = {
+                  "status": "worker-placeholder",
+                  "task_id": os.environ.get("TASK_ID", "orchestrator-task"),
+                  "repo": os.environ.get("REPO", "UtopikLab/llm-rig"),
+              }
+              print(json.dumps(summary))
           env:
             - name: TASK_ID
               value: {{ (index .Values.orchestrator.config "task-id") | default "orchestrator-task" | quote }}

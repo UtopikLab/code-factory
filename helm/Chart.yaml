@@ -22,8 +22,6 @@ templates:
   - orchestrator/agent-job.yaml
   - monitoring/namespace.yaml
   - monitoring/node-exporter.yaml
-  - monitoring/idrac.yaml
-  - monitoring/secrets.yaml
 maintainers:
   - name: UtopikLab
     url: https://github.com/UtopikLab

@@ -1,3 +1,4 @@
+{{- if not .Values.gpu.externalManaged }}
 {{- if not (lookup "v1" "Namespace" "" "gpu") }}
 apiVersion: v1
 kind: Namespace
@@ -8,4 +9,5 @@ metadata:
     app.k8s.io/instance: {{ .Release.Name }}
     app.k8s.io/version: {{ .Chart.AppVersion | quote }}
     component: gpu
+{{- end }}
 {{- end }}

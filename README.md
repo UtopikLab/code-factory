@@ -22,6 +22,15 @@ Endpoint: https://inference.local/v1/chat/completions   (OpenAI-compatible)
 | **Weights storage** | PVC on `k8s-sc-ssd-replicated` (`/mnt/k8s-data-ssd`) | Replicated durability for expensive models. |
 | **Exposure** | ClusterIP Service + `Ingress` (Traefik, K3s default) | Drop-in OpenAI client endpoint. |
 
+### Repo-local design note
+
+This repo now follows a leaner, minimal-viable-loop posture: keep the resident
+supervisor, narrow worker burst, judge, and human PR gate, and defer extra
+specialist roles until there is concrete evidence they are required.
+
+See [docs/keep-vs-defer-architecture.md](docs/keep-vs-defer-architecture.md) for
+repo-local guidance and the keep-vs-defer implementation stance.
+
 ---
 
 ## 1. Why `llama.cpp` and not vLLM / SGLang / TGI / Triton?
@@ -129,8 +138,8 @@ orchestrator/
 monitoring/
 ├── namespace.yaml               # Namespace 'monitoring'
 ├── node-exporter.yaml           # host metrics DaemonSet → central Prometheus (TrueNAS)
-├── idrac.yaml                   # iDRAC/PERC Redfish exporter + ConfigMap (transport param.)
-└── secrets.yaml                 # iDRAC admin credentials (never hardcoded)
+├── hardware-telemetry.yaml      # hardware telemetry exporter + ConfigMap (transport param.)
+└── secrets.yaml                 # hardware telemetry credentials (never hardcoded)
 ```
 
 ### 4.1 GPU scheduling (namespace `gpu`)
@@ -227,7 +236,7 @@ sits alongside — and is independent of — the `inference` inference stack:
    bounded by `max-iterations` (Open Question O5, default 8).
 3. Workers execute code, emit output; the judge approves/rejects.
 4. The supervisor opens a PR (or emits an event) and returns to idle.
-5. Node-exporter + iDRAC telemetry report health to central Prometheus
+5. Node-exporter + hardware telemetry report health to central Prometheus
    (TrueNAS), so overnight runs are monitored (§4.5).
 
 ### 4.4.3 Telemetry (namespace `monitoring`)
@@ -239,20 +248,20 @@ Prometheus on TrueNAS** (not a second Prometheus on the box):
 | :--- | :--- | :--- | :--- |
 | `Namespace` | `monitoring/node-exporter.yaml` | `monitoring` | Isolates the telemetry stack. |
 | `DaemonSet` | `monitoring/node-exporter.yaml` | `monitoring` | Host CPU/RAM/GPU/disk metrics → Prometheus. |
-| `DaemonSet` | `monitoring/idrac.yaml` | `monitoring` | iDRAC/PERC hardware health (Redfish or IPMI). |
-| `ConfigMap` | `monitoring/idrac.yaml` | `monitoring` | iDRAC transport + target (parameterized). |
-| `Secret` | `monitoring/secrets.yaml` | `monitoring` | iDRAC admin credentials (never hardcoded). |
+| `DaemonSet` | `monitoring/<hardware-telemetry-manifest>.yaml` | `monitoring` | Hardware-controller health (Redfish or IPMI). |
+| `ConfigMap` | `monitoring/<hardware-telemetry-manifest>.yaml` | `monitoring` | Telemetry transport + target (parameterized). |
+| `Secret` | `monitoring/secrets.yaml` | `monitoring` | Hardware telemetry credentials (never hardcoded). |
 
 - **node-exporter** — one DaemonSet process per node exposing `/proc` metrics on
   `:9100`. It does **not** run a separate Prometheus; it scrapes into the
   existing central Prometheus on TrueNAS (`http://truenas.utopiklab.lan:9090`).
   CPU/RAM limited (~1 core, ~1 GiB).
-- **iDRAC exporter** — `grafana/redfish-exporter` reads the iDRAC/PERC
-  (H730P/H740P) hardware health (temp, fan, power, SMART) via **Redfish
-  Remote Write** (recommended for iDRAC 9.5+/10.5+) and forwards it to the same
-  central Prometheus. The iDRAC **version → transport choice** (Redfish vs IPMI)
-  is **parameterized** in the ConfigMap (Open Question O3), so the manifest is
-  valid regardless of firmware.
+- **Hardware telemetry exporter** — `grafana/redfish-exporter` reads
+  controller/array hardware health (temp, fan, power, SMART) via
+  **Redfish Remote Write** and forwards it to the same central Prometheus.
+  The **transport choice** (Redfish vs IPMI) is **parameterized** in the
+  ConfigMap (Open Question O3), so the manifest is valid regardless of
+  firmware.
 
 ### 4.4.4 Deploying the new namespaces
 
@@ -260,7 +269,7 @@ Prometheus on TrueNAS** (not a second Prometheus on the box):
 alongside the inference stack (see §5.1). The new namespaces are:
 
 - **`orchestrator`** — supervisor, workers, secrets.
-- **`monitoring`** — node-exporter, iDRAC exporter, secrets.
+- **`monitoring`** — node-exporter, hardware telemetry exporter, secrets.
 
 ---
 
@@ -301,8 +310,8 @@ curl -s https://inference.local/v1/chat/completions \
 | `orchestrator/secrets.yaml` | Secret | `orchestrator` | `orchestrator-secrets` (OpenAI key + GitHub PAT) |
 | `monitoring/namespace.yaml` | Namespace | `monitoring` | |
 | `monitoring/node-exporter.yaml` | Namespace, DaemonSet, Service, SA | `monitoring` | hostNetwork, limits cpu `1`/mem `1Gi`, :9100 |
-| `monitoring/idrac.yaml` | ConfigMap, DaemonSet, Service, SA | `monitoring` | transport `redfish`, limits cpu `200m`/mem `256Mi` |
-| `monitoring/secrets.yaml` | Secret | `monitoring` | `idrac-credentials` (iDRAC admin) |
+| `monitoring/<hardware-telemetry-manifest>.yaml` | ConfigMap, DaemonSet, Service, SA | `monitoring` | transport `redfish`, limits cpu `200m`/mem `256Mi` |
+| `monitoring/secrets.yaml` | Secret | `monitoring` | hardware telemetry credential Secret |
 
 ---
 

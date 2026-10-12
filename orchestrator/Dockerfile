@@ -1,5 +1,5 @@
-# Orchestrator image for autonomous LangGraph drain loop.
-# Builds a Python 3.12 container with LangGraph CLI, OpenAI client, and GitHub integration.
+# Orchestrator image for autonomous LangGraph supervisor loop.
+# Builds a Python 3.12 container with LangGraph, OpenAI client, and GitHub integration.
 
 FROM python:3.12-slim
 
@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
+    kubectl \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
@@ -20,7 +21,11 @@ RUN pip install --no-cache-dir \
     pydantic \
     httpx \
     pyyaml \
-    python-dotenv
+    python-dotenv \
+    aiohttp
+
+# Copy supervisor loop code
+COPY orchestrator/supervisor_loop.py /app/supervisor_loop.py
 
 # Create data directories for persistent state
 RUN mkdir -p /data/loop-state /data/task-work
@@ -29,7 +34,5 @@ RUN mkdir -p /data/loop-state /data/task-work
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Default entrypoint: LangGraph CLI serve
-# Can be overridden by orchestrator pod spec
-ENTRYPOINT ["langgraph", "cli", "serve"]
-CMD ["--state-dir", "/data/loop-state"]
+# Default entrypoint: supervisor loop
+ENTRYPOINT ["python3", "/app/supervisor_loop.py"]

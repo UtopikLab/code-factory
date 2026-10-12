@@ -11,8 +11,8 @@
 factory — a Qwen2.5 **supervisor/judge** on P40-1 orchestrates Qwen2.5 **coder
 workers** on P40-0 via a LangGraph state machine, evaluates and picks the best
 output, retries on failure, and opens a PR through a human-review gate. Runs
-overnight 24/7, independent of VS Code, monitored through the existing central
-Prometheus + new iDRAC telemetry.
+continuously 24/7 as a resident service, independent of VS Code, monitored
+through the existing central Prometheus + new iDRAC telemetry.
 
 ---
 
@@ -133,13 +133,73 @@ flowchart TB
 
 **Loop semantics (design intent):** `plan → spawn N workers → evaluate each → pick BEST → (on failure, loop: new plan + fresh workers, bounded by a max iteration count) → on success, open a PR through a human review gate (approve/reject). See §8 for the confirmed iteration count and the worker count `N`.`
 
-### 2.3 Deployment posture
+### 2.3 Specialized-agent architecture
+
+The design should not be treated as a single monolithic coding agent with one
+model doing everything. The more robust pattern is a **specialized multi-agent
+loop** in which each role gets the model best suited to that task:
+
+| Role | Purpose | Preferred model profile | Why |
+| :--- | :--- | :--- | :--- |
+| **Supervisor / planner** | Reads the issue, decomposes the task, chooses the strategy, sets iteration budget, and decides when to delegate | strongest reasoning model available within the budget | good at planning, judgment, and tool selection |
+| **Coder workers** | Make the actual repo edits, run targeted validation, and produce patch candidates | code-specialized model, smaller context but strong patch quality | good at direct code generation and narrow test-driven edits |
+| **Judge / reviewer** | Scores each worker output against acceptance criteria, checks for regressions, and chooses the best patch | same family as the coder or a stronger review model, but focused on rubric-based evaluation | better at comparing competing outputs than generating them |
+| **Verifier / test runner** | Executes focused build/test commands, interprets failures, and determines if a patch is actually green | compact model with strong tool use, or even deterministic shell/tooling | this role is about validation and signal collection, not creative synthesis |
+| **PR / summary writer** | Prepares the final PR body, changelog summary, and review notes | concise synthesis model | keeps the final artifact human-readable and review-ready |
+
+**Key architectural rule:** the orchestrator is the coordinator, not a second
+full coder. It should keep the high-level policy and choose the correct agent for
+each subtask, while the specialized agents handle the work in their own lane.
+This gives a better separation of concerns than a one-model loop and allows each
+agent to use the model that fits its job best.
+
+**Delegation pattern:**
+
+1. the **supervisor** defines the task and success criteria;
+2. the **coder workers** generate candidate patches;
+3. the **judge** compares those outputs against the acceptance rubric;
+4. the **verifier** confirms the winning patch actually passes the relevant
+   command path;
+5. the **PR writer** turns the accepted patch into a review-ready pull request.
+
+This pattern is intentionally **role-based**, not just “one supervisor + N workers.”
+The strongest system-level optimization is not raw model size, but **matching the
+model to the problem type** while preserving a single, bounded human review gate.
+
+### 2.4 Agent model matrix
+
+For a single-node `k8s-node01` cluster with two P40 cards, the model strategy
+should be **role-specific** rather than “one model handles everything.” The best
+fit is to keep the heavier reasoning load on the supervisor/planner, leave the
+bulk of code-generation to smaller, faster worker models, and reserve the human
+review gate for the final pass.
+
+| Agent role | Recommended model | Context size | Why this fits | Runtime posture |
+| :--- | :--- | :---: | :--- | :--- |
+| **Supervisor / planner** | **Qwen2.5-Coder-14B-Instruct** (AWQ or GGUF Q4) | **32K** | best planner/reasoner for decomposing the issue, choosing the strategy, and routing work; heavier reasoning load justifies the larger model | resident, always-on |
+| **Coder worker** | **Qwen2.5-Coder-7B-Instruct** (GGUF Q4_K_M) | **32K** | best quality/latency tradeoff for patch generation; low VRAM footprint fits a P40 cleanly | short-lived worker Job |
+| **Judge / reviewer** | **Qwen2.5-Coder-7B-Instruct** (GGUF Q4_K_M) | **32K** | same family as the workers keeps evaluation meaningful without making the judge too expensive | resident, always-on |
+| **Verifier / test runner** | **Qwen2.5-Coder-7B-Instruct** | **16K–32K** | tool-heavy validation needs strong failure interpretation, but usually not full long-context reasoning | short-lived helper |
+| **PR / summary writer** | **Qwen2.5-Coder-7B-Instruct** | **8K–16K** | only needs to synthesize the final change summary and review notes | short-lived helper |
+
+**Practical default:**
+
+- **Planner:** 14B, 32K
+- **Coder workers:** 7B, 32K
+- **Judge:** 7B, 32K
+- **Verifier / PR summary:** 7B, 16K or lower
+
+This preserves a **strong reasoning/planning model** without spending the full
+GPU budget on every role. The heavy model is used only where it adds value;
+cheap specialized models handle the repetitive or narrow tasks.
+
+### 2.5 Deployment posture
 
 - **Always-on `Deployment` (not `CronJob`).** The whole system must be ready the
   moment a task arrives — a scheduled job would add latency and a cold-start gap.
-- **Runs overnight 24/7** and **survives restarts**: the loop state is persistent
+- **Runs continuously 24/7** and **survives restarts**: the loop state is persistent
   so a restart resumes where it left off rather than re-planning from scratch.
-- **Autonomous & independent of VS Code:** the overnight agent runs inside the
+- **Autonomous & independent of VS Code:** the always-on agent runs inside the
   `orchestrator` Deployment with its own tool-calling. It does **not** use Cline,
   Continue, or any VS Code extension. This is deliberate (see §4).
 
@@ -262,6 +322,8 @@ most of the time is idle.
 | **Orchestrator** (CPU, tiny) | Yes, resident | ~5–10% | Tiny LangGraph runtime, always listening |
 | **Workers** (spawned) | No | Short bursts | Minutes long, spawned on demand, then gone |
 
+> **Naming correction:** this is not best described as an “overnight agent” if it is truly resident 24/7. The architecture is a continuous, always-on coding runtime.
+
 > **Idle judge is not wasted:** a small model resident on an otherwise-idle
 > 23 GB card costs almost nothing, and keeps planning instant the moment a task
 > arrives. It is cheap, always-ready coverage.
@@ -296,8 +358,8 @@ t=0        TASK ARRIVES → orchestrator wakes
 └───────────────────────────────────────────────────────────┘
 ```
 
-**Aggregated overnight shape** (a series of short parallel bursts against long
-idle stretches; one task ≈ **2–8 min** end-to-end):
+**Aggregated 24/7 shape** (a series of short parallel bursts against long idle
+stretches; one task ≈ **2–8 min** end-to-end):
 
 ```
 IDLE ───────────────┐   ┌─┐   ────┐   ┌──────────┐   ────┐
@@ -405,7 +467,7 @@ on TrueNAS. **Do not** install a second Prometheus/Grafana stack on `k8s-node01`
 
 ```
    k8s-node01  ──node-exporter──▶  central Prometheus (TrueNAS)
-   k8s-node01  ──iDRAC Redfish──▶  central Prometheus (TrueNAS)
+  k8s-node01  ──hardware telemetry──▶  central Prometheus (TrueNAS)
                                               │
                                               ▼
                                    Grafana (TrueNAS)  ← panels
@@ -421,15 +483,14 @@ One DaemonSet exporting whole-box metrics to the central Prometheus:
 - **GPU:** per-P40 utilization, VRAM used, power, temperature (if exposed).
 - **Disk:** `/mnt/k8s-data-ssd` + `/mnt/k8s-local-nvme` usage + I/O.
 
-### 7.2 iDRAC telemetry (IPMI — IPMI Version 2.0)
+### 7.2 Hardware-controller telemetry (IPMI / Redfish)
 
-Target controller: **PERC H730P / H740P**, exposed via **iDRAC9 Enterprise**
-(firmware **7.00.00.184**, hardware version **0.01**).
+Target controller: **BMC-managed storage/thermal/power telemetry**.
 
-| iDRAC version | Transport | What it exposes |
+| Controller capability | Transport | What it exposes |
 | :--- | :--- | :--- |
-| **9 Enterprise** (firmware **7.00.00.184**, hw v**0.01**), IPMI v**2.0** | **IPMI** (`ipmi_exporter` or Grafana IPMI plugin) — **chosen on this node** | PERC array state, cache battery health, drive faults, SMART, temps, fans, power, voltages, system events |
-| 9.5+ / 10.5+ | Redfish Remote Write | same fields via Redfish (not used on this node) |
+| IPMI-capable controller | **IPMI** (`ipmi_exporter` or Grafana IPMI plugin) | Array state, cache battery health, drive faults, SMART, temps, fans, power, voltages, system events |
+| Redfish-capable controller | Redfish Remote Write | Same fields via Redfish |
 
 **Grafana panels (design intent):**
 
@@ -442,8 +503,8 @@ Target controller: **PERC H730P / H740P**, exposed via **iDRAC9 Enterprise**
 
 ### 7.3 Open questions on monitoring
 
-- **iDRAC version check — RESOLVED:** `k8s-node01` runs iDRAC9 Enterprise (firmware 7.00.00.184, IPMI Version 2.0) ⇒ IPMI path (see §8 O3).
-- Which iDRAC transport the central Prometheus can receive (Remote Write vs IPMI) — IPMI chosen.
+- **Controller transport check — RESOLVED:** target controller supports IPMI telemetry, so the IPMI path is valid (see §8 O3).
+- Which transport the central Prometheus can receive (Remote Write vs IPMI).
 - Whether the existing Grafana has a suitable dashboard, or a new one is built.
 
 ---
@@ -454,14 +515,14 @@ Target controller: **PERC H730P / H740P**, exposed via **iDRAC9 Enterprise**
 | :--- | :--- | :--- | :--- |
 | O1 | **Coder model + context window** | Pick the coder model and its context window based on the agent's actual needs. **64K was never a requirement** (it came from the desktop RTX 3080 interactive-chat model). | **RESOLVED — model Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M (~4.68 GB, fits one P40); context window locked at 32K (32768) for both brains. VRAM fit is not the gate — both 7B models fit a 23 GB P40 with ~18 GB spare. 32K is chosen, not a candidate to be validated on-device.** |
 | O2 | **Judge/supervisor model + context window** | Same family as O1 for the judge (P40-1). Re-evaluated per the agent's needs, not held at 64K. | **RESOLVED — same Qwen2.5-Coder family (judge = Qwen2.5-Coder-7B), same VRAM fit (@ Q4_K_M on the P40). Context window locked at 32K (32768), matching the coder.** |
-| O3 | **iDRAC version** | Redfish (9.5+/10.5+) vs IPMI (older) changes the whole monitoring ingest path. | **RESOLVED — `k8s-node01` runs **iDRAC9 Enterprise, firmware 7.00.00.184, hardware version 0.01, IPMI Version 2.0**. IPMI Version 2.0 ⇒ the **IPMI** path is chosen (NOT Redfish); monitoring ingest is IPMI-based via `ipmi_exporter` / Grafana IPMI plugin.** |
+| O3 | **Controller telemetry transport** | Redfish vs IPMI changes the whole monitoring ingest path. | **RESOLVED — use the IPMI telemetry path where available; monitoring ingest is IPMI-based via `ipmi_exporter` / Grafana IPMI plugin.** |
 | O4 | **Human gate policy** | Which PR trigger, reviewer, allowed branches, how the gate is enforced. | **CONFIRMED — human gate via Pull Request (open the agent's work as a PR for human review). Agents may use a **git worktree** if that is more efficient.** |
 | O5 | **Max loop iterations** | Bounds the retry budget / overnight runtime. | **CONFIRMED — 8 loop iterations (auto-tune if possible).** |
 | O6 | **Worker count N** | Parallelism budget vs CPU `limits`. | **CONFIRMED — auto-tune if possible (worker count N to be tuned vs the ~10-core CPU budget / CPU `limits`).** |
 | O7 | **Tool set for the overnight agent** | Which tools the autonomous agent may call (file ops, git, shell, kubectl, PR). | **RESOLVED — **minimal tools as possible**, with **specialized / role-based agents** as possible.** |
 | O8 | **LangGraph runtime image / deps** | Confirm the runtime that hosts the supervisor + coder tool-calling. | **STILL-OPEN (research needed) — the LangGraph runtime image + deps still need research (runtime image + deps to be pinned; manifests keep `${IMAGE}` as a placeholder).** |
 
-**Summary:** O1/O2 **resolved** — model is **Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M (~4.68 GB, fits comfortably on one 23 GB P40)** and the context window is **locked at 32K (32768)** for both brains (VRAM fit is not the gate — both 7B models fit a P40 with ~18 GB spare). O3 resolved — `k8s-node01` runs **iDRAC9 Enterprise 7.00.00.184, IPMI Version 2.0**, so the **IPMI** monitoring path is chosen (not Redfish). O4 confirmed — **human gate via PR** (agents may use a git worktree if more efficient). O5 confirmed at **8 loop iterations (auto-tune if possible)**. O6 confirmed — **auto-tune if possible**. O7 resolved — **minimal tools, specialized/role-based agents**. O8 still needs research (LangGraph runtime image + deps). Net: O1–O7 resolved, leaving a single research pass (O8). The manifests ship `${IMAGE}` as a placeholder, so worker/supervisor code can be developed against the pinned model + 32K context.
+**Summary:** O1/O2 **resolved** — model is **Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M (~4.68 GB, fits comfortably on one 23 GB P40)** and the context window is **locked at 32K (32768)** for both brains (VRAM fit is not the gate — both 7B models fit a P40 with ~18 GB spare). O3 resolved — use a **generic IPMI telemetry path** where available (not Redfish-only). O4 confirmed — **human gate via PR** (agents may use a git worktree if more efficient). O5 confirmed at **8 loop iterations (auto-tune if possible)**. O6 confirmed — **auto-tune if possible**. O7 resolved — **minimal tools, specialized/role-based agents**. O8 still needs research (LangGraph runtime image + deps). Net: O1–O7 resolved, leaving a single research pass (O8). The manifests ship `${IMAGE}` as a placeholder, so worker/supervisor code can be developed against the pinned model + 32K context.
 
 ---
 
@@ -472,18 +533,17 @@ Target controller: **PERC H730P / H740P**, exposed via **iDRAC9 Enterprise**
    chosen (Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M) — resolves O1/O2. **32K is the
    chosen window for both brains; VRAM fit is not the gate** (both 7B models fit a
    single P40 with ~18 GB spare).
-3. **Confirm the iDRAC version** on `k8s-node01` — resolves O3: it runs **iDRAC9
-   Enterprise, firmware 7.00.00.184, IPMI Version 2.0**, so the **IPMI** path is
-   chosen (not Redfish).
+3. **Confirm hardware telemetry transport** on the target node — resolves O3:
+  choose **IPMI** where available; otherwise use Redfish.
 4. **Decide the human-gate policy** — PR trigger, reviewer, allowed branches (O4;
    confirmed: human gate via PR).
 5. **Set the loop parameters** — max iterations (O5; confirmed: 8, auto-tune if
    possible) and worker count `N` (O6; auto-tune if possible).
-6. **Finalize the overnight agent's tool set** (O7; resolved: minimal tools,
+7. **Finalize the always-on agent's tool set** (O7; resolved: minimal tools,
    specialized/role-based agents) and research the LangGraph runtime image + deps
    (O8; still needs research).
-7. **Approve the design.** Once signed off, proceed to build in the usual
-   8h-design / 16h-autonomous-agent / 8h-validate cadence.
+8. **Approve the design.** Once signed off, proceed to build in the usual
+   8h-design / 24/7-autonomous-agent / 8h-validate cadence.
 
 ---
 

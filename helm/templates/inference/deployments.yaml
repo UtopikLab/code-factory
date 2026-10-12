@@ -25,6 +25,8 @@ metadata:
     gpu: "{{ $idx }}"
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: inference-server
@@ -52,7 +54,22 @@ spec:
           image: {{ $inf.image | default "ghcr.io/ggml-org/llama.cpp:server-intel" }}
           imagePullPolicy: {{ $inf.imagePullPolicy | default "IfNotPresent" }}
           args:
-            - /etc/llama-server-args/args.txt
+            - --models-dir
+            - {{ (index $cfg.model "model-dir") | quote }}
+            - --ctx-size
+            - {{ (index $cfg.model "ctx-size") | default "4096" | quote }}
+            {{- if (index $cfg.model "flash-attn") }}
+            - --flash-attn
+            - "on"
+            {{- end }}
+            - --rope-freq-base
+            - {{ (index $cfg.model "rope-freq-base") | default "500000.0" | quote }}
+            - --rope-freq-scale
+            - {{ (index $cfg.model "rope-freq-scale") | default "1.0" | quote }}
+            - --host
+            - {{ (index $cfg.model "host") | default "0.0.0.0" | quote }}
+            - --port
+            - {{ (index $cfg.model "port") | default "8000" | quote }}
           volumeMounts:
             - name: {{ $cfg.name }}-args
               mountPath: /etc/llama-server-args

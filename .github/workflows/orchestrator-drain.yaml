@@ -1,0 +1,104 @@
+name: Send to Orchestrator
+
+# Trigger on issue creation, PR opening, or manual dispatch
+on:
+  issues:
+    types: [opened, labeled]
+  pull_request:
+    types: [opened, synchronize]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to process'
+        required: false
+        type: string
+
+jobs:
+  send-to-orchestrator:
+    # Conditionals: uncomment as needed
+    # Only run if issue has 'orchestrator' label:
+    # if: contains(github.event.issue.labels.*.name, 'orchestrator')
+    
+    # Only run on main branch PRs:
+    # if: github.event.pull_request.base.ref == 'main'
+    
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Extract task info
+        id: task-info
+        run: |
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            TASK_ID="${{ github.event.issue.number }}"
+            ISSUE_TITLE="${{ github.event.issue.title }}"
+            ISSUE_URL="${{ github.event.issue.html_url }}"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            TASK_ID="${{ github.event.pull_request.number }}"
+            ISSUE_TITLE="${{ github.event.pull_request.title }}"
+            ISSUE_URL="${{ github.event.pull_request.html_url }}"
+          elif [ -n "${{ inputs.issue_number }}" ]; then
+            TASK_ID="${{ inputs.issue_number }}"
+            ISSUE_TITLE="Manual dispatch task"
+            ISSUE_URL="https://github.com/${{ github.repository }}/issues/${{ inputs.issue_number }}"
+          else
+            echo "No task info available"
+            exit 1
+          fi
+          
+          echo "task_id=$TASK_ID" >> $GITHUB_OUTPUT
+          echo "issue_title=$ISSUE_TITLE" >> $GITHUB_OUTPUT
+          echo "issue_url=$ISSUE_URL" >> $GITHUB_OUTPUT
+      
+      - name: Send task to orchestrator
+        env:
+          ORCHESTRATOR_URL: ${{ secrets.ORCHESTRATOR_URL }}
+          ORCHESTRATOR_TOKEN: ${{ secrets.ORCHESTRATOR_TOKEN }}
+        run: |
+          if [ -z "$ORCHESTRATOR_URL" ] || [ -z "$ORCHESTRATOR_TOKEN" ]; then
+            echo "ERROR: Missing ORCHESTRATOR_URL or ORCHESTRATOR_TOKEN secrets"
+            exit 1
+          fi
+          
+          TASK_ID="${{ steps.task-info.outputs.task_id }}"
+          ISSUE_TITLE="${{ steps.task-info.outputs.issue_title }}"
+          ISSUE_URL="${{ steps.task-info.outputs.issue_url }}"
+          REPO="${{ github.repository }}"
+          
+          echo "Sending task to orchestrator:"
+          echo "  Repo: $REPO"
+          echo "  Issue: $TASK_ID"
+          echo "  Title: $ISSUE_TITLE"
+          echo "  URL: $ISSUE_URL"
+          echo ""
+          
+          # Send to orchestrator
+          RESPONSE=$(curl -X POST "$ORCHESTRATOR_URL" \
+            -H "Authorization: token $ORCHESTRATOR_TOKEN" \
+            -H "Content-Type: application/json" \
+            --silent --write-out "\n%{http_code}" \
+            -d @- <<EOF
+          {
+            "task_id": "$TASK_ID",
+            "repo": "$REPO",
+            "issue_number": $TASK_ID,
+            "issue_title": "$ISSUE_TITLE",
+            "issue_url": "$ISSUE_URL"
+          }
+          EOF
+          )
+          
+          # Extract HTTP status code (last line)
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+          
+          echo "Response: $HTTP_CODE"
+          echo "$BODY"
+          
+          # Check for success (200-299)
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "✓ Task accepted by orchestrator"
+            exit 0
+          else
+            echo "✗ Failed to send task (HTTP $HTTP_CODE)"
+            exit 1
+          fi

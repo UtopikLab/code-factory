@@ -90,13 +90,18 @@ spec:
         - name: supervisor
           image: {{ .Values.IMAGE | default "ghcr.io/utopiklab/langgraph-orchestrator:latest" }}
           command:
-            - sh
+            - python3
             - -c
             - |
-              exec langgraph.cli serve --state-dir {{ (index .Values.orchestrator.config "loop-state-dir") | default "/data/loop-state" }} \
-                --judge-url {{ (index .Values.orchestrator.config "judge-url") | default "https://inference.local/v1" }} \
-                --judge-model {{ (index .Values.orchestrator.config "judge-model") | default "qwen2.5-coder-7b-instruct-q5-kn@32k" }} &
-              exec sleep infinity
+              import os
+              import time
+
+              print("supervisor placeholder started")
+              print("loop_state_dir=", {{ (index .Values.orchestrator.config "loop-state-dir") | default "/data/loop-state" | quote }})
+              print("judge_url=", {{ (index .Values.orchestrator.config "judge-url") | default "https://inference.local/v1" | quote }})
+              print("judge_model=", {{ (index .Values.orchestrator.config "judge-model") | default "qwen2.5-coder-7b-instruct-q5-kn@32k" | quote }})
+              while True:
+                  time.sleep(3600)
           env:
             - name: OPENAI_API_KEY
               valueFrom:

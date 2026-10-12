@@ -19,7 +19,6 @@ global:
 # Default image for the orchestrator workload and related cluster services.
 #   - langgraph-orchestrator : built from the repo Dockerfile and published to GHCR.
 #   - prom/node-exporter     : override if v1.9.1 is unavailable in your mirror.
-#   - ipmi-exporter          : approved IPMI path for the node iDRAC.
 IMAGE: "ghcr.io/utopiklab/langgraph-orchestrator:latest"
 
 # ---------------------------------------------------------------------------
@@ -46,12 +45,17 @@ namespaces:
 # GPU device-plugin (namespace: gpu). Versions VERIFIED real.
 # ---------------------------------------------------------------------------
 gpu:
+  # Keep false to continue managing GPU infra from this chart.
+  # Set true when a trusted provider chart/stack manages GPU infra externally.
+  externalManaged: false
   devicePlugin:
-    image: "nvcr.io/nvidia/k8s-device-plugin:2.18.0"
+    image: "nvcr.io/nvidia/k8s-device-plugin:v0.20.1"
     imagePullPolicy: IfNotPresent
     real: true
-    verified: "GitHub tag NVIDIA/k8s-device-plugin@v2.18.0 exists"
+    verified: "GitHub tag NVIDIA/k8s-device-plugin@v0.20.1 exists"
   nodeProblemDetector:
+    # Optional helper DaemonSet. Disabled by default.
+    enabled: false
     image: "nvcr.io/nvidia/k8s-node-problem-detector:0.18.0"
     imagePullPolicy: IfNotPresent
     real: true
@@ -61,7 +65,7 @@ gpu:
 # Inference servers (namespace: inference). llama.cpp image VERIFIED real.
 # ---------------------------------------------------------------------------
 inference:
-  image: "ghcr.io/ggml-org/llama.cpp:server-intel"
+  image: "ghcr.io/ggml-org/llama.cpp:server-cuda"
   imagePullPolicy: IfNotPresent
   real: true
   verified: "ggml-org/docker.yml pushes server-intel tag (Intel prebuilt) to registry"
@@ -70,7 +74,7 @@ inference:
     gpu0:
       name: llama-server-args-gpu0
       model:
-        model-dir: /models/checkpoints/qwen2.5-14b-instruct-awq
+        model-dir: /models
         model-format: awq
         model-name: qwen2.5-14b-instruct-awq
         ctx-size: "4096"
@@ -86,7 +90,7 @@ inference:
     gpu1:
       name: llama-server-args-gpu1
       model:
-        model-dir: /models/checkpoints/qwen2.5-7b-instruct-awq
+        model-dir: /models
         model-format: awq
         model-name: qwen2.5-7b-instruct-awq
         ctx-size: "4096"
@@ -117,7 +121,7 @@ inference:
   # Model weights PVC.
   pvc:
     name: inference-models
-    storageClassName: k8s-sc-ssd-replicated
+    storageClassName: local-path
     accessMode: ReadWriteOnce
     size: 50Gi
     mountPath: /mnt/k8s-data-ssd
@@ -143,7 +147,7 @@ orchestrator:
     port: "8000"
 
 # ---------------------------------------------------------------------------
-# Monitoring (namespace: monitoring). node-exporter / redfish images PLACEHOLDER.
+# Monitoring (namespace: monitoring).
 # ---------------------------------------------------------------------------
 monitoring:
   nodeExporter:
@@ -154,17 +158,3 @@ monitoring:
     prometheusUrl: http://truenas.utopiklab.lan:9090
     scrapePort: "9100"
     hostPrometheus: truenas.utopiklab.lan
-  idracExporter:
-    image: "quay.io/prometheuscommunity/ipmi-exporter:latest"
-    imagePullPolicy: IfNotPresent
-    real: true
-    verified: "IPMI exporter is the approved monitoring path for k8s-node01 iDRAC9 Enterprise / IPMI v2.0."
-    transport: ipmi
-  iDrac:
-    ip: "192.168.1.100"
-    user: Administrator
-    password: "REPLACE_ME"
-    apiRoot: /redfish/v1/
-    chassisId: Chassis.1
-    prometheusUrl: http://truenas.utopiklab.lan:9090
-    port: 9290
