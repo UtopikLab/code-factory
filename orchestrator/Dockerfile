@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir \
     aiohttp
 
 # Copy supervisor loop code
-COPY orchestrator/supervisor_loop.py /app/supervisor_loop.py
+COPY supervisor_loop.py /app/supervisor_loop.py
 
 # Create data directories for persistent state
 RUN mkdir -p /data/loop-state /data/task-work
