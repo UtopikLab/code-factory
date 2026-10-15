@@ -1,7 +1,7 @@
 # Coder Worker image for autonomous LangGraph coder agents.
 # Builds a Python 3.12 container with code execution, GitHub API, and OpenAI client.
 
-FROM python:3.12-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
@@ -12,27 +12,34 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# Install Python dependencies (CPU-only: no torch/transformers/langchain-openai)
 RUN pip install --no-cache-dir \
-    langgraph \
-    langchain \
-    langchain-openai \
-    requests \
-    httpx \
-    pydantic \
-    pyyaml \
-    python-dotenv \
-    aiohttp
+    langgraph>=1.2,<2.0 \
+    langchain-core>=0.3,<0.4 \
+    langgraph-sdk>=0.4,<0.5 \
+    fastapi>=0.115,<0.120 \
+    uvicorn>=0.30,<0.33 \
+    tenacity>=8.5,<9.0 \
+    pydantic>=2.7,<2.10 \
+    httpx>=0.27,<0.29 \
+    requests>=2.31.0 \
+    pyyaml>=6.0 \
+    python-dotenv>=1.0 \
+    aiohttp>=3.9 \
 
-# Create working directories
-RUN mkdir -p /data/task-work /data/agent-cache /data/outputs
+# Bake supervisor assets to /opt/orchestrator
+COPY templates/agent-job-template.yaml /opt/orchestrator/agent-job-template.yaml
+COPY templates/supervisor-task-acceptor.py /opt/orchestrator/supervisor-task-acceptor.py
 
-# Health check
+# Working directories for code execution and persistent loop state
+RUN mkdir -p /data/task-work /data/agent-cache /data/outputs /data/loop-state
+
+# Health check (Phase D: readiness target)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:8000/healthz || exit 1
 
 # Default entrypoint: worker mode
-ENTRYPOINT ["python3", "/app/supervisor_loop.py", "--worker"]
+ENTRYPOINT ["python3", "/opt/orchestrator/supervisor-loop.py", "--worker"]
 
 # Expose health check port
 EXPOSE 8000

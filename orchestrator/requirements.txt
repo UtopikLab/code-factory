@@ -2,12 +2,20 @@
 
 Python dependencies for the LangGraph orchestrator supervisor.
 
-## Required packages
+## Required packages (CPU-only image: no torch/transformers/langchain-openai)
 
-- **langgraph>=0.2.0** - Graph state machine for agent orchestration
-- **langchain-openai>=0.2.0** - LLM client for judging and coding agents
+- **langgraph>=1.2,<2.0** - Graph state machine for agent orchestration
+- **langchain-core>=0.3,<0.4** - Core LangChain primitives
+- **langgraph-sdk>=0.4,<0.5** - LangGraph server SDK
+- **fastapi>=0.115,<0.120** - ASGI web framework
+- **uvicorn>=0.30,<0.33** - ASGI server
+- **tenacity>=8.5,<9.0** - Retry logic
+- **pydantic>=2.7,<2.10** - Validation
+- **httpx>=0.27,<0.29** - Async HTTP client for concurrent worker execution
 - **requests>=2.31.0** - HTTP client for task-acceptor communication
-- **httpx>=0.27.0** - Async HTTP client for concurrent worker execution
+- **pyyaml>=6.0** - YAML templating
+- **python-dotenv>=1.0** - Env loading
+- **aiohttp>=3.9** - Async I/O
 
 ## Installation
 
@@ -21,7 +29,7 @@ pip install -r requirements.txt
 |----------|-------------|--------|
 | `GITHUB_TOKEN` | GitHub PAT for PR creation | required |
 | `OPENAI_API_KEY` | Judge model API key | required |
-| `JUDGE_MODEL` | Judge LLM model | qwen2.5-coder-7b-instruct-q5-kn@32k |
+| `JUDGE_MODEL` | Judge LLM model | qwen2.5-coder-7b-instruct-q4-km@32k |
 | `ACCEPTOR_URL` | Task-acceptor sidecar URL | http://orchestrator.local:8000 |
 | `WORKER_COUNT` | Number of parallel coder workers | 2 |
 | `MAX_ITERATIONS` | Max retry iterations per task | 8 |

@@ -75,34 +75,31 @@ inference:
       name: llama-server-args-gpu0
       model:
         model-dir: /models
-        model-format: awq
-        model-name: qwen2.5-14b-instruct-awq
-        ctx-size: "4096"
-        flash-attn: true
-        tensor-type: f8_e4m3
+        model-format: gguf
+        model-name: qwen2.5-coder-7b-instruct-q4-km
+        ctx-size: "32768"
+        tensor-type: q4_km
         rope-freq-base: "500000.0"
         rope-freq-scale: "1.0"
         port: "8000"
         host: "0.0.0.0"
         keep-ctx: "0"
         no-display: true
-        override-gguf-config: true
+
     gpu1:
       name: llama-server-args-gpu1
       model:
         model-dir: /models
-        model-format: awq
-        model-name: qwen2.5-7b-instruct-awq
-        ctx-size: "4096"
-        flash-attn: true
-        tensor-type: f8_e4m3
+        model-format: gguf
+        model-name: qwen2.5-coder-7b-instruct-q4-km
+        ctx-size: "32768"
+        tensor-type: q4_km
         rope-freq-base: "500000.0"
         rope-freq-scale: "1.0"
         port: "8000"
         host: "0.0.0.0"
         keep-ctx: "0"
         no-display: true
-        override-gguf-config: true
   # GPU device IDs pinned per pod (Tesla P40, no tensor cores).
   gpuDeviceIds:
     gpu0: "0"

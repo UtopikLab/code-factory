@@ -57,7 +57,7 @@ spec:
             - --models-dir
             - {{ (index $cfg.model "model-dir") | quote }}
             - --ctx-size
-            - {{ (index $cfg.model "ctx-size") | default "4096" | quote }}
+            - {{ (index $cfg.model "ctx-size") | default "32768" | quote }}
             {{- if (index $cfg.model "flash-attn") }}
             - --flash-attn
             - "on"

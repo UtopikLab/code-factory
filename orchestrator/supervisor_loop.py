@@ -12,13 +12,13 @@ import os
 import json
 import asyncio
 import logging
-import requests
+import subprocess
+import threading
+import httpx
 from typing import TypedDict, Annotated
 from datetime import datetime
 
 from langgraph.graph import StateGraph, START, END
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -151,27 +151,59 @@ def node_execute_workers(state: TaskState) -> TaskState:
         logger.warning("[" + state["task_id"] + "] GITHUB_TOKEN not set, using mock mode")
         return mock_worker_executor(state, worker_count)
     
-    headers = {
-        "Authorization": f"token {github_token}",
-        "Content-Type": "application/json",
-    }
+    async def _spawn_worker(task_id, i):
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"{acceptor_url}/api/v1/tasks/spawn",
+                headers={
+                    "Authorization": f"token {github_token}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            if response.status_code == 202:
+                task_result = response.json()
+                task_id = task_result["task_id"]
+                logger.info(f"[{state['task_id']}] Worker {task_id} accepted")
+                # Wait for worker to complete.
+                try:
+                    wait_response = await client.get(
+                        f"{acceptor_url}/api/v1/tasks/{task_id}",
+                        headers={"Authorization": f"token {github_token}"},
+                    )
+                    if wait_response.status_code == 200:
+                        worker_output = wait_response.json()
+                        extra = {
+                            "output": worker_output.get("output", ""),
+                            "patch": worker_output.get("patch", ""),
+                            "score": float((worker_output.get("score", 0)) or 0),
+                            "review": worker_output.get("review", ""),
+                        }
+                        state["worker_outputs"].append(make_worker_output(
+                            task_id, i, "success", extra, datetime.now().isoformat()))
+                        logger.info(f"[{state['task_id']}] Worker {i} completed with score: {extra['score']}")
+                    else:
+                        state["worker_outputs"].append(make_worker_output(
+                            task_id, i, "timeout",
+                            {"error": "Worker timed out"}, datetime.now().isoformat()))
+                        logger.warning(f"[{state['task_id']}] Worker {task_id} timed out")
+                except httpx.RequestException as e:
+                    state["worker_outputs"].append(make_worker_output(
+                        task_id, i, "error", {"error": str(e)}, datetime.now().isoformat()))
+                    logger.error(f"[{state['task_id']}] Failed to get worker output: {e}")
+            else:
+                state["worker_outputs"].append(make_worker_output(
+                    task_id, i, "rejected",
+                    {"error": f"Acceptance rejected: {wait_response.text if 'wait_response' in dir() else response.text}"}, datetime.now().isoformat()))
+                logger.warning(f"[{state['task_id']}] Worker {task_id} was rejected")
+        except httpx.RequestException as e:
+            state["worker_outputs"].append(make_worker_output(
+                task_id, i, "error", {"error": str(e)}, datetime.now().isoformat()))
+            logger.error(f"[{state['task_id']}] Failed to spawn worker: {e}")
     
-    payload = {
-        "name": f"{state['task_id']}-worker",
-        "ref": "main",
-        "payload": {
-            "issue_number": state["issue_number"],
-            "issue_title": state["issue_title"],
-            "issue_url": state["issue_url"],
-            "repo": state["repo"],
-            "default_branch": "main",
-        }
-    }
-    
-    worker_outputs = []
-    for i in range(worker_count):
-        task_id = f"{state['task_id']}-worker-{i}"
-        logger.info(f"[{state['task_id']}] Requesting worker {task_id}...")
+    async with httpx.AsyncClient(timeout=30) as client:
+        await asyncio.gather(*[_spawn_worker(f"{state['task_id']}-worker-{i}", i) for i in range(worker_count)])
+    logger.info(f"[{state['task_id']}] All {len(state['worker_outputs'])} workers completed")
         
         try:
             response = requests.post(
@@ -252,7 +284,7 @@ def node_evaluate(state: TaskState) -> TaskState:
     
     # Judge configuration from env vars
     judge_url = os.getenv("JUDGE_URL", "https://inference.local/v1")
-    judge_model = os.getenv("JUDGE_MODEL", "qwen2.5-coder-7b-instruct-q5-kn@32k")
+    judge_model = os.getenv("JUDGE_MODEL", "qwen2.5-coder-7b-instruct-q4-km@32k")
     
     # Build evaluation prompts for each worker output
     evaluation_prompts = []
@@ -263,56 +295,47 @@ def node_evaluate(state: TaskState) -> TaskState:
                 state["issue_title"], output["worker_id"], output.get("patch", ""))
         })
     
-    # Evaluate each worker output using the judge
+    # Evaluate each worker output using the judge (direct OpenAI-compatible chat-completions POST via httpx).
     evaluation_results = []
     for eval_prompt in evaluation_prompts:
         worker_id = eval_prompt["worker_id"]
         output = state["worker_outputs"][eval_prompt["worker_id"]]
-        
+        judge_messages = [
+            {"role": "system", "content": "You are a code reviewer. Be objective and thorough."},
+            {"role": "user", "content": eval_prompt["prompt"]},
+        ]
         try:
-            # Call the judge inference server
-            response = requests.post(
-                f"{judge_url}/chat/completions",
-                json={
-                    "model": judge_model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are a code reviewer. Be objective and thorough."
-                        },
-                        {
-                            "role": "user",
-                            "content": eval_prompt["prompt"]
-                        }
-                    ],
-                    "temperature": 0.2,
-                    "max_tokens": 1024
-                },
-                timeout=60
-            )
-            
-            if response.status_code == 200:
-                evaluation = response.json()
-                evaluation_results.append(make_eval_result(
-                    worker_id,
-                    float(evaluation["choices"][0]["message"]["content"].get("score", 0.5)),
-                    evaluation["choices"][0]["message"]["content"].get("review", ""),
-                    output))
-                logger.info(
-                    f"[{state['task_id']}] Worker {worker_id} evaluated: "
-                    f"score={evaluation_results[-1]['score']:.2f}, review="
-                    f"{evaluation_results[-1]['review'][:100]}...")
-            else:
-                logger.warning(
-                    f"[{state['task_id']}] Judge server returned {response.status_code}")
-                evaluation_results.append(make_eval_result(
-                    worker_id, 0.5,
-                    f"Judge evaluation failed (HTTP {response.status_code})",
-                    output))
-                
-        except requests.RequestException as e:
-            logger.error(
-                f"[{state['task_id']}] Failed to call judge: {e}")
+            # Call the judge inference server (external OpenAI-compatible service at JUDGE_URL).
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    f"{judge_url}/chat/completions",
+                    headers={"Authorization": "Bearer " + os.getenv("OPENAI_API_KEY", "")},
+                    json={
+                        "model": judge_model,
+                        "messages": judge_messages,
+                        "temperature": 0.2,
+                        "max_tokens": 1024,
+                    },
+                )
+                if response.status_code == 200:
+                    evaluation = response.json()
+                    content = evaluation["choices"][0]["message"]["content"]
+                    score = float(content.get("score", 0.5)) if isinstance(content, dict) else 0.5
+                    review = content.get("review", "") if isinstance(content, dict) else ""
+                    evaluation_results.append(make_eval_result(worker_id, score, review, output))
+                    logger.info(
+                        f"[{state['task_id']}] Worker {worker_id} evaluated: "
+                        f"score={evaluation_results[-1]['score']:.2f}, review="
+                        f"{evaluation_results[-1]['review'][:100]}...")
+                else:
+                    logger.warning(
+                        f"[{state['task_id']}] Judge server returned {response.status_code}")
+                    evaluation_results.append(make_eval_result(
+                        worker_id, 0.5,
+                        f"Judge evaluation failed (HTTP {response.status_code})",
+                        output))
+        except httpx.RequestError as e:
+            logger.error(f"[{state['task_id']}] Failed to call judge: {e}")
             evaluation_results.append(make_eval_result(
                 worker_id, 0.5, f"Judge evaluation failed: {e}", output))
     
