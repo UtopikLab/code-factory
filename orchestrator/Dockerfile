@@ -10,7 +10,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
-    kubectl \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
@@ -18,8 +17,9 @@ RUN pip install --no-cache-dir \
     langgraph \
     langchain \
     langchain-openai \
-    pydantic \
+    requests \
     httpx \
+    pydantic \
     pyyaml \
     python-dotenv \
     aiohttp

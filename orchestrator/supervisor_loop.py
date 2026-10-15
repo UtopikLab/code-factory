@@ -12,15 +12,13 @@ import os
 import json
 import asyncio
 import logging
+import requests
 from typing import TypedDict, Annotated
 from datetime import datetime
 
-try:
-    from langgraph.graph import StateGraph, START, END
-    from langchain_openai import ChatOpenAI
-except ImportError:
-    print("Warning: LangGraph not available, using mock mode")
-    StateGraph = None
+from langgraph.graph import StateGraph, START, END
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,13 +44,52 @@ class TaskState(TypedDict):
     created_at: str
 
 
+def build_evaluation_prompt(issue_title: str, worker_id: str, patch: str) -> str:
+    """Shared template for the judge prompt, injected with worker_id/patch."""
+    return f"""
+You are a code reviewer. Evaluate whether this patch fixes the issue described in the GitHub issue.
+
+Issue: {issue_title}
+Worker: {worker_id}
+
+<file_path>example.py</file_path>
+<diff>
+{patch}
+</diff>
+<context>
+Here is the original code (first 100 lines):
+```python
+# Original code placeholder
+```
+</context>
+
+Evaluate the patch based on:
+1. Does it address the issue requirements?
+2. Is the code correct and follows best practices?
+3. Is the implementation efficient?
+4. Are there any edge cases handled?
+5. Is the code properly formatted and documented?
+
+Provide a score from 0.0 to 1.0 and detailed reasoning.
+"""
+
+
+def make_eval_result(worker_id: str, score: float, review: str, output: dict) -> dict:
+    return {"worker_id": worker_id, "score": score, "review": review, "output": output}
+
+
+def make_worker_output(task_id: str, worker_id: int, status: str, extra: dict, timestamp: str) -> dict:
+    return {"worker_id": worker_id, "task_id": task_id, "status": status, **extra, "timestamp": timestamp}
+
+
+def passes_acceptance(state: TaskState) -> bool:
+    """Whether the best output meets the ACCEPTANCE_THRESHOLD."""
+    threshold = float(os.getenv("ACCEPTANCE_THRESHOLD", "0.7"))
+    return state["best_output"].get("score", 0) >= threshold
+
+
 def create_supervisor_graph():
     """Build the minimal LangGraph state machine."""
-    
-    if StateGraph is None:
-        logger.warning("LangGraph not available, running in mock mode")
-        return None
-    
     graph = StateGraph(TaskState)
     
     # Define state transitions
@@ -102,38 +139,196 @@ def node_plan(state: TaskState) -> TaskState:
 
 
 def node_execute_workers(state: TaskState) -> TaskState:
-    """Spawn and execute coder workers."""
+    """Spawn and execute coder workers via HTTP to task-acceptor sidecar."""
     logger.info(f"[{state['task_id']}] Spawning workers for iteration {state['iteration']}")
     
     state["status"] = "executing"
     worker_count = int(os.getenv("WORKER_COUNT", "2"))
+    acceptor_url = os.getenv("ACCEPTOR_URL", "http://orchestrator.local:8000")
+    github_token = os.getenv("GITHUB_TOKEN")
     
-    # Mock worker outputs (in real system, these would be K8s Job outputs)
+    if not github_token:
+        logger.warning("[" + state["task_id"] + "] GITHUB_TOKEN not set, using mock mode")
+        return mock_worker_executor(state, worker_count)
+    
+    headers = {
+        "Authorization": f"token {github_token}",
+        "Content-Type": "application/json",
+    }
+    
+    payload = {
+        "name": f"{state['task_id']}-worker",
+        "ref": "main",
+        "payload": {
+            "issue_number": state["issue_number"],
+            "issue_title": state["issue_title"],
+            "issue_url": state["issue_url"],
+            "repo": state["repo"],
+            "default_branch": "main",
+        }
+    }
+    
+    worker_outputs = []
+    for i in range(worker_count):
+        task_id = f"{state['task_id']}-worker-{i}"
+        logger.info(f"[{state['task_id']}] Requesting worker {task_id}...")
+        
+        try:
+            response = requests.post(
+                f"{acceptor_url}/api/v1/tasks/spawn",
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            
+            if response.status_code == 202:
+                task_result = response.json()
+                task_id = task_result["task_id"]
+                logger.info(f"[{state['task_id']}] Worker {task_id} accepted")
+                
+                # Wait for worker to complete
+                logger.info(f"[{state['task_id']}] Waiting for worker {task_id}...")
+                try:
+                    wait_response = requests.get(
+                        f"{acceptor_url}/api/v1/tasks/{task_id}",
+                        headers=headers,
+                        timeout=1800
+                    )
+                    if wait_response.status_code == 200:
+                        worker_output = wait_response.json()
+                        extra = {
+                            "output": worker_output.get("output", ""),
+                            "patch": worker_output.get("patch", ""),
+                            "score": float((worker_output.get("score", 0)) or 0),
+                            "review": worker_output.get("review", ""),
+                        }
+                        state["worker_outputs"].append(make_worker_output(
+                            task_id, i, "success", extra, datetime.now().isoformat()))
+                        logger.info(f"[{state['task_id']}] Worker {i} completed with score: {extra['score']}")
+                    else:
+                        state["worker_outputs"].append(make_worker_output(
+                            task_id, i, "timeout",
+                            {"error": "Worker timed out"}, datetime.now().isoformat()))
+                        logger.warning(f"[{state['task_id']}] Worker {task_id} timed out")
+                except requests.RequestException as e:
+                    state["worker_outputs"].append(make_worker_output(
+                        task_id, i, "error", {"error": str(e)}, datetime.now().isoformat()))
+                    logger.error(f"[{state['task_id']}] Failed to get worker output: {e}")
+            else:
+                state["worker_outputs"].append(make_worker_output(
+                    task_id, i, "rejected",
+                    {"error": f"Acceptance rejected: {response.text}"}, datetime.now().isoformat()))
+                logger.warning(f"[{state['task_id']}] Worker {task_id} was rejected")
+        except requests.RequestException as e:
+            state["worker_outputs"].append(make_worker_output(
+                task_id, i, "error", {"error": str(e)}, datetime.now().isoformat()))
+            logger.error(f"[{state['task_id']}] Failed to spawn worker: {e}")
+    
+    logger.info(f"[{state['task_id']}] All {len(state['worker_outputs'])} workers completed")
+    return state
+
+
+def mock_worker_executor(state: TaskState, worker_count: int) -> TaskState:
+    """Mock worker executor when HTTP is not available."""
+    state["status"] = "executing"
     for i in range(worker_count):
         output = {
             "worker_id": i,
             "status": "success",
             "patch": f"Mock patch from worker {i}",
-            "score": 0.5 + (i * 0.1),  # Mock quality score
+            "score": 0.5 + (i * 0.1),
             "timestamp": datetime.now().isoformat(),
         }
         state["worker_outputs"].append(output)
-        logger.info(f"[{state['task_id']}] Worker {i} completed (score: {output['score']})")
-    
+        logger.info(f"[{state['task_id']}] Mock worker {i} completed (score: {output['score']})")
     return state
 
 
 def node_evaluate(state: TaskState) -> TaskState:
-    """Judge evaluates all worker outputs."""
+    """Judge evaluates all worker outputs using real inference server."""
     logger.info(f"[{state['task_id']}] Evaluating {len(state['worker_outputs'])} outputs")
     
     state["status"] = "evaluating"
     
-    # Mock evaluation: score based on worker_id (in real system, judge would score)
+    # Judge configuration from env vars
+    judge_url = os.getenv("JUDGE_URL", "https://inference.local/v1")
+    judge_model = os.getenv("JUDGE_MODEL", "qwen2.5-coder-7b-instruct-q5-kn@32k")
+    
+    # Build evaluation prompts for each worker output
+    evaluation_prompts = []
+    for output in state["worker_outputs"]:
+        evaluation_prompts.append({
+            "worker_id": output["worker_id"],
+            "prompt": build_evaluation_prompt(
+                state["issue_title"], output["worker_id"], output.get("patch", ""))
+        })
+    
+    # Evaluate each worker output using the judge
+    evaluation_results = []
+    for eval_prompt in evaluation_prompts:
+        worker_id = eval_prompt["worker_id"]
+        output = state["worker_outputs"][eval_prompt["worker_id"]]
+        
+        try:
+            # Call the judge inference server
+            response = requests.post(
+                f"{judge_url}/chat/completions",
+                json={
+                    "model": judge_model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a code reviewer. Be objective and thorough."
+                        },
+                        {
+                            "role": "user",
+                            "content": eval_prompt["prompt"]
+                        }
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 1024
+                },
+                timeout=60
+            )
+            
+            if response.status_code == 200:
+                evaluation = response.json()
+                evaluation_results.append(make_eval_result(
+                    worker_id,
+                    float(evaluation["choices"][0]["message"]["content"].get("score", 0.5)),
+                    evaluation["choices"][0]["message"]["content"].get("review", ""),
+                    output))
+                logger.info(
+                    f"[{state['task_id']}] Worker {worker_id} evaluated: "
+                    f"score={evaluation_results[-1]['score']:.2f}, review="
+                    f"{evaluation_results[-1]['review'][:100]}...")
+            else:
+                logger.warning(
+                    f"[{state['task_id']}] Judge server returned {response.status_code}")
+                evaluation_results.append(make_eval_result(
+                    worker_id, 0.5,
+                    f"Judge evaluation failed (HTTP {response.status_code})",
+                    output))
+                
+        except requests.RequestException as e:
+            logger.error(
+                f"[{state['task_id']}] Failed to call judge: {e}")
+            evaluation_results.append(make_eval_result(
+                worker_id, 0.5, f"Judge evaluation failed: {e}", output))
+    
+    # Update worker outputs with evaluation results
+    for result in evaluation_results:
+        worker_id = result["worker_id"]
+        for output in state["worker_outputs"]:
+            if output["worker_id"] == worker_id:
+                output["score"] = result["score"]
+                output["review"] = result["review"]
+                break
+    
+    # Log all evaluations
     for output in state["worker_outputs"]:
         logger.info(
-            f"[{state['task_id']}] Worker {output['worker_id']} score: {output['score']}"
-        )
+            f"[{state['task_id']}] Worker {output['worker_id']} score: {output['score']}")
     
     return state
 
@@ -150,8 +345,7 @@ def node_pick_best(state: TaskState) -> TaskState:
     best = max(state["worker_outputs"], key=lambda x: x.get("score", 0))
     state["best_output"] = best
     
-    acceptance_threshold = float(os.getenv("ACCEPTANCE_THRESHOLD", "0.7"))
-    passes_acceptance = best.get("score", 0) >= acceptance_threshold
+    passes_acceptance = best.get("score", 0) >= passes_acceptance(state)
     
     logger.info(
         f"[{state['task_id']}] Best output: worker {best['worker_id']} "
@@ -172,8 +366,7 @@ def should_retry(state: TaskState) -> str:
             logger.info(f"[{state['task_id']}] Max iterations reached, proceeding to gate")
             return "gate"
     
-    acceptance_threshold = float(os.getenv("ACCEPTANCE_THRESHOLD", "0.7"))
-    if state["best_output"].get("score", 0) >= acceptance_threshold:
+    if state["best_output"].get("score", 0) >= passes_acceptance(state):
         logger.info(f"[{state['task_id']}] Output passes acceptance, proceeding to gate")
         return "gate"
     else:
@@ -247,13 +440,9 @@ class SupervisorLoop:
                 state["error"] = str(e)
                 return state
         else:
-            # Mock mode: run nodes sequentially
-            self.logger.info(f"[{state['task_id']}] Running in mock mode (LangGraph not available)")
-            state = node_plan(state)
-            state = node_execute_workers(state)
-            state = node_evaluate(state)
-            state = node_pick_best(state)
-            state = node_gate(state)
+            # LangGraph unavailable
+            state["status"] = "failed"
+            state["error"] = "LangGraph not available"
             return state
 
 

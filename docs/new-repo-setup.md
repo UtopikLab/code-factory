@@ -67,8 +67,10 @@ Add two secrets:
 
 ### Secret 1: `ORCHESTRATOR_URL`
 ```
-http://k8s-inference-orchestrator.orchestrator.svc.cluster.local:8000/api/v1/tasks/spawn
+http://orchestrator.local/api/v1/tasks/spawn
 ```
+
+This URL is exposed through Traefik on the `web` entrypoint (port 80).
 
 ### Secret 2: `ORCHESTRATOR_TOKEN`
 ```
@@ -113,6 +115,7 @@ Expected success log:
 **Workflow fails with connection refused:**
 - Orchestrator service is not running
 - Check: `kubectl get svc -n orchestrator`
+- Check: `kubectl get ingress -n orchestrator`
 
 ---
 

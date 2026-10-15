@@ -82,7 +82,8 @@ jobs:
             "repo": "$REPO",
             "issue_number": $TASK_ID,
             "issue_title": "$ISSUE_TITLE",
-            "issue_url": "$ISSUE_URL"
+            "issue_url": "$ISSUE_URL",
+            "description": "Task triggered via GitHub issue/PR event"
           }
           EOF
           )

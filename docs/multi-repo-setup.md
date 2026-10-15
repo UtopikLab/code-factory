@@ -72,7 +72,7 @@ For each repository, add two secrets in:
 
 | Secret | Value | Notes |
 |---|---|---|
-| `ORCHESTRATOR_URL` | `http://k8s-inference-orchestrator.orchestrator.svc.cluster.local:8000/api/v1/tasks/spawn` | Internal cluster endpoint (if using public ingress, use that URL instead) |
+| `ORCHESTRATOR_URL` | `http://orchestrator.local/api/v1/tasks/spawn` | Traefik `web` entrypoint on port 80 |
 | `ORCHESTRATOR_TOKEN` | Your GitHub PAT (repo scope minimum) | Same PAT used for `GITHUB_TOKEN` in orchestrator secrets |
 
 #### Create the GitHub PAT:

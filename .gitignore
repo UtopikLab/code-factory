@@ -15,3 +15,6 @@ Thumbs.db
 *.log
 .cache/
 .pytest_cache/
+err.txt
+*.bak
+*.backup
