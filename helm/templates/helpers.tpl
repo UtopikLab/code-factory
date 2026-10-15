@@ -1,6 +1,6 @@
 {{/*
 Name helper: returns the namespace-scoped name for a resource.
-Set .FileNamespace (gpu, inference, orchestrator, monitoring) in the
+Set .FileNamespace (gpu, inference, orchestrator) in the
 namespace-scoped template, or use .Release.Namespace for cluster-scoped.
 */}}
 {{- define "k8s-inference.name" -}}

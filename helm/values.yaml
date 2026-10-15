@@ -36,11 +36,6 @@ namespaces:
     name: orchestrator
     labels:
       app: orchestrator
-  monitoring:
-    name: monitoring
-    labels:
-      app: monitoring
-
 # ---------------------------------------------------------------------------
 # GPU device-plugin (namespace: gpu). Versions VERIFIED real.
 # ---------------------------------------------------------------------------
@@ -147,24 +142,4 @@ orchestrator:
     ingressClassName: traefik
     entrypoints: websecure
 
-# ---------------------------------------------------------------------------
-# Monitoring (namespace: monitoring).
-# ---------------------------------------------------------------------------
-monitoring:
-  nodeExporter:
-    image: "prom/node-exporter:v1.9.1"
-    imagePullPolicy: IfNotPresent
-    real: true
-    verified: "prom/node-exporter v1.9.1 is a real public quay.io tag"
-    prometheusUrl: http://truenas.utopiklab.lan:9090
-    scrapePort: "9100"
-    hostPrometheus: truenas.utopiklab.lan
-  # hardware-telemetry exporter (redfish-exporter DaemonSet + Service, amd64).
-  # grafana/redfish-exporter is a real public docker.io image (verified).
-  hardwareTelemetry:
-    image: "grafana/redfish-exporter:latest"
-    imagePullPolicy: IfNotPresent
-    real: true
-    verified: "grafana/redfish-exporter is a real public docker.io tag"
-    prometheusUrl: http://truenas.utopiklab.lan:9090
-    scrapePort: "8080"
+

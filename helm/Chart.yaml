@@ -21,8 +21,6 @@ templates:
   - orchestrator/supervisor.yaml
   - orchestrator/workers.yaml
   - orchestrator/agent-job.yaml
-  - monitoring/namespace.yaml
-  - monitoring/node-exporter.yaml
 maintainers:
   - name: UtopikLab
     url: https://github.com/UtopikLab
