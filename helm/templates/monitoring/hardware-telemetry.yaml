@@ -1,0 +1,82 @@
+{{/*
+Hardware-telemetry exporter (DaemonSet + Service) for the monitoring namespace.
+Faithful to plan §2 Phase E and README §2: CPU-only hardware metrics scraped by
+central Prometheus (grafana/redfish-exporter, official Grafana image).
+*/}}
+---
+# ---------------------------------------------------------------------------
+# hardware-telemetry Service (ClusterIP, port 8080 TCP).
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-hardware-telemetry
+  namespace: monitoring
+  labels:
+    app: hardware-telemetry
+    component: hardware-telemetry
+spec:
+  type: ClusterIP
+  selector:
+    app: hardware-telemetry
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+---
+# ---------------------------------------------------------------------------
+# hardware-telemetry DaemonSet (redfish-exporter, amd64 nodeSelector).
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Chart.Name }}-hardware-telemetry
+  namespace: monitoring
+  labels:
+    app: hardware-telemetry
+    component: hardware-telemetry
+spec:
+  selector:
+    matchLabels:
+      app: hardware-telemetry
+  template:
+    metadata:
+      labels:
+        app: hardware-telemetry
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: redfish-exporter
+          image: {{ .Values.monitoring.hardwareTelemetry.image | default "grafana/redfish-exporter:latest" }}
+          imagePullPolicy: {{ .Values.monitoring.hardwareTelemetry.imagePullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: REDFISH_URL
+              value: {{ .Values.monitoring.hardwareTelemetry.prometheusUrl | default "http://truenas.utopiklab.lan:9090" | quote }}
+            - name: PROMETHEUS_URL
+              value: {{ .Values.monitoring.hardwareTelemetry.prometheusUrl | default "http://truenas.utopiklab.lan:9090" | quote }}
+          envFrom:
+            secretRef:
+              name: {{ .Chart.Name }}-hardware-telemetry-credentials
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "0.5"
+              memory: 256Mi
+          volumeMounts:
+            - name: hardware-telemetry-credentials
+              mountPath: /etc/hardware-telemetry-credentials
+              readOnly: true
+      volumes:
+        - name: hardware-telemetry-credentials
+          secret:
+            secretName: {{ .Chart.Name }}-hardware-telemetry-credentials

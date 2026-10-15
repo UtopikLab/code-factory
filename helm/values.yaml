@@ -85,7 +85,6 @@ inference:
         host: "0.0.0.0"
         keep-ctx: "0"
         no-display: true
-
     gpu1:
       name: llama-server-args-gpu1
       model:
@@ -160,3 +159,12 @@ monitoring:
     prometheusUrl: http://truenas.utopiklab.lan:9090
     scrapePort: "9100"
     hostPrometheus: truenas.utopiklab.lan
+  # hardware-telemetry exporter (redfish-exporter DaemonSet + Service, amd64).
+  # grafana/redfish-exporter is a real public docker.io image (verified).
+  hardwareTelemetry:
+    image: "grafana/redfish-exporter:latest"
+    imagePullPolicy: IfNotPresent
+    real: true
+    verified: "grafana/redfish-exporter is a real public docker.io tag"
+    prometheusUrl: http://truenas.utopiklab.lan:9090
+    scrapePort: "8080"
