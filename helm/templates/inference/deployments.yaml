@@ -106,6 +106,20 @@ spec:
           configMap:
             name: {{ $cfg.name }}
         - name: {{ $cfg.name }}-models
-          persistentVolumeClaim:
-            claimName: {{ $inf.pvc.name }}
+          volumeClaimTemplate:
+            metadata:
+              name: {{ $cfg.name }}-models
+            spec:
+              initContainersAndEphemeralContainers: []
+              volumes:
+                - persistentVolumeClaim:
+                    claimName: {{ $cfg.name }}-models
+                    selector:
+                      matchLabels:
+                        storageClassName: {{ $.Values.inference.pvc.storageClassName }}
+                    accessModes:
+                      - {{ $.Values.inference.pvc.accessMode }}
+                    resources:
+                      requests:
+                        storage: {{ $.Values.inference.pvc.size }}
 {{- end }}
