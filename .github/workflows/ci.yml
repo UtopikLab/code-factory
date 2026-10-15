@@ -41,7 +41,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install langgraph langchain langchain-openai requests httpx pytest
+          pip install langgraph langchain requests httpx pytest
 
       - name: Run tests
         run: pytest orchestrator/ -v
@@ -71,8 +71,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: ./Dockerfile
+          context: ./orchestrator
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}

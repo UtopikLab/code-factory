@@ -249,9 +249,9 @@ Verify the inference stack is running and the OpenAI-compatible endpoint is resp
 ## Architecture Reference
 
 For the full design intent and open questions, see:
-- [`docs/thinktank-plan.md`](../thinktank-plan.md) — source-of-truth design
-- [`docs/keep-vs-defer-architecture.md`](../keep-vs-defer-architecture.md) — repo implementation posture
-- [`docs/build-plan.md`](../build-plan.md) — concrete build steps
+- [`docs/thinktank-plan.md`](../design/thinktank-plan.md) — source-of-truth design
+- [`docs/keep-vs-defer-architecture.md`](../design/keep-vs-defer-architecture.md) — repo implementation posture
+- [`docs/build-plan.md`](../build/build-plan.md) — concrete build steps
 
 ---
 
