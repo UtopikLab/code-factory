@@ -1,0 +1,11 @@
+{{/*
+Inference Namespace.
+*/}}
+{{- if not (lookup "v1" "Namespace" "" "inference") }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: inference
+  labels:
+    app: inference-server
+{{- end }}

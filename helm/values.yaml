@@ -145,6 +145,11 @@ orchestrator:
   judge:
     host: inference-server-gpu1
     port: "8000"
+  # Ingress for supervisor task-acceptor endpoint.
+  ingress:
+    enabled: true
+    ingressClassName: traefik
+    entrypoints: websecure
 
 # ---------------------------------------------------------------------------
 # Monitoring (namespace: monitoring).

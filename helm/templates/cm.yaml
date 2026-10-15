@@ -1,3 +1,0 @@
-{{- /*
-  Debug-only template intentionally disabled to avoid emitting invalid Kubernetes YAML.
-*/ -}}
