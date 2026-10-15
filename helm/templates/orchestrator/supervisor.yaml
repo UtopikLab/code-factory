@@ -168,7 +168,7 @@ spec:
           configMap:
             name: {{ .Chart.Name }}-orchestrator-acceptor
       imagePullSecrets:
-        - name: ghcr-credentials
+        - name: ghcr-secret
 ---
 apiVersion: v1
 kind: Service

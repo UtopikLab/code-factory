@@ -31,7 +31,7 @@ All facts in this section are **verified on the actual hardware** of
 | **RAM** | 91 GiB total · 87 GiB free · Swap 8 GiB |
 | **STORAGE** | `/mnt/k8s-data-ssd` — 3x SSD RAID5 (~1.9 TB xfs, replicated) · `/mnt/k8s-local-nvme` — ~1.9 TB NVMe |
 | **GPU** | 2x NVIDIA Tesla P40 (Pascal GP102, 23 GB VRAM each) | — NO tensor (CUDA) cores · ~94 GB/s memory bandwidth | — PCIe Gen3 x16 · NO NVLink |
-| **MGMT** | iDRAC (PERC H730P / H740P controller) |
+| **MGMT** | iDRAC (iDRAC9 Enterprise BMC controller) |
 | **DRIVER** | nvidia 580.178.04 (CUDA 13.0 runtime) · nvcc toolchain 12.4 | |
 
 ### 1.2 Existing stack (the baseline we build on)
@@ -176,7 +176,7 @@ review gate for the final pass.
 
 | Agent role | Recommended model | Context size | Why this fits | Runtime posture |
 | :--- | :--- | :---: | :--- | :--- |
-| **Supervisor / planner** | **Qwen2.5-Coder-14B-Instruct** (AWQ or GGUF Q4) | **32K** | best planner/reasoner for decomposing the issue, choosing the strategy, and routing work; heavier reasoning load justifies the larger model | resident, always-on |
+| **Supervisor / planner** | **Qwen2.5-Coder-7B-Instruct-GGUF** @ Q4_K_M | **32K** | sufficient for decomposing the issue, choosing the strategy, and routing work within the single-P40 budget; 14B was the earlier proposal, superseded by the 7B resolution (O1/O2) | resident, always-on |
 | **Coder worker** | **Qwen2.5-Coder-7B-Instruct** (GGUF Q4_K_M) | **32K** | best quality/latency tradeoff for patch generation; low VRAM footprint fits a P40 cleanly | short-lived worker Job |
 | **Judge / reviewer** | **Qwen2.5-Coder-7B-Instruct** (GGUF Q4_K_M) | **32K** | same family as the workers keeps evaluation meaningful without making the judge too expensive | resident, always-on |
 | **Verifier / test runner** | **Qwen2.5-Coder-7B-Instruct** | **16K–32K** | tool-heavy validation needs strong failure interpretation, but usually not full long-context reasoning | short-lived helper |
@@ -184,7 +184,7 @@ review gate for the final pass.
 
 **Practical default:**
 
-- **Planner:** 14B, 32K
+- **Planner:** 7B, 32K
 - **Coder workers:** 7B, 32K
 - **Judge:** 7B, 32K
 - **Verifier / PR summary:** 7B, 16K or lower
@@ -212,7 +212,7 @@ your sign-off or a data point before we build.
 
 | # | Decision | Tag | Choice | Key reasoning / open question |
 | :--- | :--- | :--- | :--- | :--- |
-| 1 | **Two-brain split** | ✅ CONFIRMED | P40-0 = Qwen2.5 **coder** (llama.cpp); P40-1 = Qwen2.5 **judge/supervisor** (llama.cpp). Same model family so the judge is meaningful. | VRAM fit: 2× 7B Q4_K_M ≈ 9.4 GB combined, **both on a single P40** with ~18 GB spare. |
+| 1 | **Two-brain split** | ✅ CONFIRMED | P40-0 = Qwen2.5 **coder** (llama.cpp); P40-1 = Qwen2.5 **judge/supervisor** (llama.cpp). Same model family so the judge is meaningful. | VRAM fit: 2× 7B Q4_K_M (~4.68 GB each) fit on **separate** P40s, ~18 GB spare per card. |
 | 2 | **Orchestration framework** | ✅ CONFIRMED | **LangGraph** state machine for the loop. | Supervisor.plan → spawn N workers → each edits/runs → supervisor evaluates each → picks BEST → iterate on failure → open PR (human gate). |
 | 3 | **Always-on vs scheduled** | ✅ CONFIRMED | **Always-on `Deployment`** (not CronJob). | Must be ready the instant a task arrives; survives restarts with persistent state. |
 | 4 | **Overnight agent & VS Code** | ✅ CONFIRMED | Overnight agent runs in `orchestrator` Deployment with its own tool-calling; **independent of VS Code / Copilot Chat**. | Copilot Chat is the interactive cloud design/chat path — separate and left untouched. Qwen doesn't drive VS Code tools in that setup, but that does **not** constrain the overnight agent. |
@@ -259,9 +259,9 @@ free the VRAM that 64K + a large model would have consumed.
 - Preference for HF-preferring quantizations.
 - Quality floor: "35B and less gives satisfying quality."
 - **Candidate pinned to Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M** (~4.68 GB, one
-  P40). **NOT YET LOCKED** — the 7B size is the largest Qwen2.5-Coder that fits a
-  single P40 at Q4_K_M (14B also fits; 32B does not). Validate on-device before
-  committing to 7B.
+  P40). **RESOLVED** — 7B is the chosen model; it is the largest Qwen2.5-Coder that
+  fits a single P40 at Q4_K_M (14B also fits; 32B does not). On-device validation of
+  7B remains a post-signoff step (see §9 step 2).
 
 > **Note on VRAM headroom (independent of this):** the P40 VRAM (23 GB/card, 46
 > GB combined) is the real constraint. The *chosen* models (Qwen2.5-Coder-7B at

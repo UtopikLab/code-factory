@@ -51,7 +51,7 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: llama-server
-          image: {{ $inf.image | default "ghcr.io/ggml-org/llama.cpp:server-intel" }}
+          image: {{ $inf.image | default "ghcr.io/ggml-org/llama.cpp:server-cuda" }}
           imagePullPolicy: {{ $inf.imagePullPolicy | default "IfNotPresent" }}
           args:
             - --models-dir

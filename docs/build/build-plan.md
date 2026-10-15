@@ -163,7 +163,7 @@ data:
   task-wait-seconds: "30"
   loop-state-dir: "/data/loop-state"
   judge-url: "https://inference.local/v1"
-  judge-model: "qwen2.5-coder-7b-instruct-q5-kn@32k"
+  judge-model: "qwen2.5-coder-7b-instruct-q4-km@32k"
 EOF
 
 # Secrets (refresh the expired PAT before running this).
@@ -198,9 +198,11 @@ kubectl get pods -n orchestrator -o wide
 # Service is up and points at the pod.
 kubectl get service orchestrator -n orchestrator -o wide
 
-# Readiness probe target: the acceptor HTTP server on :8000.
+# Readiness probe target: the resident LangGraph loop (the always-on signal).
+# :8000 is bound only while a task is being accepted, so it is NOT a reliable
+# readiness signal for the idle Deployment — use the resident-loop check instead.
 kubectl -n orchestrator exec orchestrator-<pod> -- sh -c \
-  'curl -fsS http://localhost:8000/healthz && echo "healthz OK"'
+  'pgrep -f langgraph >/dev/null && echo "langgraph resident" || echo "langgraph NOT resident"'
 
 # Liveness probe target: the resident LangGraph loop.
 kubectl -n orchestrator exec orchestrator-<pod> -- sh -c \
@@ -365,8 +367,8 @@ Job, and return `{"uid":..., "task_id":"UtopikLab/llm-rig#42", ...}`.
   brain as **Qwen2.5-14B-Instruct-AWQ** (GPU 0) / **Qwen2.5-7B-Instruct-AWQ**
   (GPU 1), `--model-format awq`, `--ctx-size 4096`, `f8_e4m3` tensors. The
   **actual baseline** judge model wired into the orchestrator is
-  **`qwen2.5-coder-7b-instruct-q5-kn`** — a **GGUF q5_kn** quantization with a
+  **`qwen2.5-coder-7b-instruct-q4-km`** — a **GGUF q4_km** quantization with a
   **32k** context window. The two are inconsistent (AWQ vs GGUF; 7B/14B vs
   7B-Coder; 4096 vs 32768 ctx). This plan does **not** resolve it; refresh
   `inference/deployment.yaml` / `supervisor.yaml` comments to match the real
-  GGUF q5_kn @32k baseline before relying on the judge.
+  GGUF q4_km @32k baseline before relying on the judge.

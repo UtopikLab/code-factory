@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=none
 apiVersion: v2
 name: k8s-inference
 description: A single-node K3s (containerd) LLM inference stack for k8s-node01.
