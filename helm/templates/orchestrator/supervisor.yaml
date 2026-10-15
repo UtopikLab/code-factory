@@ -122,11 +122,11 @@ spec:
                   key: orchestrator-config
           resources:
             requests:
-              cpu: 500m
-              memory: 2Gi
+              cpu: {{ .Values.inference.resources.cpuRequest | default "1" }}
+              memory: {{ .Values.inference.resources.memory | default "23Gi" }}
             limits:
-              cpu: "2.5"
-              memory: 5Gi
+              cpu: {{ .Values.inference.resources.cpuLimit | default "2" }}
+              memory: {{ .Values.inference.resources.memory | default "23Gi" }}
         - name: task-acceptor
           image: python:3.12-slim
           imagePullPolicy: IfNotPresent
@@ -158,11 +158,11 @@ spec:
               readOnly: true
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: {{ .Values.inference.resources.cpuRequest | default "1" }}
+              memory: {{ .Values.inference.resources.memory | default "23Gi" }}
             limits:
-              cpu: 250m
-              memory: 256Mi
+              cpu: {{ .Values.inference.resources.cpuLimit | default "2" }}
+              memory: {{ .Values.inference.resources.memory | default "23Gi" }}
       volumes:
         - name: orchestrator-acceptor
           configMap:

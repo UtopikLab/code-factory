@@ -90,11 +90,11 @@ spec:
               mountPath: /data/loop-state
           resources:
             requests:
-              cpu: 500m
-              memory: 3Gi
+              cpu: {{ .Values.inference.resources.cpuRequest | default "1" }}
+              memory: {{ .Values.inference.resources.memory | default "23Gi" }}
             limits:
-              cpu: "6.5"
-              memory: 7Gi
+              cpu: {{ .Values.inference.resources.cpuLimit | default "2" }}
+              memory: {{ .Values.inference.resources.memory | default "23Gi" }}
       volumes:
         - name: workspace
           emptyDir: {}
