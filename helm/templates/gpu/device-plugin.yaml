@@ -154,7 +154,7 @@ spec:
             path: /var/lib/kubelet/device-plugins
             type: DirectoryOrCreate
       imagePullSecrets:
-        - name: nvidia-registry-creds
+        - name: {{ .Values.global.imagePullSecrets | default "nvidia-registry-creds" }}
 
 {{- if .Values.gpu.nodeProblemDetector.enabled }}
 ---
@@ -191,7 +191,7 @@ spec:
       tolerations:
         - operator: Exists
       imagePullSecrets:
-        - name: nvidia-registry-creds
+        - name: {{ .Values.global.imagePullSecrets | default "nvidia-registry-creds" }}
       containers:
         - name: nvidia-node-problem-detector
           image: {{ .Values.gpu.nodeProblemDetector.image | default "nvcr.io/nvidia/k8s-node-problem-detector:0.18.0" }}

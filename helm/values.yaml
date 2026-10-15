@@ -15,6 +15,8 @@
 # Default image registry for containerd (K3s host). See inference/common.sh.
 global:
   IMAGE_REGISTRY: "ghcr.io"
+  # Registry credentials applied to all resources (set a Secret name, or empty to omit).
+  imagePullSecrets: "nvidia-registry-creds"
 
 # Default image for the orchestrator workload and related cluster services.
 #   - langgraph-orchestrator : built from the repo Dockerfile and published to GHCR.
