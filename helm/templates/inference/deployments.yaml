@@ -82,9 +82,11 @@ spec:
               protocol: TCP
           resources:
             requests:
+              cpu: {{ $inf.resources.cpuRequest | default "1" }}
               nvidia.com/gpu: {{ $inf.resources.gpu }}
               memory: {{ $inf.resources.memory }}
             limits:
+              cpu: {{ $inf.resources.cpuLimit | default "2" }}
               nvidia.com/gpu: {{ $inf.resources.gpu }}
               memory: {{ $inf.resources.memory }}
           readinessProbe:
