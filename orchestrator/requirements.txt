@@ -1,0 +1,29 @@
+# Supervisor Loop
+
+Python dependencies for the LangGraph orchestrator supervisor.
+
+## Required packages
+
+- **langgraph>=0.2.0** - Graph state machine for agent orchestration
+- **langchain-openai>=0.2.0** - LLM client for judging and coding agents
+- **requests>=2.31.0** - HTTP client for task-acceptor communication
+- **httpx>=0.27.0** - Async HTTP client for concurrent worker execution
+
+## Installation
+
+```bash
+pip install -r requirements.txt
+```
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|--------|
+| `GITHUB_TOKEN` | GitHub PAT for PR creation | required |
+| `OPENAI_API_KEY` | Judge model API key | required |
+| `JUDGE_MODEL` | Judge LLM model | qwen2.5-coder-7b-instruct-q5-kn@32k |
+| `ACCEPTOR_URL` | Task-acceptor sidecar URL | http://orchestrator.local:8000 |
+| `WORKER_COUNT` | Number of parallel coder workers | 2 |
+| `MAX_ITERATIONS` | Max retry iterations per task | 8 |
+| `ACCEPTANCE_THRESHOLD` | Min score for acceptance | 0.7 |
+| `IMAGE` | Worker container image | ghcr.io/utopiklab/coder-worker:latest |
