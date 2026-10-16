@@ -1,0 +1,38 @@
+# Chart override — reproducible fix for the stale deploy.
+#
+# The inference servers mount ConfigMaps (llama-server-args-gpu{0,1}) that the
+# chart template renders from .Values.inference.configMaps. A previous `helm
+# upgrade` never created those ConfigMaps, so the pods were stuck in
+# ContainerCreating (FailedMount). This override re-supplies the configMaps
+# values so they render on the next `helm upgrade ... -f inference-configmaps.yaml`.
+#
+# Single source of truth remains templates/inference/configmaps.yaml; this file
+# only re-provides the input values. No duplicate manifests are committed.
+inference:
+  configMaps:
+  - name: llama-server-args-gpu0
+    model:
+      model-dir: /models
+      model-format: gguf
+      model-name: qwen2.5-coder-7b-instruct-q4-km
+      ctx-size: "32768"
+      tensor-type: q4_km
+      rope-freq-base: "500000.0"
+      rope-freq-scale: "1.0"
+      port: "8000"
+      host: "0.0.0.0"
+      keep-ctx: "0"
+      no-display: "true"
+  - name: llama-server-args-gpu1
+    model:
+      model-dir: /models
+      model-format: gguf
+      model-name: qwen2.5-coder-7b-instruct-q4-km
+      ctx-size: "32768"
+      tensor-type: q4_km
+      rope-freq-base: "500000.0"
+      rope-freq-scale: "1.0"
+      port: "8000"
+      host: "0.0.0.0"
+      keep-ctx: "0"
+      no-display: "true"

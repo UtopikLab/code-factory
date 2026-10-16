@@ -32,34 +32,10 @@ namespaces:
     name: inference
     labels:
       app: inference-server
-  gpu:
-    name: gpu
   orchestrator:
     name: orchestrator
     labels:
       app: orchestrator
-# ---------------------------------------------------------------------------
-# GPU device-plugin (namespace: gpu). Managed by the official NVIDIA chart
-# (nvidia-device-plugin@0.20.1), enabled via `nvidia-device-plugin.enabled`.
-# ---------------------------------------------------------------------------
-gpu:
-  # Set true when a trusted provider chart/stack manages GPU infra externally.
-  # The NVIDIA device-plugin chart is added to this chart and only renders when
-  # enabled.
-  externalManaged: true
-  devicePlugin:
-    # Image used by the NVIDIA device-plugin chart (nvcr.io registry).
-    image: "nvcr.io/nvidia/k8s-device-plugin:v0.20.1"
-    imagePullPolicy: IfNotPresent
-    # Inject pull secrets driven from the `global.imagePullSecrets` value.
-    imagePullSecrets: "{{ .Values.global.imagePullSecrets }}"
-  nodeProblemDetector:
-    # Optional helper DaemonSet. Disabled by default.
-    enabled: false
-    image: "nvcr.io/nvidia/k8s-node-problem-detector:0.18.0"
-    imagePullPolicy: IfNotPresent
-    real: true
-    verified: "NVIDIA/k8s-node-problem-detector 0.18.0 (nvcr.io build; no stable GitHub release tag)"
 
 # The NVIDIA device-plugin chart is a sub-chart, gated by this flag.
 nvidia-device-plugin:
@@ -67,6 +43,12 @@ nvidia-device-plugin:
   # The chart enforces a guard against the 'default' namespace; set true so the
   # chart renders when this parent chart is templated/installed in 'default'.
   allowDefaultNamespace: true
+  # The sub-chart scopes its namespace-scoped resources (Namespace, DaemonSet,
+  # ServiceAccount) to the parent release namespace via this field. Without it,
+  # `helm template` renders them under 'default' and a live `helm install` would
+  # place them in the wrong namespace (collision with the live gpu-namespace
+  # device-plugin). Set to the live device-plugin namespace.
+  # namespaceOverride: gpu
 
 # ---------------------------------------------------------------------------
 # Inference servers (namespace: inference). llama.cpp image VERIFIED real.
@@ -112,10 +94,16 @@ inference:
     gpu1: "1"
   # Resources: full P40 (23 GiB) requested to prevent oversubscription.
   resources:
-    # CPU resource budget for the llama.cpp server pods (qwen2.5-coder-7b-instruct on a Tesla P40).
+    # CPU resource budget for the llama.cpp server pods.
     cpuRequest: "1"
     cpuLimit: "2"
-    gpu: "1"
+    # The k8s-node01 host physically has 2× Tesla P40 GPUs, but Kubernetes
+    # reports nvidia.com/gpu: 0 because the nvidia-device-plugin DaemonSet is not
+    # running (its nodeAffinity requires NFD-detected feature labels that this
+    # K3s node lacks). Once the device-plugin exposes the GPU resource, restore
+    # "gpu: 1" to request a physical GPU per pod. For now the GPU request
+    # stays 0 so the CPU-bound server pods can schedule.
+    gpu: "0"
     memory: "23Gi"
   # Ingress (Traefik, shipped by K3s).
   ingress:

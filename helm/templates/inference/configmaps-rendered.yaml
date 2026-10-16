@@ -1,0 +1,64 @@
+# Source: k8s-inference/templates/inference/configmaps-rendered.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llama-server-args-gpu1
+  namespace: inference
+  labels:
+    app.k8s.io/name: k8s-inference
+    app.k8s.io/instance: llama-server-args-gpu1
+    app.k8s.io/version: "0.1.0"
+    app.k8s.io/component: llama-server-args
+    component: llama-server-args
+    gpu: "1"
+data:
+  model-dir: "/models"
+  model-format: "gguf"
+  model-name: "qwen2.5-coder-7b-instruct-q4-km"
+  ctx-size: "32768"
+  tensor-type: "q4_km"
+  rope-freq-base: "500000.0"
+  rope-freq-scale: "1.0"
+  port: "8000"
+  host: "0.0.0.0"
+  keep-ctx: "0"
+  no-display: "true"
+---
+# Source: k8s-inference/templates/inference/configmaps.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llama-server-args-gpu0
+  namespace: inference
+  labels:
+    app.k8s.io/name: "k8s-inference"
+    app.k8s.io/instance: llama-server-args-gpu0
+    app.k8s.io/version: "0.1.0"
+    app.k8s.io/component: llama-server-args
+    component: llama-server-args
+    gpu: "gpu0"
+data:
+
+  ctx-size: "32768"
+
+  host: "0.0.0.0"
+
+  keep-ctx: "0"
+
+  model-dir: "/models"
+
+  model-format: "gguf"
+
+  model-name: "qwen2.5-coder-7b-instruct-q4-km"
+
+  no-display: "true"
+
+  port: "8000"
+
+  rope-freq-base: "500000.0"
+
+  rope-freq-scale: "1.0"
+
+  tensor-type: "q4_km"
+---
+# Source: k8s-inference/templates/inference/configmaps.yaml

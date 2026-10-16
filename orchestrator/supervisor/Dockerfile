@@ -25,12 +25,9 @@ RUN pip install --no-cache-dir \
     requests>=2.31.0 \
     pyyaml>=6.0 \
     python-dotenv>=1.0 \
-    aiohttp>=3.9 \
+    aiohttp>=3.9
 
-# Bake supervisor assets to /opt/orchestrator
 COPY supervisor_loop.py /opt/orchestrator/supervisor-loop.py
-COPY templates/agent-job-template.yaml /opt/orchestrator/agent-job-template.yaml
-COPY templates/supervisor-task-acceptor.py /opt/orchestrator/supervisor-task-acceptor.py
 
 # Persistent loop state and task work directories
 RUN mkdir -p /data/loop-state /data/task-work

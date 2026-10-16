@@ -25,6 +25,7 @@ dependencies:
   version: "0.20.1"
   repository: "https://nvidia.github.io/k8s-device-plugin"
   condition: nvidia-device-plugin.enabled
+  namespace: gpu
 maintainers:
 - name: UtopikLab
   url: https://github.com/UtopikLab

@@ -1,9 +1,10 @@
 # Coder Worker image for autonomous LangGraph coder agents.
 # Builds a Python 3.12 container with code execution, GitHub API, and OpenAI client.
 
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
+COPY worker.py /app/worker.py
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -25,11 +26,8 @@ RUN pip install --no-cache-dir \
     requests>=2.31.0 \
     pyyaml>=6.0 \
     python-dotenv>=1.0 \
-    aiohttp>=3.9 \
-
-# Bake supervisor assets to /opt/orchestrator
-COPY templates/agent-job-template.yaml /opt/orchestrator/agent-job-template.yaml
-COPY templates/supervisor-task-acceptor.py /opt/orchestrator/supervisor-task-acceptor.py
+    openai>=1.0,<2.0 \
+    aiohttp>=3.9
 
 # Working directories for code execution and persistent loop state
 RUN mkdir -p /data/task-work /data/agent-cache /data/outputs /data/loop-state
@@ -39,7 +37,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/healthz || exit 1
 
 # Default entrypoint: worker mode
-ENTRYPOINT ["python3", "/opt/orchestrator/supervisor-loop.py", "--worker"]
+ENTRYPOINT ["python3", "worker.py", "--worker"]
 
 # Expose health check port
 EXPOSE 8000
