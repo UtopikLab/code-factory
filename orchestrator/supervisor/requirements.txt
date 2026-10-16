@@ -1,37 +1,12 @@
-# Supervisor Loop
-
-Python dependencies for the LangGraph orchestrator supervisor.
-
-## Required packages (CPU-only image: no torch/transformers/langchain-openai)
-
-- **langgraph>=1.2,<2.0** - Graph state machine for agent orchestration
-- **langchain-core>=0.3,<0.4** - Core LangChain primitives
-- **langgraph-sdk>=0.4,<0.5** - LangGraph server SDK
-- **fastapi>=0.115,<0.120** - ASGI web framework
-- **uvicorn>=0.30,<0.33** - ASGI server
-- **tenacity>=8.5,<9.0** - Retry logic
-- **pydantic>=2.7,<2.10** - Validation
-- **httpx>=0.27,<0.29** - Async HTTP client for concurrent worker execution
-- **requests>=2.31.0** - HTTP client for task-acceptor communication
-- **pyyaml>=6.0** - YAML templating
-- **python-dotenv>=1.0** - Env loading
-- **aiohttp>=3.9** - Async I/O
-
-## Installation
-
-```bash
-pip install -r requirements.txt
-```
-
-## Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|--------|
-| `GITHUB_TOKEN` | GitHub PAT for PR creation | required |
-| `OPENAI_API_KEY` | Judge model API key | required |
-| `JUDGE_MODEL` | Judge LLM model | qwen2.5-coder-7b-instruct-q4-km@32k |
-| `ACCEPTOR_URL` | Task-acceptor sidecar URL | http://orchestrator.local:8000 |
-| `WORKER_COUNT` | Number of parallel coder workers | 2 |
-| `MAX_ITERATIONS` | Max retry iterations per task | 8 |
-| `ACCEPTANCE_THRESHOLD` | Min score for acceptance | 0.7 |
-| `IMAGE` | Worker container image | ghcr.io/utopiklab/coder-worker:latest |
+langgraph>=1.2,<2.0
+langchain-core>=0.3,<0.4
+langgraph-sdk>=0.4,<0.5
+fastapi>=0.115,<0.120
+uvicorn>=0.30,<0.33
+tenacity>=8.5,<9.0
+pydantic>=2.7,<2.10
+httpx>=0.27,<0.29
+requests>=2.31.0
+pyyaml>=6.0
+python-dotenv>=1.0
+aiohttp>=3.9
