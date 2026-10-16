@@ -1,5 +1,5 @@
 langgraph>=1.2,<2.0
-langchain-core>=0.3,<0.4
+langchain-core>=1.4.0,<2.0
 langgraph-sdk>=0.4,<0.5
 fastapi>=0.115,<0.120
 uvicorn>=0.30,<0.33
