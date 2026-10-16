@@ -49,6 +49,9 @@ jobs:
   build-image:
     needs: [ lint, test ]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     env:
       REGISTRY: ghcr.io
       IMAGE_NAME: utopiklab/langgraph-orchestrator
