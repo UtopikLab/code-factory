@@ -8,14 +8,14 @@ Implements the keep-vs-defer architecture:
 """
 
 import asyncio
+import httpx
 import json
 import logging
 import os
-import httpx
 from typing import TypedDict
 from datetime import datetime
 
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import END, START, StateGraph
 
 logging.basicConfig(
     level=logging.INFO,
@@ -194,8 +194,9 @@ async def node_execute_workers(state: TaskState) -> TaskState:
                     {"error": f"Acceptance rejected: {wait_response.text if 'wait_response' in dir() else response.text}"}, datetime.now().isoformat()))
                 logger.warning(f"[{state['task_id']}] Worker {task_id} was rejected")
     
+    payload = spawn_payload or {}
     async with httpx.AsyncClient(timeout=30):
-        await asyncio.gather(*[_spawn_worker(f"{state['task_id']}-worker-{i}", i, spawn_payload or {}) for i in range(worker_count)])
+        await asyncio.gather(*[_spawn_worker(f"{state['task_id']}-worker-{i}", i, payload) for i in range(worker_count)])
     logger.info(f"[{state['task_id']}] All {len(state['worker_outputs'])} workers completed")
     return state
 

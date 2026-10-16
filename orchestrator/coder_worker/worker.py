@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Coder Worker sidecar for autonomous LangGraph coder agents.
 
@@ -18,18 +17,18 @@ is missing.
 """
 
 import asyncio
+import http
 import json
 import logging
 import os
 import sys
-from typing import Optional
-
-import http
-import httpx
 from typing import TYPE_CHECKING
 
+import httpx
+import openai
+
 if TYPE_CHECKING:
-    import openai
+    pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,7 +61,7 @@ class CodeEditor:
         self.working_dir = working_dir
         os.makedirs(self.working_dir, exist_ok=True)
 
-    def _write(self, rel_path: str, content: str) -> Optional[str]:
+    def _write(self, rel_path: str, content: str) -> str | None:
         full = os.path.join(self.working_dir, rel_path)
         try:
             parent = os.path.dirname(full) or "."
