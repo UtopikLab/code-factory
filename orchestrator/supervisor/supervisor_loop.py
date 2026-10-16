@@ -138,7 +138,7 @@ def node_plan(state: TaskState) -> TaskState:
     return state
 
 
-def node_execute_workers(state: TaskState) -> TaskState:
+async def node_execute_workers(state: TaskState) -> TaskState:
     """Spawn and execute coder workers via HTTP to task-acceptor sidecar."""
     logger.info(f"[{state['task_id']}] Spawning workers for iteration {state['iteration']}")
     
@@ -196,66 +196,9 @@ def node_execute_workers(state: TaskState) -> TaskState:
                     task_id, i, "rejected",
                     {"error": f"Acceptance rejected: {wait_response.text if 'wait_response' in dir() else response.text}"}, datetime.now().isoformat()))
                 logger.warning(f"[{state['task_id']}] Worker {task_id} was rejected")
-        except httpx.RequestException as e:
-            state["worker_outputs"].append(make_worker_output(
-                task_id, i, "error", {"error": str(e)}, datetime.now().isoformat()))
-            logger.error(f"[{state['task_id']}] Failed to spawn worker: {e}")
     
     async with httpx.AsyncClient(timeout=30) as client:
         await asyncio.gather(*[_spawn_worker(f"{state['task_id']}-worker-{i}", i) for i in range(worker_count)])
-    logger.info(f"[{state['task_id']}] All {len(state['worker_outputs'])} workers completed")
-        
-        try:
-            response = requests.post(
-                f"{acceptor_url}/api/v1/tasks/spawn",
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
-            
-            if response.status_code == 202:
-                task_result = response.json()
-                task_id = task_result["task_id"]
-                logger.info(f"[{state['task_id']}] Worker {task_id} accepted")
-                
-                # Wait for worker to complete
-                logger.info(f"[{state['task_id']}] Waiting for worker {task_id}...")
-                try:
-                    wait_response = requests.get(
-                        f"{acceptor_url}/api/v1/tasks/{task_id}",
-                        headers=headers,
-                        timeout=1800
-                    )
-                    if wait_response.status_code == 200:
-                        worker_output = wait_response.json()
-                        extra = {
-                            "output": worker_output.get("output", ""),
-                            "patch": worker_output.get("patch", ""),
-                            "score": float((worker_output.get("score", 0)) or 0),
-                            "review": worker_output.get("review", ""),
-                        }
-                        state["worker_outputs"].append(make_worker_output(
-                            task_id, i, "success", extra, datetime.now().isoformat()))
-                        logger.info(f"[{state['task_id']}] Worker {i} completed with score: {extra['score']}")
-                    else:
-                        state["worker_outputs"].append(make_worker_output(
-                            task_id, i, "timeout",
-                            {"error": "Worker timed out"}, datetime.now().isoformat()))
-                        logger.warning(f"[{state['task_id']}] Worker {task_id} timed out")
-                except requests.RequestException as e:
-                    state["worker_outputs"].append(make_worker_output(
-                        task_id, i, "error", {"error": str(e)}, datetime.now().isoformat()))
-                    logger.error(f"[{state['task_id']}] Failed to get worker output: {e}")
-            else:
-                state["worker_outputs"].append(make_worker_output(
-                    task_id, i, "rejected",
-                    {"error": f"Acceptance rejected: {response.text}"}, datetime.now().isoformat()))
-                logger.warning(f"[{state['task_id']}] Worker {task_id} was rejected")
-        except requests.RequestException as e:
-            state["worker_outputs"].append(make_worker_output(
-                task_id, i, "error", {"error": str(e)}, datetime.now().isoformat()))
-            logger.error(f"[{state['task_id']}] Failed to spawn worker: {e}")
-    
     logger.info(f"[{state['task_id']}] All {len(state['worker_outputs'])} workers completed")
     return state
 
@@ -276,7 +219,7 @@ def mock_worker_executor(state: TaskState, worker_count: int) -> TaskState:
     return state
 
 
-def node_evaluate(state: TaskState) -> TaskState:
+async def node_evaluate(state: TaskState) -> TaskState:
     """Judge evaluates all worker outputs using real inference server."""
     logger.info(f"[{state['task_id']}] Evaluating {len(state['worker_outputs'])} outputs")
     
@@ -454,7 +397,7 @@ class SupervisorLoop:
         if self.graph:
             # Run through LangGraph
             try:
-                final_state = self.graph.invoke(state)
+                final_state = await self.graph.ainvoke(state)
                 self.logger.info(f"[{state['task_id']}] Task complete, status: {final_state['status']}")
                 return final_state
             except Exception as e:
