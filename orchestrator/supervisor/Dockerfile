@@ -5,6 +5,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+COPY requirements.txt /app/requirements.txt
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
