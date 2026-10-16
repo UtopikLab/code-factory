@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Minimal LangGraph supervisor loop for k8s-node01.
 Implements the keep-vs-defer architecture:
@@ -8,14 +7,12 @@ Implements the keep-vs-defer architecture:
 - human PR gate
 """
 
-import os
-import json
 import asyncio
+import json
 import logging
-import subprocess
-import threading
+import os
 import httpx
-from typing import TypedDict, Annotated
+from typing import TypedDict
 from datetime import datetime
 
 from langgraph.graph import StateGraph, START, END
@@ -151,7 +148,7 @@ async def node_execute_workers(state: TaskState) -> TaskState:
         logger.warning("[" + state["task_id"] + "] GITHUB_TOKEN not set, using mock mode")
         return mock_worker_executor(state, worker_count)
     
-    async def _spawn_worker(task_id, i):
+    async def _spawn_worker(task_id, i, payload):
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
                 f"{acceptor_url}/api/v1/tasks/spawn",
@@ -159,7 +156,7 @@ async def node_execute_workers(state: TaskState) -> TaskState:
                     "Authorization": f"token {github_token}",
                     "Content-Type": "application/json",
                 },
-                json=payload,
+                json=payload or {},
             )
             if response.status_code == 202:
                 task_result = response.json()
@@ -197,8 +194,8 @@ async def node_execute_workers(state: TaskState) -> TaskState:
                     {"error": f"Acceptance rejected: {wait_response.text if 'wait_response' in dir() else response.text}"}, datetime.now().isoformat()))
                 logger.warning(f"[{state['task_id']}] Worker {task_id} was rejected")
     
-    async with httpx.AsyncClient(timeout=30) as client:
-        await asyncio.gather(*[_spawn_worker(f"{state['task_id']}-worker-{i}", i) for i in range(worker_count)])
+    async with httpx.AsyncClient(timeout=30):
+        await asyncio.gather(*[_spawn_worker(f"{state['task_id']}-worker-{i}", i, spawn_payload or {}) for i in range(worker_count)])
     logger.info(f"[{state['task_id']}] All {len(state['worker_outputs'])} workers completed")
     return state
 
@@ -311,13 +308,11 @@ def node_pick_best(state: TaskState) -> TaskState:
     best = max(state["worker_outputs"], key=lambda x: x.get("score", 0))
     state["best_output"] = best
     
-    passes_acceptance = best.get("score", 0) >= passes_acceptance(state)
-    
+    passes = best.get("score", 0) >= passes_acceptance(state)
     logger.info(
         f"[{state['task_id']}] Best output: worker {best['worker_id']} "
-        f"(score: {best['score']}, passes: {passes_acceptance})"
+        f"(score: {best['score']}, passes: {passes})"
     )
-    
     return state
 
 
@@ -400,7 +395,7 @@ class SupervisorLoop:
                 final_state = await self.graph.ainvoke(state)
                 self.logger.info(f"[{state['task_id']}] Task complete, status: {final_state['status']}")
                 return final_state
-            except Exception as e:
+            except httpx.RequestException as e:
                 self.logger.error(f"[{state['task_id']}] Error in graph: {e}")
                 state["status"] = "failed"
                 state["error"] = str(e)
@@ -414,7 +409,6 @@ class SupervisorLoop:
 
 async def run_loop():
     """Main loop runner - accept tasks and process them."""
-    supervisor = SupervisorLoop()
     logger.info("Supervisor loop initialized and listening for tasks")
     
     # For now, just keep the loop alive

@@ -108,8 +108,8 @@ def render_patch(changed: list[str], contents: list[tuple[str, str]]) -> str:
             f"--- {path}",
             f"+++ {path}",
             "",
-            f"new-file-mode +0000",
-            f"old-file-mode -0000",
+            "new-file-mode +0000",
+            "old-file-mode -0000",
             "",
             content,
         ]
@@ -182,7 +182,7 @@ def _extract_task_id(body: bytes) -> str:
 async def run_worker(
     acceptor_url: str,
     worker_id: str,
-    spawn_payload: Optional[dict],
+    spawn_payload: dict | None,
 ) -> dict:
     client = httpx.AsyncClient(timeout=HTTP_TIMEOUT)
     github_token = os.environ.get("GITHUB_TOKEN", "")
@@ -286,9 +286,9 @@ async def serve_healthz() -> None:
 # --------------------------------------------------------------------------- #
 
 async def main_async(
-    worker_id: Optional[str] = None,
-    acceptor_url: Optional[str] = None,
-    spawn_payload: Optional[dict] = None,
+    worker_id: str | None = None,
+    acceptor_url: str | None = None,
+    spawn_payload: dict | None = None,
 ) -> dict:
     acceptor_url = acceptor_url or os.environ.get("ACCEPTOR_URL", DEFAULT_ACCEPTOR_URL)
     worker_id = worker_id or os.environ.get("WORKER_ID", "worker")

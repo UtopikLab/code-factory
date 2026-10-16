@@ -1,18 +1,16 @@
 """Unit tests for pure helper functions in supervisor_loop."""
 
-import pytest
+from orchestrator.coder_worker.worker import (
+    CodeEditor,
+    _extract_edits,
+    render_patch,
+)
 
 from orchestrator.supervisor.supervisor_loop import (
     build_evaluation_prompt,
     make_eval_result,
     make_worker_output,
     passes_acceptance,
-)
-
-from orchestrator.coder_worker.worker import (
-    CodeEditor,
-    render_patch,
-    _extract_edits,
 )
 
 
@@ -91,14 +89,14 @@ def test_code_editor_insert(tmp_path):
 def test_code_editor_replace(tmp_path):
     editor = CodeEditor(str(tmp_path))
     edits = [{"path": "a.txt", "content": "a = 10\n"}]
-    output, changed, contents = editor.apply_edits(edits)
+    _output, changed, contents = editor.apply_edits(edits)
     assert changed == ["a.txt"]
     assert contents[0][1] == "a = 10\n"
 
 
 def test_code_editor_skips_empty(tmp_path):
     editor = CodeEditor(str(tmp_path))
-    output, changed, contents = editor.apply_edits([{"path": "", "content": "x"}])
+    _output, changed, contents = editor.apply_edits([{"path": "", "content": "x"}])
     assert changed == []
     assert contents == []
 
