@@ -16,6 +16,8 @@ is used for judging and falls back to a heuristic self-review when the API key
 is missing.
 """
 
+from __future__ import annotations
+
 import asyncio
 import http
 import json
@@ -25,7 +27,9 @@ import sys
 from typing import TYPE_CHECKING
 
 import httpx
-import openai
+
+if TYPE_CHECKING:
+    import openai
 
 if TYPE_CHECKING:
     pass
