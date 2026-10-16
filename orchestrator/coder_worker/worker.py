@@ -22,13 +22,9 @@ import json
 import logging
 import os
 import sys
-from typing import TYPE_CHECKING
 
 import httpx
 import openai
-
-if TYPE_CHECKING:
-    pass
 
 logging.basicConfig(
     level=logging.INFO,

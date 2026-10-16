@@ -1,16 +1,15 @@
 """Unit tests for pure helper functions in supervisor_loop."""
 
+from orchestrator.coder_worker.worker import (
+    CodeEditor,
+    _extract_edits,
+    render_patch,
+)
 from orchestrator.supervisor.supervisor_loop import (
     build_evaluation_prompt,
     make_eval_result,
     make_worker_output,
     passes_acceptance,
-)
-
-from orchestrator.coder_worker.worker import (
-    CodeEditor,
-    _extract_edits,
-    render_patch,
 )
 
 
