@@ -13,19 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies (CPU-only: no torch/transformers/langchain-openai)
-RUN pip install --no-cache-dir \
-    langgraph>=1.2,<2.0 \
-    langchain-core>=0.3,<0.4 \
-    langgraph-sdk>=0.4,<0.5 \
-    fastapi>=0.115,<0.120 \
-    uvicorn>=0.30,<0.33 \
-    tenacity>=8.5,<9.0 \
-    pydantic>=2.7,<2.10 \
-    httpx>=0.27,<0.29 \
-    requests>=2.31.0 \
-    pyyaml>=6.0 \
-    python-dotenv>=1.0 \
-    aiohttp>=3.9
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY supervisor_loop.py /opt/orchestrator/supervisor-loop.py
 

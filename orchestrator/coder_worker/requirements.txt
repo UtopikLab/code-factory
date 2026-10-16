@@ -1,0 +1,25 @@
+# Coder Worker
+
+Python dependencies for the LangGraph coder worker sidecar.
+
+## Required packages (CPU-only image: no torch/transformers/langchain-openai)
+
+- **langgraph>=1.2,<2.0** - Graph state machine for agent orchestration
+- **langchain-core>=0.3,<0.4** - Core LangChain primitives
+- **langgraph-sdk>=0.4,<0.5** - LangGraph server SDK
+- **fastapi>=0.115,<0.120** - ASGI web framework
+- **uvicorn>=0.30,<0.33** - ASGI server
+- **tenacity>=8.5,<9.0** - Retry logic
+- **pydantic>=2.7,<2.10** - Validation
+- **httpx>=0.27,<0.29** - Async HTTP client for concurrent worker execution
+- **requests>=2.31.0** - HTTP client for task-acceptor communication
+- **pyyaml>=6.0** - YAML templating
+- **python-dotenv>=1.0** - Env loading
+- **openai>=1.0,<2.0** - OpenAI client for heuristic self-review judging
+- **aiohttp>=3.9** - Async I/O
+
+## Installation
+
+```bash
+pip install -r requirements.txt
+```
