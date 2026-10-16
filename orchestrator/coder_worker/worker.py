@@ -16,23 +16,14 @@ is used for judging and falls back to a heuristic self-review when the API key
 is missing.
 """
 
-from __future__ import annotations
-
 import asyncio
 import http
 import json
 import logging
 import os
 import sys
-from typing import TYPE_CHECKING
 
 import httpx
-
-if TYPE_CHECKING:
-    import openai
-
-if TYPE_CHECKING:
-    pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -134,7 +125,7 @@ def _extract_edits(payload: dict) -> list[dict]:
 # Judge
 # --------------------------------------------------------------------------- #
 
-async def judge_review(client: openai.OpenAI, patch: str, output: str) -> tuple[float, str]:
+async def judge_review(client, patch: str, output: str) -> tuple[float, str]:
     if not os.environ.get("OPENAI_API_KEY"):
         logger.warning("OPENAI_API_KEY not set; falling back to heuristic self-review.")
         return (0.7, "No OpenAI API key available; self-review omitted. Changes applied deterministically.")
