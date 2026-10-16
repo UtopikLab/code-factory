@@ -6,21 +6,25 @@ version: 0.1.0
 appVersion: "0.1.0"
 type: application
 templates:
-  - helpers.tpl
-  - gpu/namespace.yaml
-  - gpu/device-plugin.yaml
-  - inference/namespace.yaml
-  - inference/configmaps.yaml
-  - debug-values.yaml
-  - inference/pvc.yaml
-  - inference/service.yaml
-  - inference/deployments.yaml
-  - inference/ingress.yaml
-  - orchestrator/namespace.yaml
-  - orchestrator/secrets.yaml
-  - orchestrator/supervisor.yaml
-  - orchestrator/workers.yaml
-  - orchestrator/agent-job.yaml
+- helpers.tpl
+- gpu/namespace.yaml
+- inference/namespace.yaml
+- inference/configmaps.yaml
+- debug-values.yaml
+- inference/pvc.yaml
+- inference/service.yaml
+- inference/deployments.yaml
+- inference/ingress.yaml
+- orchestrator/namespace.yaml
+- orchestrator/secrets.yaml
+- orchestrator/supervisor.yaml
+- orchestrator/workers.yaml
+- orchestrator/agent-job.yaml
+dependencies:
+  - name: nvidia-device-plugin
+    version: "0.20.1"
+    repository: "https://nvidia.github.io/k8s-device-plugin"
+    condition: nvidia-device-plugin.enabled
 maintainers:
-  - name: UtopikLab
-    url: https://github.com/UtopikLab
+- name: UtopikLab
+  url: https://github.com/UtopikLab

@@ -39,17 +39,20 @@ namespaces:
     labels:
       app: orchestrator
 # ---------------------------------------------------------------------------
-# GPU device-plugin (namespace: gpu). Versions VERIFIED real.
+# GPU device-plugin (namespace: gpu). Managed by the official NVIDIA chart
+# (nvidia-device-plugin@0.20.1), enabled via `nvidia-device-plugin.enabled`.
 # ---------------------------------------------------------------------------
 gpu:
-  # Keep false to continue managing GPU infra from this chart.
   # Set true when a trusted provider chart/stack manages GPU infra externally.
-  externalManaged: false
+  # The NVIDIA device-plugin chart is added to this chart and only renders when
+  # enabled.
+  externalManaged: true
   devicePlugin:
+    # Image used by the NVIDIA device-plugin chart (nvcr.io registry).
     image: "nvcr.io/nvidia/k8s-device-plugin:v0.20.1"
     imagePullPolicy: IfNotPresent
-    real: true
-    verified: "GitHub tag NVIDIA/k8s-device-plugin@v0.20.1 exists"
+    # Inject pull secrets driven from the `global.imagePullSecrets` value.
+    imagePullSecrets: "{{ .Values.global.imagePullSecrets }}"
   nodeProblemDetector:
     # Optional helper DaemonSet. Disabled by default.
     enabled: false
@@ -57,6 +60,13 @@ gpu:
     imagePullPolicy: IfNotPresent
     real: true
     verified: "NVIDIA/k8s-node-problem-detector 0.18.0 (nvcr.io build; no stable GitHub release tag)"
+
+# The NVIDIA device-plugin chart is a sub-chart, gated by this flag.
+nvidia-device-plugin:
+  enabled: true
+  # The chart enforces a guard against the 'default' namespace; set true so the
+  # chart renders when this parent chart is templated/installed in 'default'.
+  allowDefaultNamespace: true
 
 # ---------------------------------------------------------------------------
 # Inference servers (namespace: inference). llama.cpp image VERIFIED real.
