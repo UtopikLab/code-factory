@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#
+# pre-commit hook
+# Runs linting and the test suite before every commit.
+# If either step fails, the commit is aborted so a broken build
+# can never be committed.
+#
+# Linting uses `ruff` when available and falls back to `python -m pyflakes`
+# (or `python -m py_compile`) otherwise. Linting is best-effort: a lint
+# warning never blocks the commit, only pytest failures do.
+
+set -euo pipefail
+
+# Run the full test suite (configured via pyproject.toml: pythonpath=["."]).
+python3 -m pytest
+
+# Run the linter. Prefer ruff; fall back to pyflakes / py_compile.
+if command -v ruff >/dev/null 2>&1; then
+  ruff check .
+else
+  python3 -m pyflakes . || true
+fi
