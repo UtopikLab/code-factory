@@ -44,7 +44,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: coder
-          image: {{ .Values.IMAGE | default "ghcr.io/utopiklab/langgraph-orchestrator:latest" }}
+          image: {{ .Values.WORKER_IMAGE | default "ghcr.io/utopiklab/langgraph-coder-worker:latest" }}
           command:
             - python3
             - -c

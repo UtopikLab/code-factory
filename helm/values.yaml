@@ -10,7 +10,7 @@
 #                      the `IMAGE` value / `set --set` flag at deploy time.
 #
 # Set a default image for every workload via the `IMAGE` global. Example:
-#   helm install k8s-inference . --set IMAGE=ghcr.io/you/langgraph-orchestrator:latest
+#   helm install k8s-inference . --set IMAGE=ghcr.io/you/langgraph-supervisor:latest
 
 # Default image registry for containerd (K3s host). See inference/common.sh.
 global:
@@ -18,10 +18,11 @@ global:
   # Registry credentials applied to all resources (set a Secret name, or empty to omit).
   imagePullSecrets: "nvidia-registry-creds"
 
-# Default image for the orchestrator workload and related cluster services.
-#   - langgraph-orchestrator : built from the repo Dockerfile and published to GHCR.
-#   - prom/node-exporter     : override if v1.9.1 is unavailable in your mirror.
-IMAGE: "ghcr.io/utopiklab/langgraph-orchestrator:latest"
+# Default images for the two workloads, each configurable via `set --set IMAGE=...` / `WORKER_IMAGE=...`.
+# Both globals are overridable at deploy time with the `set` flag:
+#   helm install . --set IMAGE=... --set WORKER_IMAGE=...
+IMAGE: "ghcr.io/utopiklab/langgraph-supervisor:latest"
+WORKER_IMAGE: "ghcr.io/utopiklab/langgraph-coder-worker:latest"
 
 # ---------------------------------------------------------------------------
 # Namespaces (created if not present).
@@ -50,9 +51,9 @@ nvidia-device-plugin:
   # device-plugin). Set to the live device-plugin namespace.
   # namespaceOverride: gpu
 
-# ---------------------------------------------------------------------------
-# Inference servers (namespace: inference). llama.cpp image VERIFIED real.
-# ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # Inference servers (namespace: inference). llama.cpp image VERIFIED real.
+  # ---------------------------------------------------------------------------
 inference:
   image: "ghcr.io/ggml-org/llama.cpp:server-cuda"
   imagePullPolicy: IfNotPresent
@@ -124,10 +125,10 @@ inference:
 # Orchestrator (namespace: orchestrator). Image is the repo-owned GHCR image.
 # ---------------------------------------------------------------------------
 orchestrator:
-  image: "ghcr.io/utopiklab/langgraph-orchestrator:latest"
+  image: "ghcr.io/utopiklab/langgraph-supervisor:latest"
   imagePullPolicy: IfNotPresent
   real: true
-  verified: "Built from the repo Dockerfile and published to ghcr.io/utopiklab/langgraph-orchestrator:latest."
+  verified: "Built from the repo Dockerfile and published to ghcr.io/utopiklab/langgraph-supervisor:latest."
   # Supervisor env (from configmap / secret).
   config:
     max-iterations: "8"

@@ -19,7 +19,6 @@ templates:
 - orchestrator/secrets.yaml
 - orchestrator/supervisor.yaml
 - orchestrator/workers.yaml
-- orchestrator/agent-job.yaml
 dependencies:
 - name: nvidia-device-plugin
   version: "0.20.1"

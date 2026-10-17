@@ -5,7 +5,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY . /app
+COPY . .
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Working directories for code execution and persistent loop state
-RUN mkdir -p /data/task-work /data/agent-cache /data/outputs /data/loop-state
+RUN mkdir -p /data/loop-state /data/task-work
 
 # Health check (Phase D: readiness target)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

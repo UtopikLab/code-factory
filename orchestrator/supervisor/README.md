@@ -9,7 +9,7 @@ Orchestrator image for autonomous LangGraph supervisor loop. Builds a Python 3.1
 
 ## Build
 ```
-docker build -f supervisor/Dockerfile -t ghcr.io/utopiklab/langgraph-orchestrator:$TAG .
+docker build -f supervisor/Dockerfile -t ghcr.io/utopiklab/langgraph-supervisor:$TAG .
 ```
 
 ## Supervisor loop entrypoint

@@ -88,7 +88,7 @@ spec:
     spec:
       containers:
         - name: supervisor
-          image: {{ .Values.IMAGE | default "ghcr.io/utopiklab/langgraph-orchestrator:latest" }}
+          image: {{ .Values.IMAGE | default "ghcr.io/utopiklab/langgraph-supervisor:latest" }}
           command:
             - python3
             - -c
