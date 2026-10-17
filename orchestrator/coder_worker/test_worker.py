@@ -7,8 +7,6 @@ the CodeEditor file writer, and the heuristic self-review fallback.
 
 import json
 
-import pytest
-
 from worker import (
     CodeEditor,
     _extract_edits,
@@ -16,7 +14,6 @@ from worker import (
     _failure_result,
     render_patch,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Edit extraction
@@ -142,7 +139,7 @@ def test_apply_edits_returns_patch(tmp_path):
 def test_apply_edits_skips_empty_edits(tmp_path):
     editor = CodeEditor(str(tmp_path / "repo"))
     edits = [{"path": "", "content": "x"}, {"path": "a.py", "content": ""}]
-    output, changed, contents = editor.apply_edits(edits)
+    _output, changed, contents = editor.apply_edits(edits)
     assert changed == []
     assert contents == []
 
@@ -150,6 +147,6 @@ def test_apply_edits_skips_empty_edits(tmp_path):
 def test_apply_edits_skips_malformed_edit(tmp_path):
     editor = CodeEditor(str(tmp_path / "repo"))
     edits = ["not a dict", {"path": "a.py", "content": "ok"}]
-    output, changed, contents = editor.apply_edits(edits)
+    _output, changed, contents = editor.apply_edits(edits)
     assert changed == ["a.py"]
     assert contents == [("a.py", "ok")]

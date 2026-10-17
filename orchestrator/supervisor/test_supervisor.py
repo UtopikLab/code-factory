@@ -5,7 +5,6 @@ These exercise the pure helper functions and the pick-best / retry decision
 logic, which are deterministic and do not require a running inference server.
 """
 
-import pytest
 
 from supervisor import (
     build_evaluation_prompt,
@@ -14,7 +13,6 @@ from supervisor import (
     passes_acceptance,
     should_retry,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Evaluation helpers
@@ -110,7 +108,6 @@ def test_should_retry_retries_at_max_iterations(monkeypatch):
     monkeypatch.setenv("ACCEPTANCE_THRESHOLD", "0.7")
     state = {
         "best_output": {"score": 0.4},
-        "task_id": "t-1",
         "task_id": "t-1",
         "iteration": 3,
         "max_iterations": 3,
