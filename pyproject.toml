@@ -1,2 +1,12 @@
+[project]
+name = "code-factory"
+version = "0.0.1"
+
+[project.optional-dependencies]
+dev = ["ruff"]
+
+[tool.ruff]
+line-length = 88
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
