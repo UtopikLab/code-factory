@@ -1,0 +1,265 @@
+{
+    "$schema": "https://json-schema.org/schema",
+    "title": "k8s-inference values",
+    "type": "object",
+    "properties": {
+        "global": {
+            "type": "object",
+            "properties": {
+                "IMAGE_REGISTRY": {
+                    "type": "string"
+                },
+                "imagePullSecrets": {
+                    "type": "string"
+                }
+            }
+        },
+        "IMAGE": {
+            "type": "string"
+        },
+        "WORKER_IMAGE": {
+            "type": "string"
+        },
+        "namespaces": {
+            "type": "object",
+            "properties": {
+                "create": {
+                    "type": "boolean"
+                },
+                "inference": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string"
+                        },
+                        "labels": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                },
+                "orchestrator": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string"
+                        },
+                        "labels": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "nvidia-device-plugin": {
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "allowDefaultNamespace": {
+                    "type": "boolean"
+                },
+                "namespaceOverride": {
+                    "type": "string"
+                },
+                "inference": {
+                    "type": "object",
+                    "properties": {
+                        "image": {
+                            "type": "string"
+                        },
+                        "imagePullPolicy": {
+                            "type": "string"
+                        },
+                        "real": {
+                            "type": "boolean"
+                        },
+                        "verified": {
+                            "type": "string"
+                        },
+                        "configMaps": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {
+                                        "type": "string"
+                                    },
+                                    "model": {
+                                        "type": "object",
+                                        "properties": {
+                                            "model-dir": {
+                                                "type": "string"
+                                            },
+                                            "model-format": {
+                                                "type": "string"
+                                            },
+                                            "model-name": {
+                                                "type": "string"
+                                            },
+                                            "ctx-size": {
+                                                "type": "string"
+                                            },
+                                            "tensor-type": {
+                                                "type": "string"
+                                            },
+                                            "rope-freq-base": {
+                                                "type": "string"
+                                            },
+                                            "rope-freq-scale": {
+                                                "type": "string"
+                                            },
+                                            "port": {
+                                                "type": "string"
+                                            },
+                                            "host": {
+                                                "type": "string"
+                                            },
+                                            "keep-ctx": {
+                                                "type": "string"
+                                            },
+                                            "no-display": {
+                                                "type": "string"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "gpuDeviceIds": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        },
+                        "resources": {
+                            "type": "object",
+                            "properties": {
+                                "cpuRequest": {
+                                    "type": "string"
+                                },
+                                "cpuLimit": {
+                                    "type": "string"
+                                },
+                                "gpu": {
+                                    "type": "string"
+                                },
+                                "memory": {
+                                    "type": "string"
+                                }
+                            }
+                        },
+                        "ingress": {
+                            "type": "object",
+                            "properties": {
+                                "host": {
+                                    "type": "string"
+                                },
+                                "path": {
+                                    "type": "string"
+                                },
+                                "entrypoints": {
+                                    "type": "string"
+                                },
+                                "middlewares": {
+                                    "type": "string"
+                                },
+                                "method": {
+                                    "type": "string"
+                                }
+                            }
+                        },
+                        "pvc": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string"
+                                },
+                                "storageClassName": {
+                                    "type": "string"
+                                },
+                                "accessMode": {
+                                    "type": "string"
+                                },
+                                "size": {
+                                    "type": "string"
+                                },
+                                "mountPath": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "orchestrator": {
+            "type": "object",
+            "properties": {
+                "image": {
+                    "type": "string"
+                },
+                "imagePullPolicy": {
+                    "type": "string"
+                },
+                "real": {
+                    "type": "boolean"
+                },
+                "verified": {
+                    "type": "string"
+                },
+                "config": {
+                    "type": "object",
+                    "properties": {
+                        "max-iterations": {
+                            "type": "string"
+                        },
+                        "task-wait-seconds": {
+                            "type": "string"
+                        },
+                        "loop-state-dir": {
+                            "type": "string"
+                        },
+                        "judge-url": {
+                            "type": "string"
+                        },
+                        "judge-model": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "judge": {
+                    "type": "object",
+                    "properties": {
+                        "host": {
+                            "type": "string"
+                        },
+                        "port": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "ingress": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean"
+                        },
+                        "ingressClassName": {
+                            "type": "string"
+                        },
+                        "entrypoints": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

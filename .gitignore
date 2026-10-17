@@ -3,6 +3,8 @@
 *.venv/
 venv/
 env/
+.ci-venv/
+.venw_ci/
 __pycache__/
 *.pyc
 *.pyo
@@ -15,6 +17,14 @@ Thumbs.db
 *.log
 .cache/
 .pytest_cache/
+.ruff_cache/
 err.txt
 *.bak
 *.backup
+
+# Vendor binaries / fetched artifacts (fetch at deploy time; never commit)
+*.tgz
+*.tar.gz
+*.whl
+vendored/
+*.lock-bins/
