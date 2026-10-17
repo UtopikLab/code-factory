@@ -307,8 +307,9 @@ def node_pick_best(state: TaskState) -> TaskState:
     
     best = max(state["worker_outputs"], key=lambda x: x.get("score", 0))
     state["best_output"] = best
-    
-    passes = best.get("score", 0) >= passes_acceptance(state)
+
+    threshold = float(os.getenv("ACCEPTANCE_THRESHOLD", "0.7"))
+    passes = best.get("score", 0) >= threshold
     logger.info(
         f"[{state['task_id']}] Best output: worker {best['worker_id']} "
         f"(score: {best['score']}, passes: {passes})"
@@ -327,7 +328,8 @@ def should_retry(state: TaskState) -> str:
             logger.info(f"[{state['task_id']}] Max iterations reached, proceeding to gate")
             return "gate"
     
-    if state["best_output"].get("score", 0) >= passes_acceptance(state):
+    score = state["best_output"].get("score", 0)
+    if score >= float(os.getenv("ACCEPTANCE_THRESHOLD", "0.7")):
         logger.info(f"[{state['task_id']}] Output passes acceptance, proceeding to gate")
         return "gate"
     else:

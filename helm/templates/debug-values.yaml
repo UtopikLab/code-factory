@@ -1,3 +1,0 @@
-{{- /*
-  Debug config intentionally disabled in production chart builds.
-*/ -}}

@@ -59,36 +59,37 @@ inference:
   imagePullPolicy: IfNotPresent
   real: true
   verified: "ggml-org/docker.yml pushes server-intel tag (Intel prebuilt) to registry"
-  # Per-GPU server argument ConfigMaps.
+  # Per-GPU server argument ConfigMaps. Moved to this list shape (one entry per
+  # GPU, numeric index used by the template) so they render without needing
+  # `helm install ... -f inference-configmaps.yaml`. That override file was
+  # removed once these values were the single source of truth.
   configMaps:
-    gpu0:
-      name: llama-server-args-gpu0
-      model:
-        model-dir: /models
-        model-format: gguf
-        model-name: qwen2.5-coder-7b-instruct-q4-km
-        ctx-size: "32768"
-        tensor-type: q4_km
-        rope-freq-base: "500000.0"
-        rope-freq-scale: "1.0"
-        port: "8000"
-        host: "0.0.0.0"
-        keep-ctx: "0"
-        no-display: true
-    gpu1:
-      name: llama-server-args-gpu1
-      model:
-        model-dir: /models
-        model-format: gguf
-        model-name: qwen2.5-coder-7b-instruct-q4-km
-        ctx-size: "32768"
-        tensor-type: q4_km
-        rope-freq-base: "500000.0"
-        rope-freq-scale: "1.0"
-        port: "8000"
-        host: "0.0.0.0"
-        keep-ctx: "0"
-        no-display: true
+  - name: llama-server-args-gpu0
+    model:
+      model-dir: /models
+      model-format: gguf
+      model-name: qwen2.5-coder-7b-instruct-q4-km
+      ctx-size: "32768"
+      tensor-type: q4_km
+      rope-freq-base: "500000.0"
+      rope-freq-scale: "1.0"
+      port: "8000"
+      host: "0.0.0.0"
+      keep-ctx: "0"
+      no-display: "true"
+  - name: llama-server-args-gpu1
+    model:
+      model-dir: /models
+      model-format: gguf
+      model-name: qwen2.5-coder-7b-instruct-q4-km
+      ctx-size: "32768"
+      tensor-type: q4_km
+      rope-freq-base: "500000.0"
+      rope-freq-scale: "1.0"
+      port: "8000"
+      host: "0.0.0.0"
+      keep-ctx: "0"
+      no-display: "true"
   # GPU device IDs pinned per pod (Tesla P40, no tensor cores).
   gpuDeviceIds:
     gpu0: "0"
