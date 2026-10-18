@@ -372,7 +372,7 @@ Job, and return `{"uid":..., "task_id":"UtopikLab/code-factory#42", ...}`.
   `model-format` and `ctx-size`. The orchestrator config (`workers.yaml`)
   wires `judge-model: qwen2.5-coder-7b-instruct-q4-km@32k` (line 139), and the
   code agrees: `DEFAULT_JUDGE_MODEL = "qwen2.5-coder-7b-instruct-q4-km@32k"`
-  (`orchestrator/coder_worker/worker.py`, line 34) and
+  (`orchestrator/worker/worker.py`, line 34) and
   `JUDGE_MODEL` default `qwen2.5-coder-7b-instruct-q4-km@32k`
   (`orchestrator/supervisor/supervisor.py`, line 231). **The code and
   manifests are consistent with the thinktank design (O1/O2) — no discrepancy

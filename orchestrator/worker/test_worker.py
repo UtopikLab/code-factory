@@ -1,5 +1,5 @@
 """
-Unit tests for the coder_worker sidecar (worker.py).
+Unit tests for the worker sidecar (worker.py).
 
 Covers the pure helpers (edit extraction, task-id extraction, patch rendering),
 the CodeEditor file writer, and the heuristic self-review fallback.

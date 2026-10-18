@@ -37,7 +37,7 @@ COPY --from=build /usr/local/lib/python3.12/site-packages /usr/local/lib/python3
 COPY --from=build /usr/local/bin /usr/local/bin
 
 # Worker source.
-COPY coder_worker/worker.py /app/worker.py
+COPY worker.py /app/worker.py
 
 # Working directories for code execution and persistent loop state.
 RUN mkdir -p /data/loop-state /data/task-work && \

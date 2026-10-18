@@ -23,7 +23,7 @@ FROM python:3.12-slim AS runtime
 RUN groupadd --gid 1001 orchestrator && \
     useradd --uid 1001 --gid 1001 --create-home --shell /bin/bash orchestrator
 
-WORKDIR /opt/orchestrator
+WORKDIR /app
 
 # System dependencies (CPU-only toolchain).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -36,11 +36,11 @@ COPY --from=build /usr/local/lib/python3.12/site-packages /usr/local/lib/python3
 COPY --from=build /usr/local/bin /usr/local/bin
 
 # Supervisor loop source (modules).
-COPY supervisor/ ./supervisor/
+COPY supervisor.py /app/supervisor.py
 
 # Persist loop state and task work directories.
 RUN mkdir -p /data/loop-state /data/task-work && \
-    chown -R orchestrator:orchestrator /opt/orchestrator /data
+    chown -R orchestrator:orchestrator /app /data
 
 # Health check (Phase D: readiness target).
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
@@ -48,6 +48,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 USER orchestrator
 
-# Default entrypoint: resident supervisor.
-ENTRYPOINT ["langgraph", "cli", "serve"]
-CMD ["--host", "0.0.0.0", "--port", "8000"]
+# Default entrypoint: resident supervisor loop.
+ENTRYPOINT ["python", "supervisor.py"]

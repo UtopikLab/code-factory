@@ -29,7 +29,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-logger = logging.getLogger("coder_worker")
+logger = logging.getLogger("worker")
 
 DEFAULT_ACCEPTOR_URL = "http://orchestrator.local:8000"
 DEFAULT_JUDGE_MODEL = "qwen2.5-coder-7b-instruct-q4-km@32k"
