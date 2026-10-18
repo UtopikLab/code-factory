@@ -183,6 +183,7 @@ async def node_execute_workers(state: TaskState) -> TaskState:
     worker_count = int(os.getenv("WORKER_COUNT", "2"))
     acceptor_url = os.getenv("ACCEPTOR_URL", "http://orchestrator.local:8000")
     github_token = os.getenv("GITHUB_TOKEN")
+    roles = role_assignment(worker_count)
     
     if not github_token:
         logger.warning("[" + state["task_id"] + "] GITHUB_TOKEN not set, using mock mode")
@@ -477,10 +478,10 @@ async def run_loop():
     queue = asyncio.Queue()
     try:
         queue_task = asyncio.create_task(_accept_tasks(queue))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad catch for startup diagnostics only
         logger.error(f"Failed to start task acceptor: {e}")
         return
-    
+
     try:
         while True:
             task_payload = await asyncio.wait_for(queue.get(), timeout=3600.0)
@@ -518,7 +519,7 @@ async def _accept_tasks(queue: asyncio.Queue) -> None:
                     logger.warning("Skipping malformed stdin line.")
         task_reader = asyncio.create_task(_read_stream())
         logger.info("Reading tasks from stdin/TASK_QUEUE.")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - broad catch for stdin/TASK_QUEUE diagnostics only
         logger.warning(f"stdin/TASK_QUEUE not available ({e}); using TASK_QUEUE channel only.")
     try:
         if os.environ.get("TASK_QUEUE"):
@@ -543,7 +544,7 @@ async def _accept_tasks(queue: asyncio.Queue) -> None:
                     continue
                 try:
                     await queue.put(task_payload)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - broad catch for enqueue diagnostics only
                     logger.error(f"Failed to enqueue task: {e}")
                     break
     finally:

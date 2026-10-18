@@ -17,6 +17,7 @@ is missing.
 """
 
 import asyncio
+import http
 import json
 import logging
 import os

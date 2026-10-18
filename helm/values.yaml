@@ -51,9 +51,9 @@ nvidia-device-plugin:
   # device-plugin). Set to the live device-plugin namespace.
   # namespaceOverride: gpu
 
-# The orchestrator sub-chart (supervisor loop + task-acceptor gateway), gated by
-# this flag. The sub-chart scopes its namespace-scoped resources to the parent
-# release namespace so `helm template` renders them in the correct namespace.
+  # The orchestrator sub-chart (supervisor loop + task-acceptor gateway), gated by
+  # this flag. The sub-chart scopes its namespace-scoped resources to the parent
+  # release namespace so `helm template` renders them in the correct namespace.
 orchestrator:
   enabled: true
   # namespaceOverride: orchestrator
@@ -96,12 +96,3 @@ orchestrator:
     accessMode: ReadWriteOnce
     size: 50Gi
     mountPath: /mnt/k8s-data-ssd
-
-orchestrator:
-  # Orchestrator sub-chart (supervisor loop + task-acceptor gateway), gated by the
-  # `orchestrator.enabled` dependency. Owns its own `orchestrator.*` values
-  # (image, config, judge, ingress, secrets, resources) — documented in
-  # charts/orchestrator/values.yaml. This parent global is retained only as a
-  # deploy-time reference and is otherwise unused.
-  image: "ghcr.io/utopiklab/code-factory-supervisor:latest"
-  imagePullPolicy: IfNotPresent

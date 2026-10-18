@@ -13,8 +13,14 @@ set -euo pipefail
 python3 -m pytest
 
 # Lint. Prefer ruff; fall back to pyflakes when ruff is unavailable.
-if command -v ruff >/dev/null 2>&1; then
-  ruff check .
+# ruff may be a standalone binary on PATH or a Python module (python3 -m ruff),
+# so detect it via either mechanism.
+if command -v ruff >/dev/null 2>&1 || python3 -m ruff >/dev/null 2>&1; then
+  if command -v ruff >/dev/null 2>&1; then
+    ruff check .
+  else
+    python3 -m ruff check .
+  fi
 elif command -v pyflakes >/dev/null 2>&1; then
   python3 -m pyflakes . || true
 fi
