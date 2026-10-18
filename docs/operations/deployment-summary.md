@@ -83,7 +83,7 @@ The deployed system implements the minimal credible loop:
 - **WORKER_COUNT:** 2 (parallel worker jobs per task)
 - **ACCEPTANCE_THRESHOLD:** 0.7 (score cutoff for passing outputs)
 - **JUDGE_URL:** https://inference.local/v1 (OpenAI-compatible endpoint)
-- **JUDGE_MODEL:** qwen2.5-coder-7b-instruct-q5-kn@32k
+- **JUDGE_MODEL:** qwen2.5-coder-7b-instruct-q4-km@32k
 
 All configurable via ConfigMap: `kubectl edit configmap k8s-inference-orchestrator-config -n orchestrator`
 
@@ -169,10 +169,10 @@ curl -X POST http://supervisor.orchestrator.svc.cluster.local:8000/api/v1/tasks/
   -H "Content-Type: application/json" \
   -d '{
     "task_id": "test-001",
-    "repo": "UtopikLab/llm-rig",
+    "repo": "UtopikLab/code-factory",
     "issue_number": 123,
     "issue_title": "Fix: broken test",
-    "issue_url": "https://github.com/UtopikLab/llm-rig/issues/123"
+    "issue_url": "https://github.com/UtopikLab/code-factory/issues/123"
   }'
 ```
 
@@ -181,7 +181,7 @@ Expected response:
 {
   "status": "accepted",
   "task_id": "test-001",
-  "repo": "UtopikLab/llm-rig",
+  "repo": "UtopikLab/code-factory",
   "endpoint": "/api/v1/tasks/spawn"
 }
 ```

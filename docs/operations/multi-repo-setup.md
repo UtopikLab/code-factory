@@ -130,7 +130,7 @@ Set on the orchestrator deployment:
 | Value | Meaning | Example |
 |---|---|---|
 | `*` | Accept from ANY repository (no validation) | `ALLOWED_REPOS="*"` |
-| Single repo | Only this repo can send tasks | `ALLOWED_REPOS="UtopikLab/llm-rig"` |
+| Single repo | Only this repo can send tasks | `ALLOWED_REPOS="UtopikLab/code-factory"` |
 | Multiple repos (comma-separated) | Whitelist specific repos | `ALLOWED_REPOS="org/repo1,org/repo2,other-org/repo3"` |
 
 Update the deployment:
@@ -269,7 +269,7 @@ export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
 kubectl set env deployment/k8s-inference-orchestrator \
   -n orchestrator \
-  ALLOWED_REPOS="UtopikLab/llm-rig,MyCompany/backend,MyCompany/frontend,OpenSource/project"
+  ALLOWED_REPOS="UtopikLab/code-factory,MyCompany/backend,MyCompany/frontend,OpenSource/project"
 ```
 
 Then on each repo's workflow, use the same `ORCHESTRATOR_URL` and `ORCHESTRATOR_TOKEN` secrets.

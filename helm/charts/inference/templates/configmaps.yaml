@@ -17,8 +17,8 @@ metadata:
     app.k8s.io/instance: {{ $cfg.name }}
     app.k8s.io/version: {{ $.Chart.AppVersion | quote }}
     app.k8s.io/component: llama-server-args
-    component: llama-server-args
     gpu: "{{ $idx }}"
+    app.k8s.io/managed-by: Helm
 data:
 {{ range $k, $v := $cfg.model }}
   {{ $k }}: {{ $v | quote }}

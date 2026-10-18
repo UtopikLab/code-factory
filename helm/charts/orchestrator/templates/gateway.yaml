@@ -1,0 +1,68 @@
+{{/*
+Gateway Deployment + Service for the task-acceptor.
+Faithful to the thinktank design: the task-acceptor is now its own
+always-on Deployment, independent of the supervisor loop.
+*/}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}-orchestrator-gateway
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: orchestrator
+    component: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestrator
+      component: gateway
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+        component: gateway
+        app.kubernetes.io/managed-by: Helm
+    spec:
+      containers:
+        - name: gateway
+          image: {{ .Values.gateway.image }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Chart.Name }}-orchestrator-secrets
+                  key: github-token
+            - name: ALLOWED_REPO
+              value: {{ (index .Values.orchestrator.config "repo") | default "." | quote }}
+          ports:
+            - name: gateway
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: {{ .Values.orchestrator.config.cpuRequest | default "100m" }}
+              memory: {{ .Values.orchestrator.config.memory | default "256Mi" }}
+            limits:
+              cpu: {{ .Values.orchestrator.config.cpuLimit | default "250m" }}
+              memoryLimit: {{ .Values.orchestrator.config.memoryLimit | default "512Mi" }}
+
+      imagePullSecrets:
+        - name: ghcr-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-orchestrator-gateway
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: orchestrator
+    component: gateway
+spec:
+  selector:
+    app: orchestrator
+    component: gateway
+  ports:
+    - name: task-acceptor
+      containerPort: 8000

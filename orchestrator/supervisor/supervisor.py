@@ -8,6 +8,7 @@ Implements the keep-vs-defer architecture:
 """
 
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime
@@ -81,7 +82,10 @@ def make_worker_output(task_id: str, worker_id: int, status: str, extra: dict, t
 def passes_acceptance(state: TaskState) -> bool:
     """Whether the best output meets the ACCEPTANCE_THRESHOLD."""
     threshold = float(os.getenv("ACCEPTANCE_THRESHOLD", "0.7"))
-    return state["best_output"].get("score", 0) >= threshold
+    best = state.get("best_output")
+    if best is None:
+        return False
+    return best.get("score", 0) >= threshold
 
 
 def create_supervisor_graph():
@@ -134,8 +138,45 @@ def node_plan(state: TaskState) -> TaskState:
     return state
 
 
+def role_assignment(worker_count: int) -> list[str]:
+    """Default role-specific mix for the worker pool (see §2.1.2).
+    A mix of specialized roles rather than N identical coders."""
+    roles = ["coder", "refactor", "test"]
+    if worker_count <= 1:
+        return [roles[0]] * worker_count
+    if worker_count == 2:
+        return ["coder", "test"]
+    # worker_count >= 3: one refactor, one test, rest coder
+    return ["refactor", "test"] + ["coder"] * max(0, worker_count - 2)
+
+
+def build_role_payload(role: str, worker_id: int, issue_title: str) -> dict:
+    """Role-specific spawn payload sent to the task-acceptor sidecar.
+    Each role carries instructions suited to its purpose (§2.1.2)."""
+    base = {"issue_title": issue_title}
+    if role == "refactor":
+        base["role"] = "refactor"
+        base["instruction"] = (
+            "Refactor the existing code for clarity, structure, and efficiency. "
+            "Make minimal, focused edits; do not change behavior. Produce a patch."
+        )
+    elif role == "test":
+        base["role"] = "test"
+        base["instruction"] = (
+            "Write or update focused tests that validate the issue requirements, "
+            "then produce a patch that makes those tests pass."
+        )
+    else:
+        base["role"] = "coder"
+        base["instruction"] = (
+            "Generate a patch that fixes the issue with narrow, test-driven edits. "
+            "Produce the minimal change that addresses the requirements."
+        )
+    return base
+
+
 async def node_execute_workers(state: TaskState) -> TaskState:
-    """Spawn and execute coder workers via HTTP to task-acceptor sidecar."""
+    """Spawn and execute role-specific workers via HTTP to task-acceptor sidecar."""
     logger.info(f"[{state['task_id']}] Spawning workers for iteration {state['iteration']}")
     
     state["status"] = "executing"
@@ -145,74 +186,90 @@ async def node_execute_workers(state: TaskState) -> TaskState:
     
     if not github_token:
         logger.warning("[" + state["task_id"] + "] GITHUB_TOKEN not set, using mock mode")
-        return mock_worker_executor(state, worker_count)
+        return mock_worker_executor(state, worker_count, roles)
     
-    async def _spawn_worker(task_id, i, payload):
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                f"{acceptor_url}/api/v1/tasks/spawn",
-                headers={
-                    "Authorization": f"token {github_token}",
-                    "Content-Type": "application/json",
-                },
-                json=payload or {},
+    async def _spawn_worker(i):
+        """Spawn a single role-specific worker concurrently via POST /api/v1/tasks/spawn.
+        Returns the accepted task_id, or None if the request was not accepted."""
+        role = roles[i]
+        payload = build_role_payload(role, i, state["issue_title"])
+        response = await client.post(
+            f"{acceptor_url}/api/v1/tasks/spawn",
+            headers={
+                "Authorization": f"token {github_token}",
+                "Content-Type": "application/json",
+            },
+            json=payload or {},
+        )
+        if response.status_code == 202:
+            task_result = response.json()
+            task_id = task_result["task_id"]
+            logger.info(f"[{state['task_id']}] Worker {task_id} ({role}) accepted")
+            return task_id
+        else:
+            logger.warning(f"[{state['task_id']}] Worker {i} spawn rejected (HTTP {response.status_code})")
+            return None
+    
+    async def _poll_worker(task_id, i):
+        """Poll a spawned worker until it completes (HTTP 200) or times out.
+        Runs concurrently with the other workers' poll loops."""
+        try:
+            wait_response = await client.get(
+                f"{acceptor_url}/api/v1/tasks/{task_id}",
+                headers={"Authorization": f"token {github_token}"},
             )
-            if response.status_code == 202:
-                task_result = response.json()
-                task_id = task_result["task_id"]
-                logger.info(f"[{state['task_id']}] Worker {task_id} accepted")
-                # Wait for worker to complete.
-                try:
-                    wait_response = await client.get(
-                        f"{acceptor_url}/api/v1/tasks/{task_id}",
-                        headers={"Authorization": f"token {github_token}"},
-                    )
-                    if wait_response.status_code == 200:
-                        worker_output = wait_response.json()
-                        extra = {
-                            "output": worker_output.get("output", ""),
-                            "patch": worker_output.get("patch", ""),
-                            "score": float((worker_output.get("score", 0)) or 0),
-                            "review": worker_output.get("review", ""),
-                        }
-                        state["worker_outputs"].append(make_worker_output(
-                            task_id, i, "success", extra, datetime.now().isoformat()))
-                        logger.info(f"[{state['task_id']}] Worker {i} completed with score: {extra['score']}")
-                    else:
-                        state["worker_outputs"].append(make_worker_output(
-                            task_id, i, "timeout",
-                            {"error": "Worker timed out"}, datetime.now().isoformat()))
-                        logger.warning(f"[{state['task_id']}] Worker {task_id} timed out")
-                except httpx.RequestException as e:
-                    state["worker_outputs"].append(make_worker_output(
-                        task_id, i, "error", {"error": str(e)}, datetime.now().isoformat()))
-                    logger.error(f"[{state['task_id']}] Failed to get worker output: {e}")
+            if wait_response.status_code == 200:
+                worker_output = wait_response.json()
+                extra = {
+                    "output": worker_output.get("output", ""),
+                    "patch": worker_output.get("patch", ""),
+                    "score": float((worker_output.get("score", 0)) or 0),
+                    "review": worker_output.get("review", ""),
+                }
+                state["worker_outputs"].append(make_worker_output(
+                    task_id, i, "success", extra, datetime.now().isoformat()))
+                logger.info(f"[{state['task_id']}] Worker {i} ({roles[i]}) completed with score: {extra['score']}")
             else:
                 state["worker_outputs"].append(make_worker_output(
-                    task_id, i, "rejected",
-                    {"error": f"Acceptance rejected: {wait_response.text if 'wait_response' in dir() else response.text}"}, datetime.now().isoformat()))
-                logger.warning(f"[{state['task_id']}] Worker {task_id} was rejected")
+                    task_id, i, "timeout",
+                    {"error": "Worker timed out"}, datetime.now().isoformat()))
+                logger.warning(f"[{state['task_id']}] Worker {task_id} timed out")
+        except httpx.RequestException as e:
+            state["worker_outputs"].append(make_worker_output(
+                task_id, i, "error", {"error": str(e)}, datetime.now().isoformat()))
+            logger.error(f"[{state['task_id']}] Failed to get worker output: {e}")
     
-    payload = state.get("spawn_payload") or {}
-    async with httpx.AsyncClient(timeout=30):
-        await asyncio.gather(*[_spawn_worker(f"{state['task_id']}-worker-{i}", i, payload) for i in range(worker_count)])
+    async with httpx.AsyncClient(timeout=30) as client:
+        # Phase 1 — spawn role-specific workers concurrently.
+        task_ids = await asyncio.gather(*[_spawn_worker(i) for i in range(worker_count)])
+        # Phase 2 — poll each spawned worker concurrently until it completes.
+        poll_coros = [
+            _poll_worker(task_id, i)
+            for i, task_id in enumerate(task_ids)
+            if task_id
+        ]
+        if poll_coros:
+            await asyncio.gather(*poll_coros)
     logger.info(f"[{state['task_id']}] All {len(state['worker_outputs'])} workers completed")
     return state
 
 
-def mock_worker_executor(state: TaskState, worker_count: int) -> TaskState:
-    """Mock worker executor when HTTP is not available."""
+def mock_worker_executor(state: TaskState, worker_count: int, roles: list[str] | None = None) -> dict:
+    """Mock worker executor when HTTP is not available.
+    Produces role-specific mock outputs (see §2.1.2)."""
     state["status"] = "executing"
-    for i in range(worker_count):
+    role_labels = roles or ["coder"] * worker_count
+    for i, role in enumerate(role_labels):
         output = {
             "worker_id": i,
+            "role": role,
             "status": "success",
-            "patch": f"Mock patch from worker {i}",
+            "patch": f"Mock {role} patch from worker {i}",
             "score": 0.5 + (i * 0.1),
             "timestamp": datetime.now().isoformat(),
         }
         state["worker_outputs"].append(output)
-        logger.info(f"[{state['task_id']}] Mock worker {i} completed (score: {output['score']})")
+        logger.info(f"[{state['task_id']}] Mock {role} worker {i} completed (score: {output['score']})")
     return state
 
 
@@ -412,12 +469,108 @@ class SupervisorLoop:
 async def run_loop():
     """Main loop runner - accept tasks and process them."""
     logger.info("Supervisor loop initialized and listening for tasks")
+    graph = create_supervisor_graph()
     
-    # For now, just keep the loop alive
-    # In production, this would receive tasks from the task-acceptor sidecar
-    while True:
-        await asyncio.sleep(60)
-        logger.info("Supervisor loop alive, waiting for tasks...")
+    # Accept tasks as they arrive: either from stdin (one JSON line per task) or
+    # from the TASK_QUEUE channel. Process each task asynchronously and never
+    # infinite-loop; the acceptor waits with a bounded timeout so it always progresses.
+    queue = asyncio.Queue()
+    try:
+        queue_task = asyncio.create_task(_accept_tasks(queue))
+    except Exception as e:
+        logger.error(f"Failed to start task acceptor: {e}")
+        return
+    
+    try:
+        while True:
+            task_payload = await asyncio.wait_for(queue.get(), timeout=3600.0)
+            logger.info(f"[{task_payload['task_id'] if isinstance(task_payload, dict) else '?'}] Processing task")
+            state = _build_initial_state(task_payload)
+            try:
+                final_state = await graph.ainvoke(state)
+                logger.info(f"[{state['task_id'] if isinstance(state, dict) else '?'}] Task complete, status: {final_state['status']}")
+                await queue.put(final_state)
+            except httpx.RequestException as e:
+                logger.error(f"[{state['task_id'] if isinstance(state, dict) else '?'}] Error in graph: {e}")
+                state["status"] = "failed"
+                state["error"] = str(e)
+                await queue.put(state)
+    finally:
+        queue_task.cancel()
+        logger.info("Supervisor loop stopped.")
+
+
+async def _accept_tasks(queue: asyncio.Queue) -> None:
+    """Read JSON task lines from stdin or TASK_QUEUE and enqueue them."""
+    task_queue = asyncio.Queue()
+    stdin_reader = None
+    try:
+        stdin_reader, _ = await asyncio.open_connection(
+            "localhost", os.environ.get("TASK_QUEUE_PORT", "8080"))
+        async def _read_stream():
+            async for line in stdin_reader:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    task_queue.put_nowait(json.loads(line))
+                except json.JSONDecodeError:
+                    logger.warning("Skipping malformed stdin line.")
+        task_reader = asyncio.create_task(_read_stream())
+        logger.info("Reading tasks from stdin/TASK_QUEUE.")
+    except Exception as e:
+        logger.warning(f"stdin/TASK_QUEUE not available ({e}); using TASK_QUEUE channel only.")
+    try:
+        if os.environ.get("TASK_QUEUE"):
+            while True:
+                task_payload = await asyncio.wait_for(task_queue.get(), timeout=3600.0)
+                logger.info(f"[{task_payload['task_id'] if isinstance(task_payload, dict) else '?'}] Received task from TASK_QUEUE")
+                await queue.put(task_payload)
+        else:
+            while True:
+                task_payload = await asyncio.wait_for(queue.get(), timeout=3600.0)
+                logger.info(f"[{task_payload['task_id'] if isinstance(task_payload, dict) else '?'}] Processed task from stdin/TASK_QUEUE")
+                if isinstance(task_payload, str):
+                    try:
+                        task_payload = json.loads(task_payload)
+                    except json.JSONDecodeError:
+                        logger.warning("Skipping malformed task line.")
+                        continue
+                if isinstance(task_payload, dict) and task_payload.get("task_id"):
+                    logger.info(f"Received task: {task_payload['task_id']}")
+                else:
+                    logger.warning("Received task without a task_id; skipping.")
+                    continue
+                try:
+                    await queue.put(task_payload)
+                except Exception as e:
+                    logger.error(f"Failed to enqueue task: {e}")
+                    break
+    finally:
+        if task_reader:
+            task_reader.cancel()
+        logger.info("Task acceptor stopped.")
+
+
+def _build_initial_state(task_payload: dict) -> TaskState:
+    """Build the initial TaskState from a task payload."""
+    max_iterations = int(os.getenv("MAX_ITERATIONS", "8"))
+    state: TaskState = {
+        "task_id": task_payload.get("task_id", "unknown"),
+        "issue_number": task_payload.get("issue_number", 0),
+        "issue_title": task_payload.get("issue_title", "Unknown task"),
+        "issue_url": task_payload.get("issue_url", ""),
+        "repo": task_payload.get("repo", "unknown"),
+        "status": "received",
+        "plan": "",
+        "iteration": 1,
+        "max_iterations": max_iterations,
+        "worker_outputs": [],
+        "best_output": None,
+        "error": None,
+        "created_at": datetime.now().isoformat(),
+    }
+    return state
 
 
 if __name__ == "__main__":

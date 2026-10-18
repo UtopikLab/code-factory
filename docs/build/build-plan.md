@@ -9,7 +9,7 @@
 > `crictl` only (no docker / nerdctl on this box).
 >
 > Namespace: `orchestrator`. Supervisor image:
-> `${IMAGE:-ghcr.io/utopiklab/langgraph-supervisor:latest}`.
+> `${IMAGE:-ghcr.io/utopiklab/code-factory-supervisor:latest}`.
 
 ---
 
@@ -97,7 +97,7 @@ deployed and serving (the deploy script covers it, see §2 phase F):
 kubectl wait --for=condition=ready pod --all -n inference --timeout=180s
 curl -fsS https://inference.local/v1/chat/completions \
   -H "Authorization: Bearer $OPENAI_API_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"qwen2.5-coder-7b-instruct-q5-kn@32k","messages":[]}'
+  -d '{"model":"qwen2.5-coder-7b-instruct-q4-km@32k","messages":[]}'
 ```
 
 ---
@@ -117,14 +117,14 @@ buildah login -u <gh-user> -p <gh-pat> ghcr.io
 
 # Build from the real Dockerfile (FROM python:3.11-slim + requirements.txt +
 # agent-job-template.yaml + supervisor-task-acceptor.py baked to /opt/orchestrator).
-buildah bud -f Dockerfile -t ghcr.io/utopiklab/langgraph-supervisor:latest .
+buildah bud -f Dockerfile -t ghcr.io/utopiklab/code-factory-supervisor:latest .
 
 # Push to the registry.
-buildah push ghcr.io/utopiklab/langgraph-supervisor:latest \
-  ghcr.io/utopiklab/langgraph-supervisor:latest
+buildah push ghcr.io/utopiklab/code-factory-supervisor:latest \
+  ghcr.io/utopiklab/code-factory-supervisor:latest
 
 # Verify.
-buildah from ghcr.io/utopiklab/langgraph-supervisor:latest
+buildah from ghcr.io/utopiklab/code-factory-supervisor:latest
 buildah run orchestrator-<digest> ls -l /opt/orchestrator
 ```
 
@@ -132,14 +132,14 @@ buildah run orchestrator-<digest> ls -l /opt/orchestrator
 ```bash
 # On the build host (NOT k8s-node01).
 git clone <repo-url> && cd k8s/orchestrator
-docker build -t ghcr.io/utopiklab/langgraph-supervisor:latest .
+docker build -t ghcr.io/utopiklab/code-factory-supervisor:latest .
 
 docker login ghcr.io -u <gh-user> -p <gh-pat>
-docker push ghcr.io/utopiklab/langgraph-supervisor:latest
+docker push ghcr.io/utopiklab/code-factory-supervisor:latest
 ```
 > `nerdctl` is a drop-in replacement for `docker` in both snippets.
 
-**Result:** `ghcr.io/utopiklab/langgraph-supervisor:latest` exists and is
+**Result:** `ghcr.io/utopiklab/code-factory-supervisor:latest` exists and is
 CPU-only (no torch/transformers/langchain-openai — the judge runs elsewhere).
 
 ### Phase B — Cluster prerequisites (namespace, ConfigMap, Secret)
@@ -270,8 +270,8 @@ curl -fsS -X POST "https://<ingress-host>/api/v1/tasks/spawn" \
     "payload": {
       "issue_number": 42,
       "issue_title": "Fix the thing",
-      "issue_url": "https://github.com/UtopikLab/llm-rig/issues/42",
-      "repo": "UtopikLab/llm-rig",
+      "issue_url": "https://github.com/UtopikLab/code-factory/issues/42",
+      "repo": "UtopikLab/code-factory",
       "default_branch": "main"
     }
   }'
@@ -280,7 +280,7 @@ The acceptor (see `supervisor-task-acceptor.py`) will: validate the token,
 refuse the task if `repo` is out of the PAT's scope, render
 `agent-job-template.yaml` (`${TASK_ID}`, `${ISSUE_URL}`, `${REPO}`,
 `${GITHUB_TOKEN}`), `kubectl apply`, `kubectl wait --for=jobcomplete`, reap the
-Job, and return `{"uid":..., "task_id":"UtopikLab/llm-rig#42", ...}`.
+Job, and return `{"uid":..., "task_id":"UtopikLab/code-factory#42", ...}`.
 
 ---
 
@@ -348,7 +348,7 @@ Job, and return `{"uid":..., "task_id":"UtopikLab/llm-rig#42", ...}`.
   the PAT's scoped scope. Keep the workflow PAT repo-scoped (it is:
   `contents/actions/issues: write`).
 - **Context window pinned @32768:** the judge model is
-  `qwen2.5-coder-7b-instruct-q5-kn@32k` (from `orchestrator-config`). The `@32k`
+  `qwen2.5-coder-7b-instruct-q4-km@32k` (from `orchestrator-config`). The `@32k`
   locks the 32768-token context window for both the supervisor and agent brains.
   Do not bump to `@40k`/`@64k` without re-checking node RAM/CPU headroom.
 - **GPU pinned explicitly:** the llama.cpp server pods use
@@ -362,13 +362,20 @@ Job, and return `{"uid":..., "task_id":"UtopikLab/llm-rig#42", ...}`.
   re-runs `langgraph.cli serve` which re-launches the loop *and* rebinds the
   acceptor on the next task (the sidecar re-enters per task). Do not deploy a
   second listener on :8000.
-- **Doc discrepancy — flag, do not fix here:** `inference/deployment.yaml`
-  (and the inline comment in `orchestrator/supervisor.yaml`) describe the judge
-  brain as **Qwen2.5-14B-Instruct-AWQ** (GPU 0) / **Qwen2.5-7B-Instruct-AWQ**
-  (GPU 1), `--model-format awq`, `--ctx-size 4096`, `f8_e4m3` tensors. The
-  **actual baseline** judge model wired into the orchestrator is
-  **`qwen2.5-coder-7b-instruct-q4-km`** — a **GGUF q4_km** quantization with a
-  **32k** context window. The two are inconsistent (AWQ vs GGUF; 7B/14B vs
-  7B-Coder; 4096 vs 32768 ctx). This plan does **not** resolve it; refresh
-  `inference/deployment.yaml` / `supervisor.yaml` comments to match the real
-  GGUF q4_km @32k baseline before relying on the judge.
+- **Model baseline aligned (verified):** the judge brain is **Qwen2.5-Coder-7B**
+  **GGUF** @ **Q4_K_M** with a **32768** context window. The actual manifests
+  already match this: `helm/values.yaml` sets `model-format: gguf`,
+  `tensor-type: q4_km`, `ctx-size: "32768"` (lines 70–73);
+  `helm/values.yaml` lines 83–86 (the `orchestrator` inference profile) set the
+  same. `helm/templates/inference/deployment.yaml` serves `--ctx-size`
+  (default `32768`, line 60); `helm/values.schema.json` (lines 100–106) defines
+  `model-format` and `ctx-size`. The orchestrator config (`workers.yaml`)
+  wires `judge-model: qwen2.5-coder-7b-instruct-q4-km@32k` (line 139), and the
+  code agrees: `DEFAULT_JUDGE_MODEL = "qwen2.5-coder-7b-instruct-q4-km@32k"`
+  (`orchestrator/coder_worker/worker.py`, line 34) and
+  `JUDGE_MODEL` default `qwen2.5-coder-7b-instruct-q4-km@32k`
+  (`orchestrator/supervisor/supervisor.py`, line 231). **The code and
+  manifests are consistent with the thinktank design (O1/O2) — no discrepancy
+  to resolve.** (The old "doc discrepancy" note was based on the stale README
+  §3.11 AWQ/14B/4096 model catalog, which describes the interactive-chat GPU
+  model table, not the overnight judge baseline.)

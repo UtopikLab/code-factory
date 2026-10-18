@@ -1,0 +1,64 @@
+# Orchestrator sub-chart values: the LangGraph supervisor loop + always-on
+# task-acceptor gateway. Namespace is the parent release namespace.
+
+# Namespace the sub-chart's resources are placed in. Defaults to the parent
+# release namespace so `helm template` renders them in the correct namespace.
+# Override here when installing into a non-default namespace.
+namespace: "orchestrator"
+
+icon: ""
+
+# Supervisor (orchestrator) Deployment — the resident LangGraph loop.
+# Shared values for both the supervisor and task-acceptor resources.
+orchestrator:
+  name: orchestrator
+  image: "ghcr.io/utopiklab/code-factory-supervisor:latest"
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  labels:
+    app: orchestrator
+  # resource defaults (overridable via values)
+  cpuRequest: "500m"
+  cpuLimit: "2500m"
+  memory: "2Gi"
+  memoryLimit: "5Gi"
+  # Config consumed by supervisor loop + coder-worker (single source of truth).
+  # The ALLOWED_REPO env on the gateway Deployment defaults to this repo.
+  config:
+    repo: "UtopikLab/code-factory"
+
+# Role-specific worker pool config (see §2.1.2).
+# worker-roles: ordered role mix per slot (coder/refactor/test).
+# worker-count is set at runtime via the WORKER_COUNT env var, not here.
+workers:
+  worker-roles:
+  - coder
+  - test
+  worker-model: "qwen2.5-coder-7b-instruct-q4-km@32k"
+
+# Gateway Deployment + Service — the always-on task-acceptor (:8000).
+# The gateway image is built from the Dockerfile in the non-Helm tree
+# (orchestrator/gateway/). The image reference is set at build/release time
+# (e.g. `docker buildx build`), exactly like the supervisor and coder-worker
+# images. Overridable via values.
+gateway:
+  name: gateway
+  image: "ghcr.io/utopiklab/code-factory-gateway:latest"
+  imagePullPolicy: IfNotPresent
+  replicas: 1
+  labels:
+    app: orchestrator
+    component: gateway
+  # resource defaults (overridable via values)
+  cpuRequest: "100m"
+  cpuLimit: "250m"
+  memory: "256Mi"
+  memoryLimit: "512Mi"
+
+# Shared pull secret applied to all containers.
+imagePullSecrets:
+- name: ghcr-secret
+
+# The `orchestrator-config` ConfigMap key/values consumed by the supervisor
+# loop and the task-acceptor. Mirrors the parent chart's orchestrator.config.
+# Shared by the supervisor loop and the coder-worker Job.

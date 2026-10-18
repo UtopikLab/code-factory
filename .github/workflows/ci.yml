@@ -8,8 +8,9 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  SUPERVISOR_IMAGE_NAME: utopiklab/langgraph-supervisor
-  WORKER_IMAGE_NAME: utopiklab/langgraph-coder-worker
+  SUPERVISOR_IMAGE_NAME: utopiklab/code-factory-supervisor
+  WORKER_IMAGE_NAME: utopiklab/code-factory-worker
+  GATEWAY_IMAGE_NAME: utopiklab/code-factory-gateway
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
@@ -47,7 +48,7 @@ jobs:
       - name: Run tests
         run: pytest orchestrator/ -v
 
-  build-image:
+  build-supervisor:
     needs: [lint, test]
     runs-on: ubuntu-latest
     permissions:
@@ -108,3 +109,34 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.WORKER_IMAGE_NAME }}:${{ env.IMAGE_TAG }}
             ${{ env.REGISTRY }}/${{ env.WORKER_IMAGE_NAME }}:latest
+
+  build-gateway:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./orchestrator/gateway
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.GATEWAY_IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/${{ env.GATEWAY_IMAGE_NAME }}:latest

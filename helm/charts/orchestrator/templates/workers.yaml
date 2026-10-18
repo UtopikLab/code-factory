@@ -7,16 +7,18 @@ Faithful to orchestrator/workers.yaml (ConfigMap + Job coder-workers).
   "task-wait-seconds" (int (default (index .Values.orchestrator.config "task-wait-seconds") 30))
   "loop-state-dir" (default (index .Values.orchestrator.config "loop-state-dir") "/data/loop-state")
   "judge-url" (default (index .Values.orchestrator.config "judge-url") "https://inference.local/v1")
-  "judge-model" (default (index .Values.orchestrator.config "judge-model") "qwen2.5-coder-7b-instruct-q5-kn@32k")
+  "judge-model" (default (index .Values.orchestrator.config "judge-model") "qwen2.5-coder-7b-instruct-q4-km@32k")
+  "worker-roles" (index .Values.workers "worker-roles")
 -}}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ .Chart.Name }}-orchestrator-config
-  namespace: orchestrator
+  namespace: {{ .Values.namespace }}
   labels:
     app: orchestrator
+    app.kubernetes.io/managed-by: Helm
   annotations:
     created-by: helm
 data:
@@ -27,13 +29,15 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ .Chart.Name }}-coder-workers
-  namespace: orchestrator
+  namespace: {{ .Values.namespace }}
   labels:
     app: orchestrator
     component: worker
+    app.kubernetes.io/managed-by: Helm
 spec:
-  parallelism: 1
-  completions: 4
+  # 2 parallel coder workers, each allowed up to 8 completions (max).
+  parallelism: 2
+  max: 8
   backoffLimit: 0
   template:
     metadata:
@@ -44,27 +48,18 @@ spec:
       restartPolicy: Never
       containers:
         - name: coder
-          image: {{ .Values.WORKER_IMAGE | default "ghcr.io/utopiklab/langgraph-coder-worker:latest" }}
+          image: {{ .Values.orchestrator.image | default "ghcr.io/utopiklab/code-factory-worker:latest" }}
           command:
             - python3
-            - -c
-            - |
-              import json
-              import os
-
-              summary = {
-                  "status": "worker-placeholder",
-                  "task_id": os.environ.get("TASK_ID", "orchestrator-task"),
-                  "repo": os.environ.get("REPO", "UtopikLab/llm-rig"),
-              }
-              print(json.dumps(summary))
+            - -m
+            - worker
           env:
             - name: TASK_ID
               value: {{ (index .Values.orchestrator.config "task-id") | default "orchestrator-task" | quote }}
             - name: ISSUE_URL
               value: {{ (index .Values.orchestrator.config "issue-url") | default "" | quote }}
             - name: REPO
-              value: {{ (index .Values.orchestrator.config "repo") | default "UtopikLab/llm-rig" | quote }}
+              value: {{ (index .Values.orchestrator.config "repo") | default "." | quote }}
             - name: GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -75,11 +70,6 @@ spec:
                 secretKeyRef:
                   name: {{ .Chart.Name }}-orchestrator-secrets
                   key: openai-api-key
-            - name: ORCHESTRATOR_CONFIG
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Chart.Name }}-orchestrator-config
-                  key: orchestrator-config
           envFrom:
             - configMapRef:
                 name: {{ .Chart.Name }}-orchestrator-config
@@ -90,11 +80,11 @@ spec:
               mountPath: /data/loop-state
           resources:
             requests:
-              cpu: {{ .Values.inference.resources.cpuRequest | default "1" }}
-              memory: {{ .Values.inference.resources.memory | default "23Gi" }}
+              cpu: {{ .Values.orchestrator.config.cpuRequest | default "500m" }}
+              memory: {{ .Values.orchestrator.config.memory | default "2Gi" }}
             limits:
-              cpu: {{ .Values.inference.resources.cpuLimit | default "2" }}
-              memory: {{ .Values.inference.resources.memory | default "23Gi" }}
+              cpu: {{ .Values.orchestrator.config.cpuLimit | default "2500m" }}
+              memoryLimit: {{ .Values.orchestrator.config.memoryLimit | default "5Gi" }}
       volumes:
         - name: workspace
           emptyDir: {}

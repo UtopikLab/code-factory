@@ -1,8 +1,8 @@
-{{- if not (lookup "v1" "Namespace" "" (.Release.Namespace | default .Values.namespaces.inference.name)) }}
+{{- if not (lookup "v1" "Namespace" "" (.Release.Namespace | default .Values.namespace)) }}
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: {{ .Release.Namespace | default .Values.namespaces.inference.name | quote }}
+  name: {{ .Release.Namespace | default .Values.namespace | quote }}
   labels:
     app.k8s.io/name: {{ .Chart.Name | quote }}
     app.k8s.io/instance: {{ .Release.Name | default "k8s-inference" | quote }}

@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=none
+apiVersion: v2
+name: orchestrator
+description: >
+  The autonomous GitHub→agent orchestration workload: the LangGraph supervisor loop (orchestrator Deployment) plus the always-on task-acceptor gateway Deployment.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+annotations:
+  license: MIT
+keywords:
+- orchestrator
+- langgraph
+- task-acceptor
+- gateway
+- autonomous
+sources:
+- https://github.com/UtopikLab/code-factory

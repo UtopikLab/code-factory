@@ -1,0 +1,3 @@
+# The task-acceptor gateway is a pure-stdlib HTTP acceptor (no pip installs),
+# so there are no Python dependencies to declare here.
+# Kept for parity with the former gateway release chart's requirements.txt.

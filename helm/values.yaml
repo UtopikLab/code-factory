@@ -21,8 +21,8 @@ global:
 # Default images for the two workloads, each configurable via `set --set IMAGE=...` / `WORKER_IMAGE=...`.
 # Both globals are overridable at deploy time with the `set` flag:
 #   helm install . --set IMAGE=... --set WORKER_IMAGE=...
-IMAGE: "ghcr.io/utopiklab/langgraph-supervisor:latest"
-WORKER_IMAGE: "ghcr.io/utopiklab/langgraph-coder-worker:latest"
+IMAGE: "ghcr.io/utopiklab/code-factory-supervisor:latest"
+WORKER_IMAGE: "ghcr.io/utopiklab/code-factory-worker:latest"
 
 # ---------------------------------------------------------------------------
 # Namespaces (created if not present).
@@ -51,46 +51,21 @@ nvidia-device-plugin:
   # device-plugin). Set to the live device-plugin namespace.
   # namespaceOverride: gpu
 
+# The orchestrator sub-chart (supervisor loop + task-acceptor gateway), gated by
+# this flag. The sub-chart scopes its namespace-scoped resources to the parent
+# release namespace so `helm template` renders them in the correct namespace.
+orchestrator:
+  enabled: true
+  # namespaceOverride: orchestrator
+
   # ---------------------------------------------------------------------------
   # Inference servers (namespace: inference). llama.cpp image VERIFIED real.
   # ---------------------------------------------------------------------------
-inference:
-  image: "ghcr.io/ggml-org/llama.cpp:server-cuda"
-  imagePullPolicy: IfNotPresent
-  real: true
-  verified: "ggml-org/docker.yml pushes server-intel tag (Intel prebuilt) to registry"
-  # Per-GPU server argument ConfigMaps. Moved to this list shape (one entry per
-  # GPU, numeric index used by the template) so they render without needing
-  # `helm install ... -f inference-configmaps.yaml`. That override file was
-  # removed once these values were the single source of truth.
-  configMaps:
-  - name: llama-server-args-gpu0
-    model:
-      model-dir: /models
-      model-format: gguf
-      model-name: qwen2.5-coder-7b-instruct-q4-km
-      ctx-size: "32768"
-      tensor-type: q4_km
-      rope-freq-base: "500000.0"
-      rope-freq-scale: "1.0"
-      port: "8000"
-      host: "0.0.0.0"
-      keep-ctx: "0"
-      no-display: "true"
-  - name: llama-server-args-gpu1
-    model:
-      model-dir: /models
-      model-format: gguf
-      model-name: qwen2.5-coder-7b-instruct-q4-km
-      ctx-size: "32768"
-      tensor-type: q4_km
-      rope-freq-base: "500000.0"
-      rope-freq-scale: "1.0"
-      port: "8000"
-      host: "0.0.0.0"
-      keep-ctx: "0"
-      no-display: "true"
-  # GPU device IDs pinned per pod (Tesla P40, no tensor cores).
+  # Inference sub-chart (llama.cpp inference servers, one per Tesla P40).
+  # The inference values (image, imagePullPolicy, configMaps, gpuDeviceIds,
+  # resources, ingress, pvc) were moved into charts/inference/values.yaml and
+  # are now owned by the inference sub-chart. This parent global is unused.
+  #
   gpuDeviceIds:
     gpu0: "0"
     gpu1: "1"
@@ -106,7 +81,7 @@ inference:
     # "gpu: 1" to request a physical GPU per pod. For now the GPU request
     # stays 0 so the CPU-bound server pods can schedule.
     gpu: "0"
-    memory: "23Gi"
+    memory: "2Gi"
   # Ingress (Traefik, shipped by K3s).
   ingress:
     host: inference.local
@@ -117,32 +92,16 @@ inference:
   # Model weights PVC.
   pvc:
     name: inference-models
-    storageClassName: local-path
+    storageClassName: k8s-sc-ssd-replicated
     accessMode: ReadWriteOnce
     size: 50Gi
     mountPath: /mnt/k8s-data-ssd
 
-# ---------------------------------------------------------------------------
-# Orchestrator (namespace: orchestrator). Image is the repo-owned GHCR image.
-# ---------------------------------------------------------------------------
 orchestrator:
-  image: "ghcr.io/utopiklab/langgraph-supervisor:latest"
+  # Orchestrator sub-chart (supervisor loop + task-acceptor gateway), gated by the
+  # `orchestrator.enabled` dependency. Owns its own `orchestrator.*` values
+  # (image, config, judge, ingress, secrets, resources) — documented in
+  # charts/orchestrator/values.yaml. This parent global is retained only as a
+  # deploy-time reference and is otherwise unused.
+  image: "ghcr.io/utopiklab/code-factory-supervisor:latest"
   imagePullPolicy: IfNotPresent
-  real: true
-  verified: "Built from the repo Dockerfile and published to ghcr.io/utopiklab/langgraph-supervisor:latest."
-  # Supervisor env (from configmap / secret).
-  config:
-    max-iterations: "8"
-    task-wait-seconds: "30"
-    loop-state-dir: /data/loop-state
-    judge-url: https://inference.local/v1
-    judge-model: qwen2.5-coder-7b-instruct-q5-kn@32k
-  # Networking: supervisor -> judge brain.
-  judge:
-    host: inference-server-gpu1
-    port: "8000"
-  # Ingress for supervisor task-acceptor endpoint.
-  ingress:
-    enabled: true
-    ingressClassName: traefik
-    entrypoints: websecure

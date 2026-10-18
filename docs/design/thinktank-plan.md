@@ -77,34 +77,151 @@ family (Qwen2.5), which keeps the judge's evaluations meaningful.
 - **Judge/supervisor brain (P40-1):** a `llama.cpp` server running a Qwen2.5
   judge/supervisor model. Plans the work, evaluates every worker output, picks
   the best, and acts as the pre-action gate before anything is committed.
-- **Task-acceptor sidecar (port 8000):** the supervisor Service routes `:8000`
-  to a lightweight HTTP sidecar (`supervisor-task-acceptor.py`) that runs in the
-  same pod and `exec`s alongside the resident loop. It has **no** persistent
-  HTTP surface — it only binds `:8000` while a task is being accepted, then
-  releases it (so it never fights the loop for the port). It exposes a single
-  **`POST /api/v1/tasks/spawn`** (auth: `Authorization: token <github-token>`,
+- **Task-acceptor gateway Deployment (port 8000):** the task-acceptor is now
+  its own always-on Deployment (`{{ .Chart.Name }}-orchestrator-gateway:latest`),
+  independent of the supervisor loop. The acceptor source (`supervisor-task-acceptor.py`)
+  is baked into a dedicated Docker image (pure stdlib `http.server`, no pip installs)
+  rather than stored in a ConfigMap. The gateway Service routes `:8000` to it and
+  it exposes a single **`POST /api/v1/tasks/spawn`** (auth: `Authorization: token <github-token>`,
   the workflow PAT from `orchestrator-secrets`), validates the payload, renders
   `agent-job-template.yaml`, creates the `Job`, and `kubectl waits` for
   completion before deleting it. The GitHub Actions runner is **not** used — the
-  always-on supervisor IS the task-acceptor, so no runner manifest or
+  always-on gateway IS the task-acceptor, so no runner manifest or
   `RUNNER_TOKEN` secret is needed.
 
 ```mermaid
 sequenceDiagram
     participant GH as GitHub Actions
     participant WF as drain.yaml
-    participant SVC as supervisor :8000 (task-acceptor)
+    participant GW as gateway :8000 (task-acceptor)
     participant K8 as Kubernetes
-    GH->>WF: trigger on issue / PR
-    WF->>SVC: POST /api/v1/tasks/spawn (auth: token)
-    SVC->>SVC: validate payload + repo
-    SVC->>K8: render agent-job-template.yaml → create Job
+    GH->>WF: trigger on issue (opened / assigned)
+    WF->>GW: POST /api/v1/tasks/spawn (auth: token)
+    GW->>GW: validate payload + repo
+    GW->>K8: render agent-job-template.yaml → create Job
     K8->>K8: run coder Job (kubectl wait --for=jobcomplete)
     K8->>K8: delete Job
-    K8-->>SVC: {uid, task_id, issue_number, status}
-    SVC-->>WF: 200 OK
-    note over SVC,K8: no RUNNER_TOKEN — the always-on supervisor IS the acceptor
+    K8->>K8: run judge Job (kubectl wait --for=jobcomplete)
+    K8->>K8: delete Job
+    K8-->>GW: {uid, task_id, issue_number, status}
+    GW-->>WF: 202 Accepted
+    note over GW,K8: no RUNNER_TOKEN — the always-on gateway IS the acceptor
 ```
+
+#### 2.1.1 Task-acceptor API reference
+
+The task-acceptor is exposed by the always-on supervisor over HTTP on port **8000**
+(`:8000`), which is how the supervisor doubles as the task-acceptor. There is **no
+persistent HTTP surface**: the listener binds `:8000` only while a task is being
+accepted, then releases it. Requests therefore arrive only during active
+acceptance windows — the drain layer opens the connection, the supervisor accepts
+and creates the Kubernetes Job, and the port is released again.
+
+##### Endpoints
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/tasks/spawn` | Register / spawn a task or worker. |
+| `GET` | `/api/v1/tasks/{task_id}` | Poll task status; returns the final result. |
+| `POST` | `/api/v1/tasks/{task_id}` | Report a worker's final evaluation payload. |
+
+##### Authentication
+
+All requests to `/api/v1/tasks/spawn` (and any other acceptor endpoint) must carry
+a GitHub token as a Bearer-style token header:
+
+```
+Authorization: token <github-token>
+```
+
+The `<github-token>` is the workflow Personal Access Token (PAT) supplied via the
+`orchestrator-secrets` secret. It authenticates the request against the
+acceptor; it is **not** a runner credential — the supervisor itself is the
+acceptor, so no `RUNNER_TOKEN` is involved.
+
+##### Request payload — task registration
+
+The task-registration payload (`POST /api/v1/tasks/spawn`) carries the issue/PR
+trigger payload:
+
+| Field | Meaning |
+| --- | --- |
+| `task_id` | Identifier for the task. |
+| `repo` | Repository path. Defaults to `ALLOWED_REPO` when omitted. |
+| `issue_number` | Issue / PR number. |
+| `issue_title` | Issue / PR title. |
+| `issue_url` | Issue / PR URL. |
+
+##### Request payload — worker spawn
+
+When spawning a worker, the payload additionally carries:
+
+| Field | Meaning |
+| --- | --- |
+| `worker_id` | Identifier for the worker. |
+| `payload` | The worker spawn payload (see below). |
+
+The nested `payload` (referred to as `spawn_payload`) carries:
+
+| Field | Meaning |
+| --- | --- |
+| `edits` | Task edits, extracted by `_extract_edits`. |
+| `task_id` | The associated task identifier. |
+| `worker_id` | The spawning worker identifier. |
+| `output` | Worker output. |
+| `changed` | Whether files changed. |
+| `contents` | File contents. |
+| `patch` | The diff patch. |
+
+##### `task_id` derivation
+
+The `task_id` value is derived in this order of precedence:
+
+1. the `task_id` field of the payload;
+2. otherwise the `id` field;
+3. otherwise it falls back to `issue_number` (the issue / PR number).
+
+##### Validation rules and status codes
+
+| Status | When | Body |
+| --- | --- | --- |
+| `202` | Success — task/worker accepted. | `{status: "accepted", task_id, repo, endpoint: "/api/v1/tasks/spawn"}` |
+| `400` | Malformed JSON body. | `{"error": "invalid-json"}` |
+| `403` | Repository not in the allow-list (`repo != ALLOWED_REPO`). | `{"error": "repo-not-allowed"}` |
+
+When `repo` is omitted it defaults to `ALLOWED_REPO` (sourced from the environment).
+
+##### Related endpoints
+
+- **`GET /api/v1/tasks/{task_id}`** — poll task status. On completion it returns
+  `200` carrying the result payload:
+
+  ```
+  {task_id, output, patch, score, review}
+  ```
+
+- **`POST /api/v1/tasks/{task_id}`** — report the final evaluation payload from a
+  worker. The payload is `{task_id, output, patch, score, review}`.
+
+##### Task lifecycle
+
+```mermaid
+sequenceDiagram
+    participant W as worker
+    participant SVC as supervisor :8000 (task-acceptor)
+    W->>SVC: POST /api/v1/tasks/spawn (worker_id, payload)
+    SVC->>SVC: derive task_id, validate + accept
+    SVC-->>W: 202 {"status":"accepted", ...}
+    W->>SVC: GET /api/v1/tasks/{task_id} (poll)
+    W->>SVC: POST /api/v1/tasks/{task_id} (final evaluation)
+    SVC-->>W: 200 {task_id, output, patch, score, review}
+```
+
+##### Deployment
+
+In the multi-repo deployment, GitHub Actions posts the spawn to
+`/api/v1/tasks/spawn` on the Traefik `web` entrypoint (port **80**). The `TASK_ID`
+is derived from `github.event.issue.number || github.event.pull_request.number`.
 
 ### 2.2 The LangGraph loop
 

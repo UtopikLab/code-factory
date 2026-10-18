@@ -1,0 +1,82 @@
+# ---------------------------------------------------------------------------
+# inference sub-chart values: llama.cpp inference servers (one per Tesla P40).
+# These values were moved from the parent k8s-inference chart. The parent's
+# inference global is now unused (removed) — inference values live here.
+# ---------------------------------------------------------------------------
+
+# Namespace the sub-chart's resources are placed in.
+namespace: "inference"
+
+icon: ""
+
+# ---------------------------------------------------------------------------
+# Inference servers (namespace: inference). llama.cpp image VERIFIED real.
+# ---------------------------------------------------------------------------
+inference:
+  # Inference server image (VERIFIED real, llama.cpp server-intel tag).
+  image: "ghcr.io/ggml-org/llama.cpp:server-cuda"
+  imagePullPolicy: IfNotPresent
+  # Shared pull secret applied to all containers.
+  imagePullSecrets:
+  - name: ghcr-secret
+  # Per-GPU server argument ConfigMaps. One entry per GPU, numeric index used by
+  # the template so they render without needing `helm install ... -f
+  # inference-configmaps.yaml`.
+  configMaps:
+  - name: llama-server-args-gpu0
+    model:
+      model-dir: /models
+      model-format: gguf
+      model-name: qwen2.5-coder-7b-instruct-q4-km
+      ctx-size: "32768"
+      tensor-type: q4_km
+      rope-freq-base: "500000.0"
+      rope-freq-scale: "1.0"
+      port: "8000"
+      host: "0.0.0.0"
+      keep-ctx: "0"
+      no-display: "true"
+  - name: llama-server-args-gpu1
+    model:
+      model-dir: /models
+      model-format: gguf
+      model-name: qwen2.5-coder-7b-instruct-q4-km
+      ctx-size: "32768"
+      tensor-type: q4_km
+      rope-freq-base: "500000.0"
+      rope-freq-scale: "1.0"
+      port: "8000"
+      host: "0.0.0.0"
+      keep-ctx: "0"
+      no-display: "true"
+  # GPU device IDs pinned per pod (Tesla P40, no tensor cores).
+  gpuDeviceIds:
+    gpu0: "0"
+    gpu1: "1"
+  # Resources: full P40 (23 GiB) requested to prevent oversubscription.
+  resources:
+    # CPU resource budget for the llama.cpp server pods.
+    cpuRequest: "1"
+    cpuLimit: "2"
+    # The k8s-node01 host physically has 2× Tesla P40 GPUs, but Kubernetes
+    # reports nvidia.com/gpu: 0 because the nvidia-device-plugin DaemonSet is no
+    # running (its nodeAffinity requires NFD-detected feature labels that this
+    # K3s node lacks). Once the device-plugin exposes the GPU resource, restore
+    # "gpu: 1" to request a physical GPU per pod. For now the GPU request
+    # stays 0 so the CPU-bound server pods can schedule.
+    gpu: "0"
+    memory: "2Gi"
+  # Ingress (Traefik, shipped by K3s).
+  ingress:
+    host: inference.local
+    path: /v1
+    entrypoints: websecure
+    middlewares: default@kubernetes/tcp-security
+    method: ANY
+  # Model weights PVC.
+  pvc:
+    name: inference-models
+    storageClassName: k8s-sc-ssd-replicated
+    accessMode: ReadWriteOnce
+    size: 50Gi
+    mountPath: /mnt/k8s-data-ssd

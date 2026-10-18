@@ -1,0 +1,11 @@
+{{/*
+Orchestrator namespace. Scoped to the parent release namespace via the
+`namespace` value so `helm template` renders it in the correct namespace.
+*/}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/part-of: {{ .Chart.Name }}
+    app.kubernetes.io/component: orchestrator
