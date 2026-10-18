@@ -148,7 +148,7 @@ CPU-only (no torch/transformers/langchain-openai — the judge runs elsewhere).
 kubectl create namespace orchestrator
 kubectl apply -f orchestrator/namespace.yaml
 
-# ConfigMap orchestrator-config (policy knobs — taken from workers.yaml data).
+# ConfigMap orchestrator-config (policy knobs — taken from worker.yaml data).
 kubectl create configmap orchestrator-config --namespace orchestrator --dry-run=client -o yaml \
   | kubectl apply -f - <<'EOF'
 apiVersion: v1
@@ -177,9 +177,9 @@ kubectl create secret generic orchestrator-secrets --namespace orchestrator \
 # Supervisor Deployment + in-cluster Service (port 8000).
 kubectl apply -f orchestrator/supervisor.yaml
 
-# Worker Job template (ConfigMap + coder-workers Job; agent-job-template.yaml
+# Worker Job template (ConfigMap + coder-worker Job; agent-job-template.yaml
 # lives in the image, so it is NOT applied here — the acceptor renders it).
-kubectl apply -f orchestrator/workers.yaml
+kubectl apply -f orchestrator/worker.yaml
 
 # Traefik Ingress so the supervisor Service is reachable for the first task.
 # (Traefik Ingress is Category 4 / APPROVED.) Point Traefik at the
@@ -369,7 +369,7 @@ Job, and return `{"uid":..., "task_id":"UtopikLab/code-factory#42", ...}`.
   `helm/values.yaml` lines 83–86 (the `orchestrator` inference profile) set the
   same. `helm/templates/inference/deployment.yaml` serves `--ctx-size`
   (default `32768`, line 60); `helm/values.schema.json` (lines 100–106) defines
-  `model-format` and `ctx-size`. The orchestrator config (`workers.yaml`)
+  `model-format` and `ctx-size`. The orchestrator config (`worker.yaml`)
   wires `judge-model: qwen2.5-coder-7b-instruct-q4-km@32k` (line 139), and the
   code agrees: `DEFAULT_JUDGE_MODEL = "qwen2.5-coder-7b-instruct-q4-km@32k"`
   (`orchestrator/worker/worker.py`, line 34) and

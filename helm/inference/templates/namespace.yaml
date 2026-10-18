@@ -4,7 +4,6 @@ kind: Namespace
 metadata:
   name: {{ .Release.Namespace | default .Values.namespace | quote }}
   labels:
-    app.k8s.io/name: {{ .Chart.Name | quote }}
-    app.k8s.io/instance: {{ .Release.Name | default "k8s-inference" | quote }}
-    app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+    app: {{ .Chart.Name | quote }}
+    component: {{ .Release.Name | default "k8s-inference" | quote }}
 {{- end }}

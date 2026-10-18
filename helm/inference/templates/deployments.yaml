@@ -17,9 +17,8 @@ metadata:
   name: {{ $cfg.name }}
   namespace: {{ $ns }}
   labels:
-    app.k8s.io/name: {{ $.Chart.Name | quote }}
-    app.k8s.io/instance: {{ $.Release.Name | default "k8s-inference" | quote }}
-    app.k8s.io/version: {{ $.Chart.AppVersion | quote }}
+    app: {{ $.Chart.Name | quote }}
+    component: {{ $.Release.Name | default "k8s-inference" | quote }}
     app.kubernetes.io/component: inference-server
     app.kubernetes.io/managed-by: Helm
     gpu: "{{ $idx }}"
@@ -81,6 +80,7 @@ spec:
               containerPort: 8000
               protocol: TCP
           resources:
+            {{- if eq $inf.resources.gpu "1" }}
             requests:
               cpu: {{ $inf.resources.cpuRequest | default "1" }}
               nvidia.com/gpu: {{ $inf.resources.gpu }}
@@ -89,6 +89,14 @@ spec:
               cpu: {{ $inf.resources.cpuLimit | default "2" }}
               nvidia.com/gpu: {{ $inf.resources.gpu }}
               memory: {{ $inf.resources.memory }}
+            {{- else }}
+            requests:
+              cpu: {{ $inf.resources.cpuRequest | default "1" }}
+              memory: {{ $inf.resources.memory }}
+            limits:
+              cpu: {{ $inf.resources.cpuLimit | default "2" }}
+              memory: {{ $inf.resources.memory }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /v1/models

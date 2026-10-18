@@ -1,6 +1,6 @@
 {{/*
-Workers: ConfigMap orchestrator-config + Job coder-workers.
-Faithful to orchestrator/workers.yaml (ConfigMap + Job coder-workers).
+Worker: ConfigMap orchestrator-config + Job coder-worker.
+Faithful to orchestrator/worker.yaml (ConfigMap + Job coder-worker).
 */}}
 {{- $m := dict
   "max-iterations" (int (default (index .Values.orchestrator.config "max-iterations") 8))
@@ -14,7 +14,7 @@ Faithful to orchestrator/workers.yaml (ConfigMap + Job coder-workers).
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ .Chart.Name }}-orchestrator-config
+  name: {{ .Chart.Name }}-config
   namespace: {{ .Values.namespace }}
   labels:
     app: orchestrator
@@ -28,7 +28,7 @@ data:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ .Chart.Name }}-coder-workers
+  name: {{ .Chart.Name }}-worker
   namespace: {{ .Values.namespace }}
   labels:
     app: orchestrator
@@ -49,30 +49,7 @@ spec:
       containers:
         - name: coder
           image: {{ .Values.orchestrator.image | default "ghcr.io/utopiklab/code-factory-worker:latest" }}
-          command:
-            - python3
-            - -m
-            - worker
-          env:
-            - name: TASK_ID
-              value: {{ (index .Values.orchestrator.config "task-id") | default "orchestrator-task" | quote }}
-            - name: ISSUE_URL
-              value: {{ (index .Values.orchestrator.config "issue-url") | default "" | quote }}
-            - name: REPO
-              value: {{ (index .Values.orchestrator.config "repo") | default "." | quote }}
-            - name: GITHUB_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Chart.Name }}-orchestrator-secrets
-                  key: github-token
-            - name: OPENAI_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Chart.Name }}-orchestrator-secrets
-                  key: openai-api-key
-          envFrom:
-            - configMapRef:
-                name: {{ .Chart.Name }}-orchestrator-config
+          imagePullPolicy: IfNotPresent
           volumeMounts:
             - name: workspace
               mountPath: /data/work
@@ -84,7 +61,7 @@ spec:
               memory: {{ .Values.orchestrator.config.memory | default "2Gi" }}
             limits:
               cpu: {{ .Values.orchestrator.config.cpuLimit | default "2500m" }}
-              memoryLimit: {{ .Values.orchestrator.config.memoryLimit | default "5Gi" }}
+              memory: {{ .Values.orchestrator.config.memoryLimit | default "5Gi" }}
       volumes:
         - name: workspace
           emptyDir: {}

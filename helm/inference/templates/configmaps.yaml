@@ -13,12 +13,10 @@ metadata:
   name: {{ $cfg.name }}
   namespace: {{ $ns }}
   labels:
-    app.k8s.io/name: {{ $.Chart.Name | quote }}
-    app.k8s.io/instance: {{ $cfg.name }}
-    app.k8s.io/version: {{ $.Chart.AppVersion | quote }}
-    app.k8s.io/component: llama-server-args
-    gpu: "{{ $idx }}"
-    app.k8s.io/managed-by: Helm
+    app: {{ $.Chart.Name | quote }}
+    component: {{ $cfg.name }}
+    app.kubernetes.io/component: llama-server-args
+    app.kubernetes.io/managed-by: Helm
 data:
 {{ range $k, $v := $cfg.model }}
   {{ $k }}: {{ $v | quote }}

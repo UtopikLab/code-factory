@@ -1,0 +1,40 @@
+{{/*
+Supervisor Deployment for the orchestrator workload (LangGraph loop).
+*/}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}-supervisor
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: orchestrator
+    component: supervisor
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    created-by: helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestrator
+      component: supervisor
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+        component: supervisor
+    spec:
+      containers:
+        - name: supervisor
+          image: {{ .Values.orchestrator.image | default "ghcr.io/utopiklab/code-factory-supervisor:latest" }}
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: {{ .Values.orchestrator.config.cpuRequest | default "500m" }}
+              memory: {{ .Values.orchestrator.config.memory | default "2Gi" }}
+            limits:
+              cpu: {{ .Values.orchestrator.config.cpuLimit | default "2500m" }}
+              memory: {{ .Values.orchestrator.config.memoryLimit | default "5Gi" }}
+      imagePullSecrets:
+        - name: ghcr-secret

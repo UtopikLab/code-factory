@@ -7,11 +7,28 @@
 # Namespace the sub-chart's resources are placed in.
 namespace: "inference"
 
-icon: ""
+# Default image registry for containerd (K3s host). See inference/common.sh.
+global:
+  IMAGE_REGISTRY: "ghcr.io"
+  # Registry credentials applied to all resources (set a Secret name, or empty to omit).
+  imagePullSecrets: "nvidia-registry-creds"
 
 # ---------------------------------------------------------------------------
 # Inference servers (namespace: inference). llama.cpp image VERIFIED real.
 # ---------------------------------------------------------------------------
+# The NVIDIA device-plugin chart is a sub-chart, gated by this flag.
+nvidia-device-plugin:
+  enabled: true
+  # The chart enforces a guard against the 'default' namespace; set true so the
+  # chart renders when this parent chart is templated/installed in 'default'.
+  allowDefaultNamespace: true
+  # The sub-chart scopes its namespace-scoped resources (Namespace, DaemonSet,
+  # ServiceAccount) to the parent release namespace via this field. Without it,
+  # `helm template` renders them under 'default' and a live `helm install` would
+  # place them in the wrong namespace (collision with the live gpu-namespace
+  # device-plugin). Set to the live device-plugin namespace.
+  # namespaceOverride: gpu
+
 inference:
   # Inference server image (VERIFIED real, llama.cpp server-intel tag).
   image: "ghcr.io/ggml-org/llama.cpp:server-cuda"

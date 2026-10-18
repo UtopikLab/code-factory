@@ -13,9 +13,8 @@ metadata:
     traefik.ingress.kubernetes.io/rule.match: Host:`inference.local` && PathPrefix(`/v1`)
     traefik.ingress.kubernetes.io/service.method: ANY
   labels:
-    app.k8s.io/name: {{ .Chart.Name }}
-    app.k8s.io/instance: {{ .Release.Name }}
-    app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+    app: {{ .Chart.Name }}
+    component: {{ .Release.Name }}
     app.kubernetes.io/component: inference-server
     app.k8s.io/managed-by: Helm
 spec:

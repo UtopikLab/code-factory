@@ -7,7 +7,7 @@ always-on Deployment, independent of the supervisor loop.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Chart.Name }}-orchestrator-gateway
+  name: {{ .Chart.Name }}-gateway
   namespace: {{ .Values.namespace }}
   labels:
     app: orchestrator
@@ -27,16 +27,8 @@ spec:
     spec:
       containers:
         - name: gateway
-          image: {{ .Values.gateway.image }}
+          image: {{ .Values.gateway.image | default "ghcr.io/utopiklab/code-factory-gateway:latest" }}
           imagePullPolicy: IfNotPresent
-          env:
-            - name: GITHUB_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Chart.Name }}-orchestrator-secrets
-                  key: github-token
-            - name: ALLOWED_REPO
-              value: {{ (index .Values.orchestrator.config "repo") | default "." | quote }}
           ports:
             - name: gateway
               containerPort: 8000
@@ -46,8 +38,7 @@ spec:
               memory: {{ .Values.orchestrator.config.memory | default "256Mi" }}
             limits:
               cpu: {{ .Values.orchestrator.config.cpuLimit | default "250m" }}
-              memoryLimit: {{ .Values.orchestrator.config.memoryLimit | default "512Mi" }}
-
+              memory: {{ .Values.orchestrator.config.memoryLimit | default "512Mi" }}
       imagePullSecrets:
         - name: ghcr-secret
 ---
@@ -66,3 +57,5 @@ spec:
   ports:
     - name: task-acceptor
       containerPort: 8000
+      port: 8000
+      targetPort: 8000

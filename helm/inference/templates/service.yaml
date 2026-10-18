@@ -8,9 +8,8 @@ metadata:
   name: inference-server
   namespace: inference
   labels:
-    app.k8s.io/name: {{ .Chart.Name }}
-    app.k8s.io/instance: {{ .Release.Name }}
-    app.k8s.io/version: {{ .Chart.AppVersion | quote }}
+    app: {{ .Chart.Name }}
+    component: {{ .Release.Name }}
     app.kubernetes.io/component: inference-server
     app.k8s.io/managed-by: Helm
 spec:

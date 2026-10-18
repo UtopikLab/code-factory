@@ -133,7 +133,7 @@ inference/
 orchestrator/
 ├── namespace.yaml               # Namespace 'orchestrator'
 ├── supervisor.yaml              # always-on supervisor/judge Deployment + Service
-├── workers.yaml                 # policy ConfigMap + coder-worker Job (spawn mechanism)
+├── worker.yaml                 # policy ConfigMap + coder-worker Job (spawn mechanism)
 └── secrets.yaml                 # OpenAI key (never hardcoded)
 monitoring/
 ├── namespace.yaml               # Namespace 'monitoring'
@@ -186,8 +186,8 @@ sits alongside — and is independent of — the `inference` inference stack:
 | :--- | :--- | :--- | :--- |
 | `Namespace` | `orchestrator/namespace.yaml` | `orchestrator` | Isolates the agent runtime. |
 | `Deployment` | `orchestrator/supervisor.yaml` | `orchestrator` | **Always-on** supervisor + judge (the agent loop). |
-| `ConfigMap` | `orchestrator/workers.yaml` | `orchestrator` | Policy knobs (max-iterations, task-wait, worker count). |
-| `Job` | `orchestrator/workers.yaml` | `orchestrator` | **Worker spawn** — N parallel coder agents per task. |
+| `ConfigMap` | `orchestrator/worker.yaml` | `orchestrator` | Policy knobs (max-iterations, task-wait, worker count). |
+| `Job` | `orchestrator/worker.yaml` | `orchestrator` | **Worker spawn** — N parallel coder agents per task. |
 | `Secret` | `orchestrator/secrets.yaml` | `orchestrator` | OpenAI key + workflow-scoped GitHub PAT (never hardcoded). |
 
 ### 4.4.1 How the pieces relate to the inference stack
@@ -214,7 +214,7 @@ sits alongside — and is independent of — the `inference` inference stack:
     `Job`, and waits (`kubectl wait --for=jobcomplete`, 1800s) for it to finish
     before deleting the Job and returning `{uid, task_id, issue_number,
     status}`. `do_GET` returns `200` for any path (liveness).
-- **Workers (`orchestrator/workers.yaml`)** — the **spawn mechanism**. The
+- **Workers (`orchestrator/worker.yaml`)** — the **spawn mechanism**. The
   supervisor triggers a `Job` that runs N parallel **coder** agents (pure CPU,
   no GPU). `N` (the worker count) is a policy knob in the ConfigMap so it can be
   tuned without editing the manifest. This is how the overnight agent gets work
@@ -306,7 +306,7 @@ curl -s https://inference.local/v1/chat/completions \
 | `deployment.yaml` | ConfigMap ×2, Deployment ×2, Service ×1, Ingress | `inference` | `nvidia.com/gpu:1`, `memory:23Gi`, port 8000 |
 | `orchestrator/namespace.yaml` | Namespace | `orchestrator` | |
 | `orchestrator/supervisor.yaml` | Deployment, Service | `orchestrator` | CPU-only, limits cpu `2.5`/mem `5Gi`, port 8000 |
-| `orchestrator/workers.yaml` | ConfigMap, Job | `orchestrator` | limits cpu `6.5`/mem `7Gi`, parallelism `1` |
+| `orchestrator/worker.yaml` | ConfigMap, Job | `orchestrator` | limits cpu `6.5`/mem `7Gi`, parallelism `1` |
 | `orchestrator/secrets.yaml` | Secret | `orchestrator` | `orchestrator-secrets` (OpenAI key + GitHub PAT) |
 | `monitoring/namespace.yaml` | Namespace | `monitoring` | |
 | `monitoring/node-exporter.yaml` | Namespace, DaemonSet, Service, SA | `monitoring` | hostNetwork, limits cpu `1`/mem `1Gi`, :9100 |
