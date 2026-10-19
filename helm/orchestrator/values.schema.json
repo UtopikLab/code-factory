@@ -214,10 +214,19 @@
                 "verified": {
                     "type": "string"
                 },
+                "openaiApiKey": {
+                    "type": "string"
+                },
+                "githubToken": {
+                    "type": "string"
+                },
                 "config": {
                     "type": "object",
                     "properties": {
                         "max-iterations": {
+                            "type": "string"
+                        },
+                        "openai-api-key": {
                             "type": "string"
                         },
                         "task-wait-seconds": {

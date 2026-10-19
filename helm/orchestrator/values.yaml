@@ -29,6 +29,10 @@ orchestrator:
     # In-cluster gateway DNS for the coder-worker's ACCEPTOR_URL. Defaults to the
     # gateway Service DNS (e.g. orchestrator-orchestrator-gateway.orchestrator.svc.cluster.local:8000).
     acceptor-url: "http://orchestrator-orchestrator-gateway.orchestrator.svc.cluster.local:8000"
+    # OpenAI API key consumed by the supervisor loop + gateway. Sourced from the
+    # secrets-values.yaml chart (passed via `--values`), so it is empty here by
+    # default and overridden at deploy time.
+    openai-api-key: "<your-openai-key>"
 
 # Role-specific worker pool config (see §2.1.2).
 # worker-roles: ordered role mix per slot (coder/refactor/test).
