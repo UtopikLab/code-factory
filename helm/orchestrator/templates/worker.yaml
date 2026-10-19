@@ -55,6 +55,17 @@ spec:
               mountPath: /data/work
             - name: loop-state
               mountPath: /data/loop-state
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Chart.Name }}-secrets
+                  key: github-token
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Chart.Name }}-secrets
+                  key: openai-api-key
           resources:
             requests:
               cpu: {{ .Values.orchestrator.config.cpuRequest | default "500m" }}

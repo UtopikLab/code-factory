@@ -28,6 +28,18 @@ nvidia-device-plugin:
   # place them in the wrong namespace (collision with the live gpu-namespace
   # device-plugin). Set to the live device-plugin namespace.
   # namespaceOverride: gpu
+  securityContext:
+    privileged: true
+    allowPrivilegeEscalation: true
+    readOnlyRootFilesystem: null
+    runAsNonRoot: null
+    runAsUser: null
+    runAsGroup: null
+    capabilities:
+      add: []
+      drop: []
+    seLinuxOptions: {}
+    seccompProfile: null
 
 inference:
   # Inference server image (VERIFIED real, llama.cpp server-intel tag).
@@ -75,13 +87,12 @@ inference:
     # CPU resource budget for the llama.cpp server pods.
     cpuRequest: "1"
     cpuLimit: "2"
-    # The k8s-node01 host physically has 2× Tesla P40 GPUs, but Kubernetes
-    # reports nvidia.com/gpu: 0 because the nvidia-device-plugin DaemonSet is no
-    # running (its nodeAffinity requires NFD-detected feature labels that this
-    # K3s node lacks). Once the device-plugin exposes the GPU resource, restore
-    # "gpu: 1" to request a physical GPU per pod. For now the GPU request
-    # stays 0 so the CPU-bound server pods can schedule.
-    gpu: "0"
+    # Set to "1" to request a physical GPU per pod. The nvidia-device-plugin
+    # DaemonSet runs privileged now (privileged: true) so NVML can enumerate the
+    # Tesla P40s and the node reports nvidia.com/gpu: 2. Flip "gpu" to "1" to
+    # schedule GPU inference; keep "gpu: 0" only as a fallback for nodes where
+    # the device-plugin cannot run (no healthy devices).
+    gpu: "1"
     memory: "2Gi"
   # Ingress (Traefik, shipped by K3s).
   ingress:
@@ -90,10 +101,9 @@ inference:
     entrypoints: websecure
     middlewares: default@kubernetes/tcp-security
     method: ANY
-  # Model weights PVC.
+  # Model weights storage: a static hostPath PersistentVolume bound to the NVMe
+  # device (/mnt/k8s-local-nvme). The deployment templates mount the shared model
+  # weights there via a hostPath volume; Kubernetes auto-provisions the backing PV.
   pvc:
     name: inference-models
-    storageClassName: k8s-sc-ssd-replicated
-    accessMode: ReadWriteOnce
-    size: 50Gi
-    mountPath: /mnt/k8s-data-ssd
+    mountPath: /mnt/k8s-local-nvme

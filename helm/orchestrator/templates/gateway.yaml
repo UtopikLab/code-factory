@@ -32,6 +32,14 @@ spec:
           ports:
             - name: gateway
               containerPort: 8000
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Chart.Name }}-secrets
+                  key: github-token
+            - name: ALLOWED_REPO
+              value: "UtopikLab/code-factory"
           resources:
             requests:
               cpu: {{ .Values.orchestrator.config.cpuRequest | default "100m" }}

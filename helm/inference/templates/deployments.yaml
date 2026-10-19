@@ -114,19 +114,7 @@ spec:
           configMap:
             name: {{ $cfg.name }}
         - name: {{ $cfg.name }}-models
-          volumeClaimTemplate:
-            metadata:
-              name: {{ $cfg.name }}-models
-            spec:
-              volumes:
-                - persistentVolumeClaim:
-                    metadata:
-                      name: {{ $cfg.name }}-models
-                    spec:
-                      storageClassName: {{ $.Values.inference.pvc.storageClassName }}
-                      accessModes:
-                        - {{ $.Values.inference.pvc.accessMode }}
-                      resources:
-                        requests:
-                          storage: {{ $.Values.inference.pvc.size }}
+          hostPath:
+            path: /mnt/k8s-local-nvme/{{ $.Values.inference.pvc.name }}
+            type: DirectoryOrCreate
 {{- end }}

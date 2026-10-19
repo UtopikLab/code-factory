@@ -17,7 +17,23 @@ metadata:
     component: {{ .Release.Name }}
     app.kubernetes.io/component: inference-server
     app.k8s.io/managed-by: Helm
+# spec:
+#   rules:
+#     - host: inference.local
+#       http:
+#         paths:
+#           - path: /v1
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: inference-server
+#                 port:
+#                   number: 8000
 spec:
+  tls:
+    - hosts:
+        - inference.local
+      # secretName: inference-tls-cert # Optional: Add this line if you have a specific SSL certificate secret
   rules:
     - host: inference.local
       http:

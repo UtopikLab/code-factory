@@ -1,9 +1,12 @@
 {{/*
-Model weights PVC for the inference namespace.
-Faithful to inference/deployment.yaml (PVC inference-models).
+Model weights storage for the inference namespace.
+The deployment templates mount the shared model weights from a static hostPath
+volume bound to the NVMe device (/mnt/k8s-local-nvme); Kubernetes auto-provisions
+the backing PV for the hostPath volume. This static PersistentVolume makes the
+NVMe-backed storage explicit and visible.
 */}}
 apiVersion: v1
-kind: PersistentVolumeClaim
+kind: PersistentVolume
 metadata:
   name: {{ .Values.inference.pvc.name }}
   namespace: inference
@@ -13,9 +16,22 @@ metadata:
     app.kubernetes.io/component: inference-models
     app.k8s.io/managed-by: Helm
 spec:
+  # Static local hostPath PV bound to the NVMe device.
+  # Local volumes require nodeAffinity (hostname) and explicit capacity/accessModes.
+  capacity:
+    storage: 500Gi
+  volumeMode: Filesystem
   accessModes:
-    - {{ .Values.inference.pvc.accessMode }}
-  storageClassName: {{ .Values.inference.pvc.storageClassName }}
-  resources:
-    requests:
-      storage: {{ .Values.inference.pvc.size }}
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  # Local volumes require nodeAffinity (node hostname). The cluster is single-node
+  # (k8s-node01), so this term is always satisfied.
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchFields:
+            - key: metadata.name
+              operator: In
+              values: ["k8s-node01"]
+  local:
+    path: /mnt/k8s-local-nvme/{{ .Values.inference.pvc.name }}

@@ -28,3 +28,4 @@ err.txt
 *.whl
 vendored/
 *.lock-bins/
+secrets-values.yaml

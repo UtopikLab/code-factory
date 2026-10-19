@@ -36,5 +36,11 @@ spec:
             limits:
               cpu: {{ .Values.orchestrator.config.cpuLimit | default "2500m" }}
               memory: {{ .Values.orchestrator.config.memoryLimit | default "5Gi" }}
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Chart.Name }}-secrets
+                  key: github-token
       imagePullSecrets:
         - name: ghcr-secret
