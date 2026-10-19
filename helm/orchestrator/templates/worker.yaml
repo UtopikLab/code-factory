@@ -24,8 +24,9 @@ metadata:
   annotations:
     created-by: helm
 data:
-  orchestrator-config: |-
-{{ toJson $m | indent 4 }}
+  {{- range $k, $v := $m }}
+  {{ $k }}: {{ $v | quote }}
+  {{ end }}
 ---
 apiVersion: batch/v1
 kind: Job
