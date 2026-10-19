@@ -23,7 +23,10 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     gpu: "{{ $idx }}"
 spec:
-  replicas: 1
+  # One replica per GPU: cap the pod count to available GPU capacity so the
+  # Deployment can never over-subscribe GPUs (prevents the pending/insufficient
+  # GPU scheduling race). Set via inference.gpuCount.
+  replicas: {{ $inf.gpuCount | default 2 }}
   strategy:
     type: RollingUpdate
   selector:
