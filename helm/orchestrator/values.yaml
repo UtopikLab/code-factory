@@ -26,6 +26,9 @@ orchestrator:
   # The ALLOWED_REPO env on the gateway Deployment defaults to this repo.
   config:
     repo: "UtopikLab/code-factory"
+    # In-cluster gateway DNS for the coder-worker's ACCEPTOR_URL. Defaults to the
+    # gateway Service DNS (e.g. orchestrator-orchestrator-gateway.orchestrator.svc.cluster.local:8000).
+    acceptor-url: "http://orchestrator-orchestrator-gateway.orchestrator.svc.cluster.local:8000"
 
 # Role-specific worker pool config (see §2.1.2).
 # worker-roles: ordered role mix per slot (coder/refactor/test).

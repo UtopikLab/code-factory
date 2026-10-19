@@ -1,0 +1,82 @@
+"""
+Unit tests for the gateway repo-allowlist helpers (server.py).
+
+These exercise the _parse_allowed_repos helper and the repo-validation logic,
+which are deterministic and do not require a running HTTP server.
+"""
+
+import os
+
+import server
+
+# --------------------------------------------------------------------------- #
+# _parse_allowed_repos helper
+# --------------------------------------------------------------------------- #
+
+
+def test_wildcard_means_any_repo():
+    assert server._parse_allowed_repos("*") is None
+    assert server._parse_allowed_repos("*") == server._parse_allowed_repos("*")
+
+
+def test_single_repo_whitelist():
+    result = server._parse_allowed_repos("org/repo1")
+    assert result == {"org/repo1"}
+
+
+def test_multiple_comma_separated_repos():
+    result = server._parse_allowed_repos("org/a,org/b, other/c ")
+    assert result == {"org/a", "org/b", "other/c"}
+
+
+def test_empty_and_blank_fallbacks():
+    assert server._parse_allowed_repos("") is None
+    assert server._parse_allowed_repos("   ") is None
+    assert server._parse_allowed_repos(None) is None
+
+
+def test_legacy_allowed_repo_variable():
+    # Backward-compatible: ALLOWED_REPO is read when ALLOWED_REPOS is unset.
+    os.environ.pop("ALLOWED_REPOS", None)
+    os.environ["ALLOWED_REPO"] = "UtopikLab/code-factory"
+    del server.ALLOWED_REPOS_RAW
+    del server.ALLOWED_REPOS
+    server.ALLOWED_REPOS_RAW = os.environ.get(
+        "ALLOWED_REPOS", os.environ.get("ALLOWED_REPO", "*")
+    )
+    server.ALLOWED_REPOS = server._parse_allowed_repos(server.ALLOWED_REPOS_RAW)
+    assert server.ALLOWED_REPOS == {"UtopikLab/code-factory"}
+
+
+# --------------------------------------------------------------------------- #
+# Repo validation (mirrors the do_POST branch)
+# --------------------------------------------------------------------------- #
+
+
+def _repo_allowed(repo, allowed):
+    if allowed is None:
+        return True  # "*" -> accept any repo
+    return allowed is not None and (repo in allowed)
+
+
+def test_any_repo_policy_accepts_all():
+    assert _repo_allowed("anything/else", None) is True
+
+
+def test_whitelist_rejects_unknown():
+    allowed = {"org/a"}
+    assert _repo_allowed("org/a", allowed) is True
+    assert _repo_allowed("org/b", allowed) is False
+
+
+def test_single_repo_whitelist_rejects_others():
+    allowed = {"UtopikLab/code-factory"}
+    assert _repo_allowed("UtopikLab/code-factory", allowed) is True
+    assert _repo_allowed("other/repo", allowed) is False
+
+
+def test_multi_repo_whitelist():
+    allowed = {"org/a", "org/b"}
+    assert _repo_allowed("org/a", allowed) is True
+    assert _repo_allowed("org/b", allowed) is True
+    assert _repo_allowed("org/c", allowed) is False

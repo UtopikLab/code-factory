@@ -6,6 +6,8 @@ Faithful to orchestrator/worker.yaml (ConfigMap + Job coder-worker).
   "max-iterations" (int (default (index .Values.orchestrator.config "max-iterations") 8))
   "task-wait-seconds" (int (default (index .Values.orchestrator.config "task-wait-seconds") 30))
   "loop-state-dir" (default (index .Values.orchestrator.config "loop-state-dir") "/data/loop-state")
+  "acceptor-url" (default (index .Values.orchestrator.config "acceptor-url") (printf "http://%s-orchestrator-gateway.%s.svc.cluster.local:8000" .Chart.Name .Values.namespace))
+  "acceptor-url" (default (index .Values.orchestrator.config "acceptor-url") (printf "http://%s-orchestrator-gateway.%s.svc.cluster.local:8000" .Chart.Name .Values.namespace))
   "judge-url" (default (index .Values.orchestrator.config "judge-url") "https://inference.local/v1")
   "judge-model" (default (index .Values.orchestrator.config "judge-model") "qwen2.5-coder-7b-instruct-q4-km@32k")
   "worker-roles" (index .Values.workers "worker-roles")
@@ -66,6 +68,11 @@ spec:
                 secretKeyRef:
                   name: {{ .Chart.Name }}-secrets
                   key: openai-api-key
+            - name: ACCEPTOR_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Chart.Name }}-config
+                  key: acceptor-url
           resources:
             requests:
               cpu: {{ .Values.orchestrator.config.cpuRequest | default "500m" }}
