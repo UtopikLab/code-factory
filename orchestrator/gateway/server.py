@@ -7,11 +7,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
 logger = logging.getLogger("gateway")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    stream=sys.stdout,
-)
+# StreamHandler with flushLevel=DEBUG forces every record to flush immediately.
+# logging.basicConfig(stream=sys.stdout) uses block buffering when stdout is a
+# pipe (e.g. inside a Kubernetes pod), so INFO lines are lost until the buffer
+# fills or the process exits — which is why the pod shows no output.
+stream = logging.StreamHandler(sys.stdout)
+stream.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+stream.flushLevel = logging.DEBUG
+logger.addHandler(stream)
+logger.setLevel(logging.INFO)
+logger.propagate = False
 
 def _parse_allowed_repos(raw):
     """Return None for 'any repo', else a set of allowed owner/name repositories.
