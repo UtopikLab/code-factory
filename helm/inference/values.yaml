@@ -44,7 +44,7 @@ nvidia-device-plugin:
 inference:
   # Inference server image (VERIFIED real, llama.cpp server-intel tag).
   image: "ghcr.io/ggml-org/llama.cpp:server-cuda"
-  imagePullPolicy: IfNotPresent
+  imagePullPolicy: Always
   # Shared pull secret applied to all containers.
   imagePullSecrets:
   - name: ghcr-secret

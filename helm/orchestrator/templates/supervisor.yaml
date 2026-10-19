@@ -28,7 +28,7 @@ spec:
       containers:
         - name: supervisor
           image: {{ .Values.orchestrator.image | default "ghcr.io/utopiklab/code-factory-supervisor:latest" }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           resources:
             requests:
               cpu: {{ .Values.orchestrator.config.cpuRequest | default "500m" }}

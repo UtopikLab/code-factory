@@ -1,9 +1,17 @@
 import json
+import logging
 import os
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
+logger = logging.getLogger("gateway")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    stream=sys.stdout,
+)
 
 def _parse_allowed_repos(raw):
     """Return None for 'any repo', else a set of allowed owner/name repositories.
@@ -16,7 +24,6 @@ def _parse_allowed_repos(raw):
         return None
     return {r for r in (x.strip() for x in raw.split(",")) if r}
 
-
 # ALLOWED_REPOS controls which repositories may push tasks to the orchestrator.
 #   - "*"            -> accept tasks from ANY repository (no validation)
 #   - "a/b,c/d"      -> whitelist of specific owner/name repositories
@@ -27,9 +34,9 @@ ALLOWED_REPOS_RAW = os.environ.get(
 )
 ALLOWED_REPOS = _parse_allowed_repos(ALLOWED_REPOS_RAW)
 
-
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        logger.info("GET %s", self.path)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -38,6 +45,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         auth = self.headers.get("Authorization", "")
         if auth != f"token {TOKEN}":
+            logger.warning("unauthorized request, auth=%r", auth)
             self.send_response(401)
             self.end_headers()
             self.wfile.write(b'{"error":"unauthorized"}')
@@ -48,6 +56,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(body.decode("utf-8"))
         except json.JSONDecodeError:
+            logger.error("invalid-json: %s", body)
             self.send_response(400)
             self.end_headers()
             self.wfile.write(b'{"error":"invalid-json"}')
@@ -55,6 +64,7 @@ class Handler(BaseHTTPRequestHandler):
 
         repo = payload.get("repo") or payload.get("payload", {}).get("repo")
         if repo and ALLOWED_REPOS is not None and repo not in ALLOWED_REPOS:
+            logger.warning("repo-not-allowed: repo=%r", repo)
             self.send_response(403)
             self.end_headers()
             self.wfile.write(b'{"error":"repo-not-allowed"}')
@@ -66,15 +76,18 @@ class Handler(BaseHTTPRequestHandler):
             "repo": repo or ALLOWED_REPOS_RAW,
             "endpoint": "/api/v1/tasks/spawn",
         }
+        logger.info("task-accepted task_id=%r repo=%r", response["task_id"], response["repo"])
         self.send_response(202)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(response).encode("utf-8"))
 
     def log_message(self, format, *args):
+        logger.info("%s %s", self.command, self.path)
         return
 
-
 if __name__ == "__main__":
+    logger.info("gateway starting on 0.0.0.0:8000")
+    logger.info("ALLOWED_REPOS=%r", ALLOWED_REPOS)
     server = ThreadingHTTPServer(("0.0.0.0", 8000), Handler)
     server.serve_forever()

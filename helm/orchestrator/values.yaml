@@ -13,7 +13,7 @@ icon: ""
 orchestrator:
   name: orchestrator
   image: "ghcr.io/utopiklab/code-factory-supervisor:latest"
-  imagePullPolicy: IfNotPresent
+  imagePullPolicy: Always
   replicas: 1
   labels:
     app: orchestrator
@@ -51,7 +51,7 @@ workers:
 gateway:
   name: gateway
   image: "ghcr.io/utopiklab/code-factory-gateway:latest"
-  imagePullPolicy: IfNotPresent
+  imagePullPolicy: Always
   replicas: 1
   labels:
     app: orchestrator

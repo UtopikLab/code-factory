@@ -51,7 +51,7 @@ spec:
       containers:
         - name: coder
           image: {{ .Values.orchestrator.image | default "ghcr.io/utopiklab/code-factory-worker:latest" }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           volumeMounts:
             - name: workspace
               mountPath: /data/work

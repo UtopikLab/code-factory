@@ -28,7 +28,7 @@ spec:
       containers:
         - name: gateway
           image: {{ .Values.gateway.image | default "ghcr.io/utopiklab/code-factory-gateway:latest" }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: {{ .Values.gateway.imagePullPolicy | default "Always" }}
           ports:
             - name: gateway
               containerPort: 8000

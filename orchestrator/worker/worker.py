@@ -145,6 +145,7 @@ async def judge_review(client, patch: str, output: str) -> tuple[float, str]:
             data = json.loads(content)
             score = float(data.get("score", 0.0))
             review = data.get("review", content)
+            logger.info("Judge result: score=%s review=%s", score, review)
             return (score, review)
         except (json.JSONDecodeError, ValueError, TypeError):
             return (0.5, content)
@@ -169,6 +170,7 @@ def _extract_task_id(body: bytes) -> str:
             if isinstance(data.get(key), str) and data[key]:
                 return data[key]
     except (json.JSONDecodeError, ValueError):
+        logger.debug("Failed to extract task_id from body")
         pass
     return ""
 
@@ -192,6 +194,7 @@ async def run_worker(
         json={"worker_id": worker_id, "payload": spawn_payload or {}},
     )
     if spawn_resp.status_code != 202:
+        logger.warning("Spawn rejected with HTTP %s", spawn_resp.status_code)
         result = _failure_result(
             "spawn",
             f"Spawn failed with status {spawn_resp.status_code}: {spawn_resp.text[:500]}",
@@ -210,6 +213,7 @@ async def run_worker(
             headers=headers,
         )
         if resp.status_code == 200:
+            logger.info("Task %s ready (HTTP 200)", task_id)
             status_resp = resp
             break
         await asyncio.sleep(1.0)
@@ -235,6 +239,7 @@ async def run_worker(
 
     # 4) judge
     score, review = await judge_review(client, patch or output, output)
+    logger.info("Worker score: %s", score)
 
     # 5) report
     final = {
@@ -270,6 +275,7 @@ async def serve_healthz() -> None:
     async def handle_request(request, response):
         if request.path == "/healthz":
             response.set_body(b"ok")
+            logger.info("Healthz check OK")
             await server.handle_request(request, response)
 
     await server.serve_forever(handle_request)

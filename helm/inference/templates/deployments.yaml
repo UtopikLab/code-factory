@@ -51,7 +51,7 @@ spec:
       containers:
         - name: llama-server
           image: {{ $inf.image | default "ghcr.io/ggml-org/llama.cpp:server-cuda" }}
-          imagePullPolicy: {{ $inf.imagePullPolicy | default "IfNotPresent" }}
+          imagePullPolicy: {{ $inf.imagePullPolicy | default "Always" }}
           args:
             - --models-dir
             - {{ (index $cfg.model "model-dir") | quote }}

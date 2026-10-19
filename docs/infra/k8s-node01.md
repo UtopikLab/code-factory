@@ -144,7 +144,7 @@ data:
       containers:
       - name: helper-pod
         image: rancher/mirrored-library-busybox:1.36.1
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
 EOF
 ```
 
