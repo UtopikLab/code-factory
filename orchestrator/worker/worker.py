@@ -171,7 +171,6 @@ def _extract_task_id(body: bytes) -> str:
                 return data[key]
     except (json.JSONDecodeError, ValueError):
         logger.debug("Failed to extract task_id from body")
-        pass
     return ""
 
 

@@ -84,7 +84,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         logger.info("%s %s", self.command, self.path)
-        return
 
 if __name__ == "__main__":
     logger.info("gateway starting on 0.0.0.0:8000")
