@@ -61,6 +61,13 @@ reset_ns() {
   if [[ -f "${SECRETS_FILE}" ]]; then
     values_args="--values \"${SECRETS_FILE}\""
   fi
+  # Delete the controller-owned Job before the upgrade. Helm's strategic-merge
+  # patch on a Job conflicts with the immutable fields the controller stamps on
+  # the pod template (batch.kubernetes.io/controller-uid,
+  # batch.kubernetes.io/job-name, controller-uid), which surfaces as
+  # "field is immutable". Removing the Job first lets it be recreated cleanly on
+  # the next deploy. The Job name is "<release>-worker" (e.g. orchestrator-worker).
+  kubectl delete job "${2}-worker" -n "$1" >/dev/null 2>&1 || true
   helm upgrade --install --namespace "$1" "$2" "$HELM_DIR/$3" ${values_args} --wait=false || true
 }
 
