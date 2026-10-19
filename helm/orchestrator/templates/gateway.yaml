@@ -39,7 +39,8 @@ spec:
                   name: {{ .Chart.Name }}-secrets
                   key: github-token
             - name: ALLOWED_REPO
-              value: {{ .Values.orchestrator.config.repo }}          resources:
+              value: {{ .Values.orchestrator.config.repo | quote }}
+          resources:
             requests:
               cpu: {{ .Values.orchestrator.config.cpuRequest | default "100m" }}
               memory: {{ .Values.orchestrator.config.memory | default "256Mi" }}
