@@ -23,9 +23,9 @@ orchestrator:
   memory: "2Gi"
   memoryLimit: "5Gi"
   # Config consumed by supervisor loop + coder-worker (single source of truth).
-  # The ALLOWED_REPO env on the gateway Deployment defaults to this repo.
+  # config.repo seeds the gateway's ALLOWED_REPO env. "*" means any repo is allowed.
   config:
-    repo: "UtopikLab/code-factory"
+    repo: "*"
     # In-cluster gateway DNS for the coder-worker's ACCEPTOR_URL. Defaults to the
     # gateway Service DNS (e.g. orchestrator-orchestrator-gateway.orchestrator.svc.cluster.local:8000).
     acceptor-url: "http://orchestrator-orchestrator-gateway.orchestrator.svc.cluster.local:8000"
