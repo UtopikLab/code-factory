@@ -138,6 +138,11 @@
                                 "type": "string"
                             }
                         },
+                        "gpuCount": {
+                            "type": "integer",
+                            "description": "Number of GPUs on the node (one replica per GPU). Caps the inference-server replica count so it never exceeds GPU capacity (prevents the pending/insufficient-GPU scheduling race).",
+                            "default": 2
+                        },
                         "resources": {
                             "type": "object",
                             "properties": {

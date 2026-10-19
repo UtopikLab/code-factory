@@ -1,0 +1,33 @@
+{{/*
+Inference server HPAs (llama.cpp, one per GPU).
+
+Complements deployments.yaml's `replicas: gpuCount` cap with a HorizontalPodAutoscaler
+so the Deployment can never scale *up* past available GPU capacity (belt-and-braces
+against the pending/insufficient-GPU scheduling race). Each HPA pins maxReplicas =
+gpuCount (one replica per GPU); minReplicas tracks the current replica count so a
+manual helm upgrade can't accidentally spawn extra gpu pods.
+*/}}
+{{- $ns := "inference" -}}
+{{- $inf := .Values.inference -}}
+{{- $gpuCount := $inf.gpuCount | default 2 -}}
+{{- range $idx, $cfg := $inf.configMaps }}
+---
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $cfg.name }}
+  namespace: {{ $ns }}
+  labels:
+    app: {{ $.Chart.Name | quote }}
+    component: {{ $.Release.Name | default "k8s-inference" | quote }}
+    app.kubernetes.io/component: inference-server
+    app.kubernetes.io/managed-by: Helm
+spec:
+  # Cap the pod count to available GPU capacity: one replica per GPU.
+  maxReplicas: {{ $gpuCount }}
+  minReplicas: 1
+  # Target a modest CPU utilization; the llama.cpp server idles ~30-50% CPU at rest
+  # and ~70% under load. Keep the target below the GPU-bound headroom.
+  cpuUtilization:
+    percentage: 70
+{{- end }}
