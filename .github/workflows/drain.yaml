@@ -9,8 +9,9 @@
 #
 # This workflow fires on an issue `opened` or `assigned` event and drives ONE
 # autonomous drain pass: it reads the issue, POSTs the task to the in-cluster
-# SUPERVISOR Service (the always-on orchestrator pod, port 8000), waits for
-# the PR, and the agent itself marks the issue `done`.
+# SUPERVISOR Service (the always-on orchestrator pod, port 8000), triggers
+# asynchronously, exits after task acceptance, and the agent itself marks the
+# issue `done`.
 #
 # There is NO separate always-on runner pod. Task acceptance is handled by the
 # long-running orchestrator Deployment, which already keeps a Service at
@@ -42,7 +43,7 @@ name: Autonomous drain loop
 
 on:
   issues:
-    types: [opened, reopened, assigned]
+    types: [opened, reopened, assigned, labeled]
 
 # Scoped permissions — NOT a free-for-all PAT. The workflow operates on the
 # implicit machine token GitHub issues these on; no RUNNER_TOKEN secret is
@@ -52,8 +53,13 @@ permissions:
   actions: write
   issues: write
 
+concurrency:
+  group: drain-${{ github.repository }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
 jobs:
   send-to-orchestrator:
+    if: ${{ github.event.action != 'labeled' && github.event.issue.pull_request == null }}
     runs-on: ubuntu-latest
 
     steps:
@@ -62,12 +68,11 @@ jobs:
         with:
           script: |
             const issue = context.issue;
-            await github.request('issues/${issue_number}/statuses', {
-              method: 'post',
-              data: {
-                state: "open",
-                description: `Autonomous drain pass for issue #${issue.number} (title: "${issue.title}").`,
-              },
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: `Autonomous drain pass started for issue #${issue.number} (title: "${context.payload.issue?.title || ""}").`,
             });
 
       - name: Check issue state
@@ -110,6 +115,7 @@ jobs:
           echo "issue-url=${{ github.event.issue.html_url }}" >> "$GITHUB_OUTPUT"
 
       - name: POST task to orchestrator
+        id: spawn
         # Ask the always-on orchestrator to run the autonomous drain pass for this
         # issue. The orchestrator accepts a task payload, runs the LangGraph drain
         # loop, opens a PR, and labels the issue `done`. Auth uses the built-in
@@ -141,66 +147,104 @@ jobs:
 
           echo "Spawn response: $RESPONSE"
 
-          # The orchestrator returns a Job UID; poll its status (see next step).
-          JOB_UID=$(echo "$RESPONSE" | jq -r '.uid // empty')
+          STATUS=$(echo "$RESPONSE" | jq -r '.status // empty')
+          TASK_ID=$(echo "$RESPONSE" | jq -r '.task_id // empty')
 
-          echo "JOB_UID=${JOB_UID}" >> "$GITHUB_OUTPUT"
+          if [ "$STATUS" != "accepted" ] || [ -z "$TASK_ID" ]; then
+            echo "ERROR: Orchestrator rejected task or returned empty task_id (status='${STATUS}', task_id='${TASK_ID}')"
+            exit 1
+          fi
 
-      - name: Wait for PR
-        # Wait until the agent opens its PR. The agent owns the loop; this just
-        # blocks until the PR is visible so the human gatekeeper can
-        # review/merge/reject. Uses the built-in $GITHUB_TOKEN (scoped by the
-        # workflow permissions) — no RUNNER_TOKEN secret reference.
-        run: |
-          set +e
-          REPO="${{ github.repository }}"
-          ISSUE_NUM="${{ github.event.issue.number }}"
-          deadline=$(( $(date +%s) + 3600 )) # 1h
-          while [ "$(date +%s)" -lt "$deadline" ]; do
-            PR_NUM=$(curl -fsS "${GITHUB_SERVER_URL}/api/v3/repos/${REPO}/pulls" \
-                      -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                      --data "{\"state\":\"open\",\"head\":{\"ref\":\"refs/heads/fix-${ISSUE_NUM}\",\"repo\":{\"owner\":{\"login\":\"${GITHUB_REPOSITORY_OWNER}\"},\"name\":\"${REPO#*/}\"}}}" \
-                      | jq -r '.[0].number // empty' 2>/dev/null)
-            if [ -n "$PR_NUM" ]; then
-              echo "PR #$PR_NUM opened for issue #$ISSUE_NUM — awaiting human review."
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "Timed out waiting for PR; the agent will report final state."
-          exit 1
+          echo "task-id=${TASK_ID}" >> "$GITHUB_OUTPUT"
 
-      - name: Comment on issue
-        if: always()
+      - name: Mark issue queued
         uses: actions/github-script@v7
         with:
           script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.issue.number;
+            const labelName = "queued";
+
             try {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: `🤖 Autonomous drain pass triggered by issue #${{ github.event.issue.number }}. ` +
-                      (process.exitCode === 0 ? 'PR opened — awaiting your review.' : 'No PR opened — see the job logs for details.')
+              await github.rest.issues.getLabel({
+                owner,
+                repo,
+                name: labelName,
               });
             } catch (e) {
-              core.setFailed(e.message);
+              if (e.status === 404) {
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name: labelName,
+                  color: "0e8a16",
+                  description: "Task accepted by orchestrator and queued",
+                });
+              } else {
+                throw e;
+              }
             }
+
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number,
+              labels: [labelName],
+            });
 
       - name: Set drain status
         if: always()
         uses: actions/github-script@v7
         with:
           script: |
-            const issue = context.issue;
-            const ok = process.exitCode === 0;
-            const description = `🤖 Autonomous drain pass for issue #${issue.number}: ` +
-              (ok ? 'PR opened — awaiting your review.' : 'FAILED — see the job logs for details.');
-            await github.request('issues/${issue_number}/statuses', {
-              method: 'post',
-              data: {
-                state: ok ? "completed" : "open",
-                target_url: issue.html_url,
-                description,
-              },
+            const ok = "${{ job.status }}" === "success";
+            const taskId = "${{ steps.spawn.outputs.task-id }}";
+            const body = ok
+              ? `Task accepted and queued (task_id=${taskId}). Execution continues asynchronously in-cluster; a PR is opened later when the agent has a meaningful patch.`
+              : "FAILED before queueing — see workflow logs.";
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+  cleanup-queued-on-done:
+    if: ${{ github.event.action == 'labeled' && github.event.label.name == 'done' && github.event.issue.pull_request == null }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Remove queued label after done
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.issue.number;
+
+            const { data: labels } = await github.rest.issues.listLabelsOnIssue({
+              owner,
+              repo,
+              issue_number,
+            });
+
+            const hasQueued = labels.some((l) => l.name === "queued");
+            if (!hasQueued) {
+              core.info(`Issue #${issue_number} does not have 'queued'; nothing to remove.`);
+              return;
+            }
+
+            await github.rest.issues.removeLabel({
+              owner,
+              repo,
+              issue_number,
+              name: "queued",
+            });
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number,
+              body: "Removed `queued` after `done` was applied.",
             });

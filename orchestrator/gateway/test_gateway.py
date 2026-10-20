@@ -80,3 +80,41 @@ def test_multi_repo_whitelist():
     assert _repo_allowed("org/a", allowed) is True
     assert _repo_allowed("org/b", allowed) is True
     assert _repo_allowed("org/c", allowed) is False
+
+
+# --------------------------------------------------------------------------- #
+# External payload detection + Job name helper
+# --------------------------------------------------------------------------- #
+
+
+def test_external_workflow_payload_detected():
+    payload = {
+        "name": "workflow_dispatch",
+        "ref": "refs/heads/main",
+        "payload": {"issue_number": 123},
+    }
+    assert server._is_external_workflow_payload(payload) is True
+
+
+def test_worker_internal_payload_is_not_external():
+    payload = {
+        "worker_id": "worker-1",
+        "payload": {"issue_number": 123},
+    }
+    assert server._is_external_workflow_payload(payload) is False
+
+
+def test_payload_missing_required_external_fields_is_not_external():
+    payload = {"payload": {"issue_number": 123}}
+    assert server._is_external_workflow_payload(payload) is False
+
+
+def test_build_worker_job_name_sanitized_and_limited(monkeypatch):
+    monkeypatch.setattr(server.time, "time", lambda: 1700000000)
+    name = server._build_worker_job_name("Task ID With Spaces_and_SYMBOLS___" + ("x" * 80))
+
+    assert name.startswith("orchestrator-worker-")
+    assert name.endswith("-1700000000")
+    assert len(name) <= 63
+    assert "_" not in name
+    assert " " not in name
