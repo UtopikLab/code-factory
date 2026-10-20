@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import os
@@ -124,7 +125,19 @@ def _k8s_request(method, path, body=None):
         raise
 
 
-def _clone_job_from_template(template_job, namespace, job_name, task_id):
+def _validate_assigned_task_id(task_id):
+    if type(task_id) is int and task_id >= 0:
+        task_id = str(task_id)
+    if (
+        not isinstance(task_id, str)
+        or task_id == "unknown"
+        or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?", task_id)
+    ):
+        raise ValueError("invalid-assigned-task-id")
+    return task_id
+
+
+def _clone_job_from_template(template_job, namespace, job_name, task_id, payload=None):
     template_spec = template_job.get("spec", {})
     source_labels = template_job.get("metadata", {}).get("labels", {}) or {}
     labels = dict(source_labels)
@@ -147,6 +160,19 @@ def _clone_job_from_template(template_job, namespace, job_name, task_id):
     pod_template = dict(pod_template)
     pod_template["metadata"] = pod_meta
 
+    if payload is not None:
+        assigned_id = _validate_assigned_task_id(task_id)
+        pod_spec = copy.deepcopy(pod_template.get("spec", {}))
+        coder = next(container for container in pod_spec.get("containers", []) if container["name"] == "coder")
+        coder["env"] = [
+            entry for entry in coder.get("env", [])
+            if entry["name"] not in ("ASSIGNED_TASK_ID", "ASSIGNED_TASK_PAYLOAD")
+        ] + [
+            {"name": "ASSIGNED_TASK_ID", "value": assigned_id},
+            {"name": "ASSIGNED_TASK_PAYLOAD", "value": json.dumps(payload)},
+        ]
+        pod_template["spec"] = pod_spec
+
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -156,19 +182,19 @@ def _clone_job_from_template(template_job, namespace, job_name, task_id):
             "labels": labels,
         },
         "spec": {
-            "parallelism": template_spec.get("parallelism"),
-            "completions": template_spec.get("completions"),
-            "backoffLimit": template_spec.get("backoffLimit"),
+            "parallelism": 1 if payload is not None else template_spec.get("parallelism"),
+            "completions": 1 if payload is not None else template_spec.get("completions"),
+            "backoffLimit": 0 if payload is not None else template_spec.get("backoffLimit"),
             "template": pod_template,
         },
     }
 
 
-def _create_worker_job(namespace, template_name, task_id):
+def _create_worker_job(namespace, template_name, task_id, payload):
     template_path = f"/apis/batch/v1/namespaces/{namespace}/jobs/{template_name}"
     template_job = _k8s_request("GET", template_path)
     job_name = _build_worker_job_name(task_id)
-    new_job = _clone_job_from_template(template_job, namespace, job_name, task_id)
+    new_job = _clone_job_from_template(template_job, namespace, job_name, task_id, payload)
     create_path = f"/apis/batch/v1/namespaces/{namespace}/jobs"
     created = _k8s_request("POST", create_path, body=new_job)
     return {
@@ -275,6 +301,23 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b'{"error":"invalid-json"}')
             return
 
+        if not isinstance(payload, dict) or not isinstance(payload.get("payload", {}), dict):
+            self._post_record(400)
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b'{"error":"invalid-payload"}')
+            return
+
+        if _is_external_workflow_payload(payload):
+            try:
+                _validate_assigned_task_id(payload.get("task_id", payload["payload"]["issue_number"]))
+            except ValueError:
+                self._post_record(400)
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b'{"error":"invalid-assigned-task-id"}')
+                return
+
         repo = payload.get("repo") or payload.get("payload", {}).get("repo")
         if repo and ALLOWED_REPOS is not None and repo not in ALLOWED_REPOS:
             logger.warning("repo-not-allowed: repo=%r", repo)
@@ -286,15 +329,15 @@ class Handler(BaseHTTPRequestHandler):
 
         response = {
             "status": "accepted",
-            "task_id": payload.get("task_id") or payload.get("payload", {}).get("issue_number") or "unknown",
+            "task_id": payload.get("task_id", payload.get("payload", {}).get("issue_number", "unknown")),
             "repo": repo or ALLOWED_REPOS_RAW,
             "endpoint": "/api/v1/tasks/spawn",
         }
 
         if _is_external_workflow_payload(payload):
             try:
-                job_info = _create_worker_job(POD_NAMESPACE, WORKER_JOB_TEMPLATE, response["task_id"])
-            except (OSError, ValueError, KeyError, RuntimeError, urllib.error.URLError):
+                job_info = _create_worker_job(POD_NAMESPACE, WORKER_JOB_TEMPLATE, response["task_id"], payload)
+            except (OSError, ValueError, KeyError, RuntimeError, StopIteration, urllib.error.URLError):
                 logger.exception("job-create-failed task_id=%r", response["task_id"])
                 self._post_record(500)
                 self.send_response(500)

@@ -14,6 +14,10 @@ self-reviews them via the OpenAI judge model, and returns the evaluation JSON:
 CPU-only: no torch / transformers / langchain-openai. The OpenAI client (openai)
 is used for judging and falls back to a heuristic self-review when the API key
 is missing.
+
+Gateway-assigned Jobs provide ASSIGNED_TASK_ID and ASSIGNED_TASK_PAYLOAD (JSON).
+They execute explicit edits directly without spawning or polling another task.
+Issue-only payloads are unsupported: issue-to-code/PR execution is not implemented.
 """
 
 import asyncio
@@ -21,10 +25,12 @@ import http
 import json
 import logging
 import os
+import re
 import sys
 import time
 
 import httpx
+import openai
 from prometheus_client import Counter, Gauge, Histogram
 
 logging.basicConfig(
@@ -66,7 +72,6 @@ async def _record_worker_metrics(task_id: str, final: dict, changed: int, job_st
     EVAL_SCORE.set(final.get("score", 0) or 0)
     JOB_DURATION.observe(time.monotonic() - job_start)
     LAST_STATUS.labels(status=status).set(1)
-    ACTIVE_JOBS.dec()
 # Result helpers
 # --------------------------------------------------------------------------- #
 
@@ -147,7 +152,8 @@ def _extract_edits(payload: dict) -> list[dict]:
         value = payload.get(key)
         if isinstance(value, list):
             return value
-    return []
+    nested = payload.get("payload")
+    return _extract_edits(nested) if isinstance(nested, dict) else []
 
 
 # --------------------------------------------------------------------------- #
@@ -160,15 +166,21 @@ async def judge_review(client, patch: str, output: str) -> tuple[float, str]:
         return (0.7, "No OpenAI API key available; self-review omitted. Changes applied deterministically.")
 
     try:
-        response = client.chat.completions.create(
-            model=os.environ.get("JUDGE_MODEL", DEFAULT_JUDGE_MODEL),
-            messages=[
-                {"role": "system", "content": "You are a code reviewer for autonomous coding agents."},
-                {"role": "user", "content": f"Review the following code changes:\n\n{patch}"},
-            ],
-            temperature=0.1,
-            max_tokens=512,
-        )
+        async with openai.AsyncOpenAI(
+            api_key=os.environ["OPENAI_API_KEY"],
+            base_url=os.environ.get("JUDGE_URL") or None,
+            timeout=HTTP_TIMEOUT,
+            max_retries=0,
+        ) as judge_client:
+            response = await judge_client.chat.completions.create(
+                model=os.environ.get("JUDGE_MODEL", DEFAULT_JUDGE_MODEL),
+                messages=[
+                    {"role": "system", "content": "You are a code reviewer for autonomous coding agents."},
+                    {"role": "user", "content": f"Review the following code changes:\n\n{patch}"},
+                ],
+                temperature=0.1,
+                max_tokens=512,
+            )
         content = response.choices[0].message.content or ""
         try:
             data = json.loads(content)
@@ -178,7 +190,7 @@ async def judge_review(client, patch: str, output: str) -> tuple[float, str]:
             return (score, review)
         except (json.JSONDecodeError, ValueError, TypeError):
             return (0.5, content)
-    except httpx.TimeoutException as exc:
+    except (httpx.TimeoutException, openai.APITimeoutError) as exc:
         logger.warning("Judge request timed out: %s", exc)
         return (0.0, "Judge request timed out; self-review omitted.")
     except Exception as exc:  # noqa: BLE001
@@ -193,6 +205,8 @@ async def judge_review(client, patch: str, output: str) -> tuple[float, str]:
 def _extract_task_id(body: bytes) -> str:
     try:
         data = json.loads(body)
+        if not isinstance(data, dict):
+            return ""
         for key in ("task_id", "id"):
             value = data.get(key)
             if isinstance(value, str) and value:
@@ -208,14 +222,97 @@ async def run_worker(
     acceptor_url: str,
     worker_id: str,
     spawn_payload: dict | None,
+    assigned_task_id: str | None = None,
 ) -> dict:
-    client = httpx.AsyncClient(timeout=HTTP_TIMEOUT)
+    if assigned_task_id is not None:
+        assigned_task_id = _validate_assigned_task(assigned_task_id, spawn_payload)
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        return await _run_worker(client, acceptor_url, worker_id, spawn_payload, assigned_task_id)
+
+
+def _validate_assigned_task(task_id, payload) -> str:
+    if type(task_id) is int and task_id >= 0:
+        task_id = str(task_id)
+    if (
+        not isinstance(task_id, str)
+        or task_id == "unknown"
+        or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?", task_id)
+    ):
+        raise ValueError("invalid-assigned-task-id")
+    if not isinstance(payload, dict) or not payload or not isinstance(payload.get("payload", {}), dict):
+        raise ValueError("invalid-assigned-task-payload")
+    payload_id = payload.get("task_id", payload.get("payload", {}).get("issue_number"))
+    if payload_id is not None and str(payload_id) != task_id:
+        raise ValueError("assigned-task-id-mismatch")
+    return task_id
+
+
+async def _run_worker(
+    client: httpx.AsyncClient,
+    acceptor_url: str,
+    worker_id: str,
+    spawn_payload: dict | None,
+    assigned_task_id: str | None,
+) -> dict:
     github_token = os.environ.get("GITHUB_TOKEN", "")
     headers = {
         "Authorization": f"token {github_token}",
         "Content-Type": "application/json",
     }
-    job_start = time.time()
+    job_start = time.monotonic()
+    ACTIVE_JOBS.inc()
+    try:
+        return await _execute_task(client, headers, acceptor_url, worker_id, spawn_payload, assigned_task_id, job_start)
+    finally:
+        ACTIVE_JOBS.dec()
+
+
+async def _execute_task(client, headers, acceptor_url, worker_id, spawn_payload, assigned_task_id, job_start):
+    if assigned_task_id is not None:
+        task_id = assigned_task_id
+        logger.info("Task assigned: %s", task_id)
+    else:
+        task_id = await _spawn_and_poll(client, headers, acceptor_url, worker_id, spawn_payload)
+        if isinstance(task_id, dict):
+            return task_id
+
+    payload = spawn_payload or {}
+    edits = _extract_edits(payload)
+    if assigned_task_id is not None and not edits:
+        final = {
+            **_failure_result(task_id, "Unsupported task: explicit file edits required; issue-to-code/PR execution is not implemented."),
+            "status": "unsupported", "score": 0.0,
+        }
+        await _report_result(client, headers, acceptor_url, task_id, final)
+        await _record_worker_metrics(task_id, final, 0, job_start)
+        return final
+
+    editor = CodeEditor(os.environ.get("TASK_WORK_DIR", "/data/task-work"))
+    output, changed, contents, patch = "", [], [], ""
+    if not edits:
+        logger.info("No files to edit in payload; no changes required.")
+        output = "No changes required."
+    else:
+        output, changed, contents = editor.apply_edits(edits)
+        patch = render_patch(changed, contents)
+
+    score, review = await judge_review(client, patch or output, output)
+    logger.info("Worker score: %s", score)
+    final = {
+        "task_id": task_id,
+        "output": output,
+        "patch": patch,
+        "score": score,
+        "review": review,
+    }
+    if assigned_task_id is not None and len(changed) != len(edits):
+        final.update(status="failed", error="Not all assigned edits could be applied.", score=0.0)
+    await _report_result(client, headers, acceptor_url, task_id, final)
+    await _record_worker_metrics(task_id, final, len(changed), job_start)
+    return final
+
+
+async def _spawn_and_poll(client, headers, acceptor_url, worker_id, spawn_payload):
 
     # 1) spawn
     spawn_resp = await client.post(
@@ -255,33 +352,7 @@ async def run_worker(
         result = _failure_result(task_id, "Poll timed out before result was ready.")
         return result
 
-    # 3) perform code changes
-    editor = CodeEditor(os.environ.get("TASK_WORK_DIR", "/data/task-work"))
-    payload = spawn_payload or {}
-    edits = _extract_edits(payload)
-    output, changed, contents, patch = "", [], [], ""
-    if not edits:
-        logger.info("No files to edit in payload; no changes required.")
-        output = "No changes required."
-    else:
-        output, changed, contents = editor.apply_edits(edits)
-        patch = render_patch(changed, contents)
-
-    # 4) judge
-    score, review = await judge_review(client, patch or output, output)
-    logger.info("Worker score: %s", score)
-
-    # 5) report
-    final = {
-        "task_id": task_id,
-        "output": output,
-        "patch": patch,
-        "score": score,
-        "review": review,
-    }
-    await _report_result(client, headers, acceptor_url, task_id, final)
-    await _record_worker_metrics(task_id, final, len(changed), job_start)
-    return final
+    return task_id
 
 
 async def _report_result(
@@ -324,7 +395,21 @@ async def main_async(
     acceptor_url = acceptor_url or os.environ.get("ACCEPTOR_URL", DEFAULT_ACCEPTOR_URL)
     worker_id = worker_id or os.environ.get("WORKER_ID", "worker")
     logger.info("Worker %s starting; acceptor=%s", worker_id, acceptor_url)
-    final = await run_worker(acceptor_url, worker_id, spawn_payload or {})
+    assigned_task_id = os.environ.get("ASSIGNED_TASK_ID")
+    assigned_payload = os.environ.get("ASSIGNED_TASK_PAYLOAD")
+    if assigned_task_id is not None or assigned_payload is not None:
+        if assigned_task_id is None or assigned_payload is None:
+            raise ValueError("assigned-task-id-and-payload-required")
+        if spawn_payload is not None:
+            raise ValueError("assigned-task-payload-conflict")
+        try:
+            spawn_payload = json.loads(assigned_payload)
+        except json.JSONDecodeError as exc:
+            raise ValueError("invalid-assigned-task-json") from exc
+        assigned_task_id = _validate_assigned_task(assigned_task_id, spawn_payload)
+        final = await run_worker(acceptor_url, worker_id, spawn_payload, assigned_task_id=assigned_task_id)
+    else:
+        final = await run_worker(acceptor_url, worker_id, spawn_payload or {})
     logger.info("Worker finished with result: %s", final)
     return final
 
@@ -332,7 +417,9 @@ async def main_async(
 if __name__ == "__main__":
     args = sys.argv[1:]
     if "--worker" in args or not args:
-        asyncio.run(main_async())
+        result = asyncio.run(main_async())
+        if result.get("error"):
+            sys.exit(1)
     elif "--serve" in args:
         asyncio.run(serve_healthz())
     else:

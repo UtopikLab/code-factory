@@ -6,7 +6,10 @@ which are deterministic and do not require a running HTTP server.
 """
 
 import copy
+import io
+import json
 import os
+from unittest.mock import Mock
 
 import pytest
 import server
@@ -150,3 +153,54 @@ def test_clone_job_strips_generated_labels(label_location):
         "component": "worker-pod", **expected_labels,
     }
     assert template == original
+
+
+def test_clone_job_passes_assigned_payload_to_one_worker():
+    payload = {
+        "name": "workflow_dispatch", "ref": "refs/heads/main", "repo": "org/repo",
+        "payload": {"issue_number": 2, "edits": [{"path": "a.py", "content": "x=1"}]},
+    }
+    template = {
+        "spec": {
+            "parallelism": 2, "completions": 8, "backoffLimit": 4,
+            "template": {"spec": {"containers": [{
+                "name": "coder", "env": [{"name": "GITHUB_TOKEN", "valueFrom": {
+                    "secretKeyRef": {"name": "secrets", "key": "github-token"},
+                }}],
+            }]}},
+        },
+    }
+    original = copy.deepcopy(template)
+    cloned = server._clone_job_from_template(template, "orchestrator", "new-job", 2, payload)
+    spec = cloned["spec"]
+    assert (spec["parallelism"], spec["completions"], spec["backoffLimit"]) == (1, 1, 0)
+    env = spec["template"]["spec"]["containers"][0]["env"]
+    assert env[0] == original["spec"]["template"]["spec"]["containers"][0]["env"][0]
+    values = {entry["name"]: entry.get("value") for entry in env}
+    assert values["ASSIGNED_TASK_ID"] == "2"
+    assert json.loads(values["ASSIGNED_TASK_PAYLOAD"]) == payload
+    assert template == original
+
+
+@pytest.mark.parametrize("payload", [
+    [], None, {"payload": []}, {"payload": None},
+    {"name": "orchestrator-agent", "ref": "main", "payload": {"issue_number": None}},
+    {"name": "orchestrator-agent", "ref": "main", "payload": {"issue_number": True}},
+    {"name": "orchestrator-agent", "ref": "main", "payload": {"issue_number": "unknown"}},
+    {"name": "orchestrator-agent", "ref": "main", "payload": {"issue_number": "../2"}},
+    {"name": "orchestrator-agent", "ref": "main", "task_id": "", "payload": {"issue_number": 2}},
+])
+def test_gateway_rejects_malformed_assignment_before_job_creation(monkeypatch, payload):
+    create = Mock(side_effect=AssertionError("No cluster calls expected"))
+    monkeypatch.setattr(server, "_create_worker_job", create)
+    monkeypatch.setattr(server, "TOKEN", "test-token")
+    body = json.dumps(payload).encode()
+    handler = server.Handler.__new__(server.Handler)
+    handler.headers = {"Authorization": "token test-token", "Content-Length": str(len(body))}
+    handler.path = "/api/v1/tasks/spawn"
+    handler.rfile, handler.wfile = io.BytesIO(body), io.BytesIO()
+    handler.send_response, handler.send_header, handler.end_headers = Mock(), Mock(), Mock()
+    handler.do_POST()
+    handler.send_response.assert_called_once_with(400)
+    assert "error" in json.loads(handler.wfile.getvalue())
+    create.assert_not_called()

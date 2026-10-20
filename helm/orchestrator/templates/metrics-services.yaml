@@ -16,7 +16,7 @@ spec:
   ports:
     - name: metrics
       port: {{ .Values.metrics.port }}
-      targetPort: metrics
+      targetPort: gateway
       nodePort: {{ .Values.metrics.external.gatewayNodePort }}
 
 ---

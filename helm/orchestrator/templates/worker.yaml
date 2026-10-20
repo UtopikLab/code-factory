@@ -73,6 +73,16 @@ spec:
                 configMapKeyRef:
                   name: {{ .Chart.Name }}-config
                   key: acceptor-url
+            - name: JUDGE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Chart.Name }}-config
+                  key: judge-url
+            - name: JUDGE_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Chart.Name }}-config
+                  key: judge-model
           resources:
             requests:
               cpu: {{ .Values.supervisor.config.cpuRequest | default "500m" }}
