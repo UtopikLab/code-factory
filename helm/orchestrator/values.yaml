@@ -86,3 +86,14 @@ imagePullSecrets:
 # The `orchestrator-config` ConfigMap key/values consumed by the supervisor
 # loop and the task-acceptor. Mirrors the parent chart's orchestrator.config.
 # Shared by the supervisor loop and the coder-worker Job.
+
+# --- Observability / Prometheus (port-scraping) ---
+# Metrics are exposed on :9000 (prometheus_client /metrics) on every component
+# (gateway, supervisor, worker). No second Prometheus/Grafana stack is added;
+# this chart only publishes the metrics port + ServiceMonitor so the parent
+# stack's Prometheus (truenas.utopiklab.lan:9090) can scrape them. All metrics
+# are prefixed `cfe_`.
+metrics:
+  enabled: true
+  serviceMonitor: true
+  port: 9000

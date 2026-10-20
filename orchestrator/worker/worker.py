@@ -22,8 +22,10 @@ import json
 import logging
 import os
 import sys
+import time
 
 import httpx
+from prometheus_client import Counter, Gauge, Histogram
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,8 +38,35 @@ DEFAULT_JUDGE_MODEL = "qwen2.5-coder-7b-instruct-q4-km@32k"
 HTTP_TIMEOUT = 30.0
 POLL_TIMEOUT = 1800.0
 
-
 # --------------------------------------------------------------------------- #
+# Metrics
+# --------------------------------------------------------------------------- #
+# Application-level observability for the coder worker sidecar. Scraped by the
+# central Prometheus server on port 9000 (kept-vs-defer: no second stack).
+#   * worker_tasks_total  — counter of tasks run, labelled by status
+#   * worker_code_changes_total  — counter of code changes applied
+#   * worker_evaluation_score  — gauge of the last evaluation score
+#   * worker_job_duration_seconds  — histogram of job duration
+#   * worker_last_status  — gauge of the last task status string
+#   * worker_active_jobs  — gauge of in-flight jobs
+# --------------------------------------------------------------------------- #
+TASKS = Counter("worker_tasks_total", "Total tasks run by the worker, by status.", ["status"])
+CODE_CHANGES = Counter("worker_code_changes_total", "Total code changes applied across all tasks.")
+EVAL_SCORE = Gauge("worker_evaluation_score", "Last evaluation score produced by the worker.")
+JOB_DURATION = Histogram("worker_job_duration_seconds", "Duration in seconds of a single worker job.")
+LAST_STATUS = Gauge("worker_last_status", "Status string of the most recent task.")
+ACTIVE_JOBS = Gauge("worker_active_jobs", "Number of jobs currently in-flight.")
+
+
+async def _record_worker_metrics(task_id: str, final: dict, changed: int, job_start: float) -> None:
+    """Record the coder worker's per-task metrics (see §Metrics above)."""
+    status = final.get("status", "success")
+    TASKS.labels(status=status).inc()
+    CODE_CHANGES.inc(changed)
+    EVAL_SCORE.set(final.get("score", 0) or 0)
+    JOB_DURATION.observe(time.monotonic() - job_start)
+    LAST_STATUS.set(status)
+    ACTIVE_JOBS.dec()
 # Result helpers
 # --------------------------------------------------------------------------- #
 
@@ -185,6 +214,7 @@ async def run_worker(
         "Authorization": f"token {github_token}",
         "Content-Type": "application/json",
     }
+    job_start = time.time()
 
     # 1) spawn
     spawn_resp = await client.post(
@@ -249,6 +279,7 @@ async def run_worker(
         "review": review,
     }
     await _report_result(client, headers, acceptor_url, task_id, final)
+    _record_worker_metrics(task_id, final, len(changed), job_start)
     return final
 
 

@@ -1,3 +1,4 @@
-# The task-acceptor gateway is a pure-stdlib HTTP acceptor (no pip installs),
-# so there are no Python dependencies to declare here.
-# Kept for parity with the former gateway release chart's requirements.txt.
+# The task-acceptor gateway serves HTTP (stdlib http.server) + Prometheus
+# /metrics (prometheus_client). The HTTP acceptor itself needs no pip installs,
+# but prometheus_client is required for the cfe_-prefixed metrics exported on :9000.
+prometheus-client>=0.21,<0.23

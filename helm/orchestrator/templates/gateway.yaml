@@ -32,6 +32,8 @@ spec:
           ports:
             - name: gateway
               containerPort: 8000
+            - name: metrics
+              containerPort: 9000
           env:
             - name: GITHUB_TOKEN
               valueFrom:
@@ -47,6 +49,17 @@ spec:
             limits:
               cpu: {{ .Values.gateway.config.cpuLimit | default "250m" }}
               memory: {{ .Values.gateway.config.memoryLimit | default "512Mi" }}
+          probes:
+            - name: readiness
+              httpGet:
+                path: /healthz
+                port: gateway
+              periodSeconds: 10
+            - name: liveness
+              httpGet:
+                path: /
+                port: gateway
+              periodSeconds: 15
       imagePullSecrets:
         - name: ghcr-secret
 ---

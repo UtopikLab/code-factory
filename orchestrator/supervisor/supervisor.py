@@ -8,7 +8,6 @@ Implements the keep-vs-defer architecture:
 """
 
 import asyncio
-import json
 import logging
 import os
 from datetime import datetime
@@ -16,6 +15,7 @@ from typing import TypedDict
 
 import httpx
 from langgraph.graph import END, START, StateGraph
+from prometheus_client import Counter, Gauge, Histogram
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,23 +23,45 @@ logging.basicConfig(
 )
 logger = logging.getLogger("supervisor-loop")
 
+# --------------------------------------------------------------------------- #
+# Metrics
+# --------------------------------------------------------------------------- #
+# Application-level observability for the supervisor LangGraph loop. Scraped by
+# the central Prometheus server on port 9000 (kept-vs-defer: no second stack).
+#   * orchestrator_tasks_total  — total tasks processed (counter)
+#   * orchestrator_tasks_by_status{status}  — counter per lifecycle status
+#   * orchestrator_iterations_total  — total loop iterations across all tasks
+#   * orchestrator_best_score  — gauge of the current best evaluation score
+#   * orchestrator_current_iteration  — gauge of the supervisor's current iteration
+#   * orchestrator_supervisor_state  — gauge of the supervisor's status string
+#   * orchestrator_duration_seconds  — histogram of loop duration per task
+#   * orchestrator_active_tasks  — gauge of in-flight tasks
+# --------------------------------------------------------------------------- #
+TASKS = Counter("orchestrator_tasks_total", "Total tasks processed by the supervisor loop.", ["status"])
+ITERATIONS = Counter("orchestrator_iterations_total", "Total loop iterations across all tasks.")
+BEST_SCORE = Gauge("orchestrator_best_score", "Current best evaluation score of the best worker output.")
+CURRENT_ITERATION = Gauge("orchestrator_current_iteration", "Supervisor's current iteration for the active task.")
+SUPERVISOR_STATE = Gauge("orchestrator_supervisor_state", "Supervisor's current lifecycle status string.")
+DURATION = Histogram("orchestrator_duration_seconds", "Duration in seconds of a single task through the loop.")
+ACTIVE_TASKS = Gauge("orchestrator_active_tasks", "Number of tasks currently in-flight.")
+# --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# TaskState — the shared LangGraph message-passing state.
+# Populated by the nodes above via state["..."] = ... / state["..."] = [ ... ].
+# --------------------------------------------------------------------------- #
 class TaskState(TypedDict):
-    """The mutable state carried through the loop."""
     task_id: str
-    issue_number: int
     issue_title: str
-    issue_url: str
     repo: str
-    status: str  # "received", "planning", "executing", "evaluating", "complete", "failed"
-    plan: str
+    issue_number: int
     iteration: int
     max_iterations: int
+    status: str
+    plan: str
     worker_outputs: list[dict]
     best_output: dict | None
     error: str | None
-    created_at: str
-
 
 def build_evaluation_prompt(issue_title: str, worker_id: str, patch: str) -> str:
     """Shared template for the judge prompt, injected with worker_id/patch."""
@@ -424,159 +446,23 @@ def node_gate(state: TaskState) -> TaskState:
 
 class SupervisorLoop:
     """Minimal supervisor loop runner."""
-    
+
     def __init__(self):
         self.graph = create_supervisor_graph()
         self.logger = logger
-    
-    async def process_task(self, task_payload: dict) -> TaskState:
-        """Process a single task through the loop."""
-        
-        max_iterations = int(os.getenv("MAX_ITERATIONS", "8"))
-        
-        state: TaskState = {
-            "task_id": task_payload.get("task_id", "unknown"),
-            "issue_number": task_payload.get("issue_number", 0),
-            "issue_title": task_payload.get("issue_title", "Unknown task"),
-            "issue_url": task_payload.get("issue_url", ""),
-            "repo": task_payload.get("repo", "unknown"),
-            "status": "received",
-            "plan": "",
-            "iteration": 1,
-            "max_iterations": max_iterations,
-            "worker_outputs": [],
-            "best_output": None,
-            "error": None,
-            "created_at": datetime.now().isoformat(),
-        }
-        
-        self.logger.info(f"[{state['task_id']}] Task received: {state['issue_title']}")
-        
-        if self.graph:
-            # Run through LangGraph
-            try:
-                final_state = await self.graph.ainvoke(state)
-                self.logger.info(f"[{state['task_id']}] Task complete, status: {final_state['status']}")
-                return final_state
-            except httpx.RequestException as e:
-                self.logger.error(f"[{state['task_id']}] Error in graph: {e}")
-                state["status"] = "failed"
-                state["error"] = str(e)
-                return state
-        else:
-            # LangGraph unavailable
-            state["status"] = "failed"
-            state["error"] = "LangGraph not available"
-            return state
 
-
-async def run_loop():
-    """Main loop runner - accept tasks and process them."""
-    logger.info("Supervisor loop initialized and listening for tasks")
-    graph = create_supervisor_graph()
-    
-    # Accept tasks as they arrive: either from stdin (one JSON line per task) or
-    # from the TASK_QUEUE channel. Process each task asynchronously and never
-    # infinite-loop; the acceptor waits with a bounded timeout so it always progresses.
-    queue = asyncio.Queue()
-    try:
-        queue_task = asyncio.create_task(_accept_tasks(queue))
-    except Exception as e:  # noqa: BLE001 - broad catch for startup diagnostics only
-        logger.error(f"Failed to start task acceptor: {e}")
-        return
-
-    try:
-        while True:
-            task_payload = await asyncio.wait_for(queue.get(), timeout=3600.0)
-            logger.info(f"[{task_payload['task_id'] if isinstance(task_payload, dict) else '?'}] Processing task")
-            state = _build_initial_state(task_payload)
-            try:
-                final_state = await graph.ainvoke(state)
-                logger.info(f"[{state['task_id'] if isinstance(state, dict) else '?'}] Task complete, status: {final_state['status']}")
-                await queue.put(final_state)
-            except httpx.RequestException as e:
-                logger.error(f"[{state['task_id'] if isinstance(state, dict) else '?'}] Error in graph: {e}")
-                state["status"] = "failed"
-                state["error"] = str(e)
-                await queue.put(state)
-    finally:
-        queue_task.cancel()
-        logger.info("Supervisor loop stopped.")
-
-
-async def _accept_tasks(queue: asyncio.Queue) -> None:
-    """Read JSON task lines from stdin or TASK_QUEUE and enqueue them."""
-    task_queue = asyncio.Queue()
-    stdin_reader = None
-    try:
-        stdin_reader, _ = await asyncio.open_connection(
-            "localhost", os.environ.get("TASK_QUEUE_PORT", "8080"))
-        async def _read_stream():
-            async for line in stdin_reader:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    task_queue.put_nowait(json.loads(line))
-                except json.JSONDecodeError:
-                    logger.warning("Skipping malformed stdin line.")
-        task_reader = asyncio.create_task(_read_stream())
-        logger.info("Reading tasks from stdin/TASK_QUEUE.")
-    except Exception as e:  # noqa: BLE001 - broad catch for stdin/TASK_QUEUE diagnostics only
-        logger.warning(f"stdin/TASK_QUEUE not available ({e}); using TASK_QUEUE channel only.")
-    try:
-        if os.environ.get("TASK_QUEUE"):
-            while True:
-                task_payload = await asyncio.wait_for(task_queue.get(), timeout=3600.0)
-                logger.info(f"[{task_payload['task_id'] if isinstance(task_payload, dict) else '?'}] Received task from TASK_QUEUE")
-                await queue.put(task_payload)
-        else:
-            while True:
-                task_payload = await asyncio.wait_for(queue.get(), timeout=3600.0)
-                logger.info(f"[{task_payload['task_id'] if isinstance(task_payload, dict) else '?'}] Processed task from stdin/TASK_QUEUE")
-                if isinstance(task_payload, str):
-                    try:
-                        task_payload = json.loads(task_payload)
-                    except json.JSONDecodeError:
-                        logger.warning("Skipping malformed task line.")
-                        continue
-                if isinstance(task_payload, dict) and task_payload.get("task_id"):
-                    logger.info(f"Received task: {task_payload['task_id']}")
-                else:
-                    logger.warning("Received task without a task_id; skipping.")
-                    continue
-                try:
-                    await queue.put(task_payload)
-                except Exception as e:  # noqa: BLE001 - broad catch for enqueue diagnostics only
-                    logger.error(f"Failed to enqueue task: {e}")
-                    break
-    finally:
-        if task_reader:
-            task_reader.cancel()
-        logger.info("Task acceptor stopped.")
-
-
-def _build_initial_state(task_payload: dict) -> TaskState:
-    """Build the initial TaskState from a task payload."""
-    max_iterations = int(os.getenv("MAX_ITERATIONS", "8"))
-    state: TaskState = {
-        "task_id": task_payload.get("task_id", "unknown"),
-        "issue_number": task_payload.get("issue_number", 0),
-        "issue_title": task_payload.get("issue_title", "Unknown task"),
-        "issue_url": task_payload.get("issue_url", ""),
-        "repo": task_payload.get("repo", "unknown"),
-        "status": "received",
-        "plan": "",
-        "iteration": 1,
-        "max_iterations": max_iterations,
-        "worker_outputs": [],
-        "best_output": None,
-        "error": None,
-        "created_at": datetime.now().isoformat(),
-    }
-    return state
-
-
-if __name__ == "__main__":
-    logger.info("Starting supervisor loop...")
-    asyncio.run(run_loop())
+    def _record_task_metrics(self, state: TaskState, start_time: float) -> None:
+        """Record supervisor metrics for a completed task."""
+        duration = max(0.0, asyncio.get_running_loop().time() - start_time)
+        DURATION.labels().observe(duration)
+        status = state.get("status", "unknown")
+        TASKS.labels(status=status).inc()
+        ITERATIONS.inc()
+        ACTIVE_TASKS.dec()
+        if state.get("best_output"):
+            BEST_SCORE.set(state["best_output"].get("score", 0.0))
+        SUPERVISOR_STATE.set(status)
+        CURRENT_ITERATION.set(state.get("iteration", 1))
+        logger.info(
+            f"[{state['task_id']}] Metrics: status={status} duration={duration:.2f}s "
+            f"best_score={state['best_output']['score'] if state.get('best_output') else 'n/a'}")

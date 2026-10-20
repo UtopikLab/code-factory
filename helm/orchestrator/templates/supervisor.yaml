@@ -29,6 +29,9 @@ spec:
         - name: supervisor
           image: {{ .Values.supervisor.image | default "ghcr.io/utopiklab/code-factory-supervisor:latest" }}
           imagePullPolicy: Always
+          ports:
+            - name: metrics
+              containerPort: 9000
           resources:
             requests:
               cpu: {{ .Values.supervisor.config.cpuRequest | default "500m" }}
@@ -36,6 +39,17 @@ spec:
             limits:
               cpu: {{ .Values.supervisor.config.cpuLimit | default "2500m" }}
               memory: {{ .Values.supervisor.config.memoryLimit | default "5Gi" }}
+          probes:
+            - name: liveness
+              httpGet:
+                path: /
+                port: http
+              periodSeconds: 15
+            - name: readiness
+              httpGet:
+                path: /healthz
+                port: http
+              periodSeconds: 10
           env:
             - name: GITHUB_TOKEN
               valueFrom:

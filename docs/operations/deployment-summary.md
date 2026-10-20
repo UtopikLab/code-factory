@@ -124,6 +124,13 @@ Merge / Reject
 
 ## Monitoring
 
+> **Strategy:** Lightweight Prometheus **port-scraping** (Option 1). Each component
+> (gateway, supervisor, worker) exposes a `/metrics` endpoint on **:9000** served
+> by `prometheus_client` (Counter/Gauge/Histogram). No sidecars, no HTTP metrics, no
+> Loki, and **no second Prometheus/Grafana stack** — this chart only publishes the
+> metrics port + a Prometheus Operator `ServiceMonitor` so the parent stack can
+> scrape them. All application metrics are prefixed **`cfe_`**.
+
 ### Metrics Collected
 - **Host metrics** (node-exporter → central Prometheus on TrueNAS)
   - CPU utilization per-core + aggregate
@@ -135,14 +142,32 @@ Merge / Reject
   - Per-pod CPU/memory
   - Container status
 
+- **Application metrics** (port-scraping on :9000, `cfe_`-prefixed)
+  - **Gateway** (`orchestrator/gateway`): `cfe_gateway_requests`,
+    `cfe_gateway_errors`, `cfe_request_duration_seconds`, `cfe_gateway_active`,
+    `cfe_healthz`, `cfe_scrape`
+  - **Supervisor** (`orchestrator/supervisor`): `cfe_supervisor_tasks`,
+    `cfe_supervisor_iterations`, `cfe_best_score`, `cfe_current_iteration`,
+    `cfe_supervisor_state`, `cfe_active_tasks`, `cfe_supervisor_duration`,
+    `cfe_supervisor_active`
+  - **Worker** (`orchestrator/worker`): `cfe_worker_tasks`, `cfe_worker_code_changes`,
+    `cfe_worker_eval_score`, `cfe_worker_job_duration_seconds`, `cfe_worker_last_status`,
+    `cfe_active_jobs`
+
 ### Central Prometheus
-- **Endpoint:** http://truenas.utopiklab.lan:30104/
-- **Scrape target:** node-exporter on k8s-node01:9100
+- **Endpoint:** http://truenas.utopiklab.lan:9090/  (Grafana + Prometheus)
+- **Scrape target:** node-exporter on k8s-node01:9100 (host/pod metrics)
+- **New scrape target:** `orchestrator` Services via **ServiceMonitor** (`app: orchestrator`,
+  port `cfe-metrics` → :9000). Created by `templates/prometheus-servicemonitor.yaml`;
+  only rendered when `metrics.enabled: true` in `values.yaml`.
 
 ### Grafana Dashboards
-- Add data source pointing to central Prometheus
+- Add data source pointing to central Prometheus (http://truenas.utopiklab.lan:9090)
 - Import node-exporter dashboard
-- Build custom orchestrator dashboard (optional)
+- **Import** `templates/grafana-dashboard.json` (uid `cfe-orchestrator`) — combined
+  pipeline dashboard: request/error rate + latency (gateway), tasks over time /
+  current iteration / best score / active tasks (supervisor), code changes /
+  eval score / job duration / active jobs (worker), plus active-workload gauges.
 
 ### Known Issues
 - iDRAC/IPMI exporter pod in CrashLoopBackOff (config format issue) — not critical for core loop

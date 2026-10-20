@@ -81,6 +81,9 @@ spec:
             limits:
               cpu: {{ .Values.supervisor.config.cpuLimit | default "2500m" }}
               memory: {{ .Values.supervisor.config.memoryLimit | default "5Gi" }}
+          ports:
+            - name: metrics
+              containerPort: 9000
       volumes:
         - name: workspace
           emptyDir: {}

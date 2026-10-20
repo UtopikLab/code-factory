@@ -1,0 +1,27 @@
+# --- Prometheus ServiceMonitor (port-scraping) ---
+# Creates a Prometheus Operator ServiceMonitor so the parent stack's Prometheus
+# (truenas.utopiklab.lan:9090) discovers and scrapes the cfe_-prefixed metrics
+# exposed on :9000 of each component. Selector `app: orchestrator` matches the
+# labels set on the gateway/supervisor/worker Services.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Values.name }}-metrics
+  labels:
+    app: {{ .Values.name }}
+    component: metrics
+spec:
+  selector:
+    matchLabels:
+      app: orchestrator
+  # Scrape every component's :9000 metrics endpoint.
+  # `matchLabels` matches the app: orchestrator Services; each Service must
+  # expose the :9000 port (set in gateway/supervisor/worker metrics port).
+  # `port: cfe-metrics` requires the Services to label that port accordingly.
+  port: cfe-metrics
+  # Only expose the ServiceMonitor when metrics.enabled == true (inherited from
+  # parent). Set metrics: {enabled: false} to skip.
+  {{- if .Values.metrics.enabled }}
+  additionalLabels:
+    release: {{ .Release.Name }}
+  {{- end }}
