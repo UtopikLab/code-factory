@@ -193,11 +193,12 @@ async def judge_review(client, patch: str, output: str) -> tuple[float, str]:
 def _extract_task_id(body: bytes) -> str:
     try:
         data = json.loads(body)
-        if isinstance(data.get("task_id"), str) and data["task_id"]:
-            return data["task_id"]
-        for key in ("id", "task_id"):
-            if isinstance(data.get(key), str) and data[key]:
-                return data[key]
+        for key in ("task_id", "id"):
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                return value
+            if type(value) in (int, float):
+                return str(value)
     except (json.JSONDecodeError, ValueError):
         logger.debug("Failed to extract task_id from body")
     return ""
@@ -279,7 +280,7 @@ async def run_worker(
         "review": review,
     }
     await _report_result(client, headers, acceptor_url, task_id, final)
-    _record_worker_metrics(task_id, final, len(changed), job_start)
+    await _record_worker_metrics(task_id, final, len(changed), job_start)
     return final
 
 

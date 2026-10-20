@@ -7,6 +7,7 @@ the CodeEditor file writer, and the heuristic self-review fallback.
 
 import json
 
+import pytest
 from worker import (
     CodeEditor,
     _extract_edits,
@@ -56,6 +57,18 @@ def test_extract_task_id_from_task_id_field():
 def test_extract_task_id_from_id_field():
     body = json.dumps({"id": "xyz"})
     assert _extract_task_id(body.encode("utf-8")) == "xyz"
+
+
+@pytest.mark.parametrize("key", ["task_id", "id"])
+@pytest.mark.parametrize("value", [0, 42, -7, 0.0, 12.5])
+def test_extract_task_id_from_numeric_field(key, value):
+    body = json.dumps({key: value})
+    assert _extract_task_id(body.encode("utf-8")) == str(value)
+
+
+def test_extract_task_id_prefers_numeric_task_id():
+    body = json.dumps({"task_id": 42, "id": "xyz"})
+    assert _extract_task_id(body.encode("utf-8")) == "42"
 
 
 def test_extract_task_id_empty_when_missing():
