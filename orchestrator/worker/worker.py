@@ -54,7 +54,7 @@ TASKS = Counter("worker_tasks_total", "Total tasks run by the worker, by status.
 CODE_CHANGES = Counter("worker_code_changes_total", "Total code changes applied across all tasks.")
 EVAL_SCORE = Gauge("worker_evaluation_score", "Last evaluation score produced by the worker.")
 JOB_DURATION = Histogram("worker_job_duration_seconds", "Duration in seconds of a single worker job.")
-LAST_STATUS = Gauge("worker_last_status", "Status string of the most recent task.")
+LAST_STATUS = Gauge("worker_last_status", "Status string of the most recent task.", ["status"])
 ACTIVE_JOBS = Gauge("worker_active_jobs", "Number of jobs currently in-flight.")
 
 
@@ -65,7 +65,7 @@ async def _record_worker_metrics(task_id: str, final: dict, changed: int, job_st
     CODE_CHANGES.inc(changed)
     EVAL_SCORE.set(final.get("score", 0) or 0)
     JOB_DURATION.observe(time.monotonic() - job_start)
-    LAST_STATUS.set(status)
+    LAST_STATUS.labels(status=status).set(1)
     ACTIVE_JOBS.dec()
 # Result helpers
 # --------------------------------------------------------------------------- #
