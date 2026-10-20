@@ -8,10 +8,9 @@ namespace: "orchestrator"
 
 icon: ""
 
-# Supervisor (orchestrator) Deployment — the resident LangGraph loop.
+# Supervisor (code-factory-supervisor) Deployment — the resident LangGraph loop.
 # Shared values for both the supervisor and task-acceptor resources.
-orchestrator:
-  name: orchestrator
+supervisor:
   image: "ghcr.io/utopiklab/code-factory-supervisor:latest"
   imagePullPolicy: Always
   replicas: 1
@@ -34,12 +33,27 @@ orchestrator:
     # default and overridden at deploy time.
     openai-api-key: "<your-openai-key>"
 
-# Role-specific worker pool config (see §2.1.2).
-# worker-roles: ordered role mix per slot (coder/refactor/test).
-# worker-count is set at runtime via the WORKER_COUNT env var, not here.
-workers:
+# Coder-worker (orchestrator-worker Job) image. Kept separate from the
+# supervisor image so the worker Job runs code-factory-worker — never
+# code-factory-supervisor (which is what a shared `orchestrator.image`
+# reference would resolve to).
+#
+# Worker pool config (see §2.1.2). worker-roles: ordered role mix per slot
+# (coder/refactor/test) — matches the supervisor's role_assignment() mix
+# (Includes 'refactor' so the mix is complete; worker-count is set at
+# runtime via the WORKER_COUNT env var). worker-model + worker-roles are
+# folded into this block so templates can reference .Values.worker.*
+# (the worker Job image + resource config).
+worker:
+  name: worker
+  image: "ghcr.io/utopiklab/code-factory-worker:latest"
+  imagePullPolicy: Always
+  labels:
+    app: orchestrator
+    component: worker
   worker-roles:
   - coder
+  - refactor
   - test
   worker-model: "qwen2.5-coder-7b-instruct-q4-km@32k"
 
@@ -49,18 +63,21 @@ workers:
 # (e.g. `docker buildx build`), exactly like the supervisor and coder-worker
 # images. Overridable via values.
 gateway:
-  name: gateway
   image: "ghcr.io/utopiklab/code-factory-gateway:latest"
   imagePullPolicy: Always
   replicas: 1
   labels:
     app: orchestrator
     component: gateway
-  # resource defaults (overridable via values)
-  cpuRequest: "100m"
-  cpuLimit: "250m"
-  memory: "256Mi"
-  memoryLimit: "512Mi"
+  # Gateway (task-acceptor) resource defaults. The gateway is a lightweight
+  # HTTP service, so it gets smaller CPU/memory limits than the supervisor's
+  # LangGraph loop (supervisor.cpuRequest = 500m/2Gi).
+
+  config:
+    cpuRequest: "100m"
+    cpuLimit: "250m"
+    memory: "256Mi"
+    memoryLimit: "512Mi"
 
 # Shared pull secret applied to all containers.
 imagePullSecrets:

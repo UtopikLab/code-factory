@@ -3,14 +3,14 @@ Worker: ConfigMap orchestrator-config + Job coder-worker.
 Faithful to orchestrator/worker.yaml (ConfigMap + Job coder-worker).
 */}}
 {{- $m := dict
-  "max-iterations" (int (default (index .Values.orchestrator.config "max-iterations") 8))
-  "task-wait-seconds" (int (default (index .Values.orchestrator.config "task-wait-seconds") 30))
-  "loop-state-dir" (default (index .Values.orchestrator.config "loop-state-dir") "/data/loop-state")
-  "acceptor-url" (default (index .Values.orchestrator.config "acceptor-url") (printf "http://%s-orchestrator-gateway.%s.svc.cluster.local:8000" .Chart.Name .Values.namespace))
-  "acceptor-url" (default (index .Values.orchestrator.config "acceptor-url") (printf "http://%s-orchestrator-gateway.%s.svc.cluster.local:8000" .Chart.Name .Values.namespace))
-  "judge-url" (default (index .Values.orchestrator.config "judge-url") "https://inference.local/v1")
-  "judge-model" (default (index .Values.orchestrator.config "judge-model") "qwen2.5-coder-7b-instruct-q4-km@32k")
-  "worker-roles" (index .Values.workers "worker-roles")
+  "max-iterations" (int (default (index .Values.supervisor.config "max-iterations") 8))
+  "task-wait-seconds" (int (default (index .Values.supervisor.config "task-wait-seconds") 30))
+  "loop-state-dir" (default (index .Values.supervisor.config "loop-state-dir") "/data/loop-state")
+  "acceptor-url" (default (index .Values.supervisor.config "acceptor-url") (printf "http://%s-orchestrator-gateway.%s.svc.cluster.local:8000" .Chart.Name .Values.namespace))
+  "acceptor-url" (default (index .Values.supervisor.config "acceptor-url") (printf "http://%s-orchestrator-gateway.%s.svc.cluster.local:8000" .Chart.Name .Values.namespace))
+  "judge-url" (default (index .Values.supervisor.config "judge-url") "https://inference.local/v1")
+  "judge-model" (default (index .Values.supervisor.config "judge-model") "qwen2.5-coder-7b-instruct-q4-km@32k")
+  "worker-roles" (index .Values.worker "worker-roles")
 -}}
 ---
 apiVersion: v1
@@ -51,7 +51,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: coder
-          image: {{ .Values.orchestrator.image | default "ghcr.io/utopiklab/code-factory-worker:latest" }}
+          image: {{ .Values.worker.image | default "ghcr.io/utopiklab/code-factory-worker:latest" }}
           imagePullPolicy: Always
           volumeMounts:
             - name: workspace
@@ -76,11 +76,11 @@ spec:
                   key: acceptor-url
           resources:
             requests:
-              cpu: {{ .Values.orchestrator.config.cpuRequest | default "500m" }}
-              memory: {{ .Values.orchestrator.config.memory | default "2Gi" }}
+              cpu: {{ .Values.supervisor.config.cpuRequest | default "500m" }}
+              memory: {{ .Values.supervisor.config.memory | default "2Gi" }}
             limits:
-              cpu: {{ .Values.orchestrator.config.cpuLimit | default "2500m" }}
-              memory: {{ .Values.orchestrator.config.memoryLimit | default "5Gi" }}
+              cpu: {{ .Values.supervisor.config.cpuLimit | default "2500m" }}
+              memory: {{ .Values.supervisor.config.memoryLimit | default "5Gi" }}
       volumes:
         - name: workspace
           emptyDir: {}

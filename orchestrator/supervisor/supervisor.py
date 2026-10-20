@@ -172,6 +172,9 @@ def build_role_payload(role: str, worker_id: int, issue_title: str) -> dict:
             "Generate a patch that fixes the issue with narrow, test-driven edits. "
             "Produce the minimal change that addresses the requirements."
         )
+    # Contract: carry the "files" key so the worker's _extract_edits picks it up.
+    # Actual edits are filled in by the acceptor/coder at runtime.
+    base["files"] = []
     return base
 
 

@@ -39,14 +39,14 @@ spec:
                   name: {{ .Chart.Name }}-secrets
                   key: github-token
             - name: ALLOWED_REPO
-              value: {{ .Values.orchestrator.config.repo | quote }}
+              value: {{ .Values.gateway.config.repo | quote }}
           resources:
             requests:
-              cpu: {{ .Values.orchestrator.config.cpuRequest | default "100m" }}
-              memory: {{ .Values.orchestrator.config.memory | default "256Mi" }}
+              cpu: {{ .Values.gateway.config.cpuRequest | default "100m" }}
+              memory: {{ .Values.gateway.config.memory | default "256Mi" }}
             limits:
-              cpu: {{ .Values.orchestrator.config.cpuLimit | default "250m" }}
-              memory: {{ .Values.orchestrator.config.memoryLimit | default "512Mi" }}
+              cpu: {{ .Values.gateway.config.cpuLimit | default "250m" }}
+              memory: {{ .Values.gateway.config.memoryLimit | default "512Mi" }}
       imagePullSecrets:
         - name: ghcr-secret
 ---

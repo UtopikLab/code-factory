@@ -12,7 +12,7 @@ manual helm upgrade can't accidentally spawn extra gpu pods.
 {{- $gpuCount := $inf.gpuCount | default 2 -}}
 {{- range $idx, $cfg := $inf.configMaps }}
 ---
-apiVersion: autoscaling/v1
+apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: {{ $cfg.name }}
@@ -26,8 +26,15 @@ spec:
   # Cap the pod count to available GPU capacity: one replica per GPU.
   maxReplicas: {{ $gpuCount }}
   minReplicas: 1
-  # Target a modest CPU utilization; the llama.cpp server idles ~30-50% CPU at rest
-  # and ~70% under load. Keep the target below the GPU-bound headroom.
-  cpuUtilization:
-    percentage: 70
+  # Target the GPU pod; autoscale on CPU utilization (v2 API).
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $cfg.name }}
+  # Use utilizationPercentiles (v2 API); target the 70th percentile CPU.
+  behavior:
+    stabilize:
+      stabilizationWindowSeconds: 300
+  utilizationPercentiles:
+    - 70
 {{- end }}

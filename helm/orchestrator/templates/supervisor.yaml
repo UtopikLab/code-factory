@@ -27,20 +27,40 @@ spec:
     spec:
       containers:
         - name: supervisor
-          image: {{ .Values.orchestrator.image | default "ghcr.io/utopiklab/code-factory-supervisor:latest" }}
+          image: {{ .Values.supervisor.image | default "ghcr.io/utopiklab/code-factory-supervisor:latest" }}
           imagePullPolicy: Always
           resources:
             requests:
-              cpu: {{ .Values.orchestrator.config.cpuRequest | default "500m" }}
-              memory: {{ .Values.orchestrator.config.memory | default "2Gi" }}
+              cpu: {{ .Values.supervisor.config.cpuRequest | default "500m" }}
+              memory: {{ .Values.supervisor.config.memory | default "2Gi" }}
             limits:
-              cpu: {{ .Values.orchestrator.config.cpuLimit | default "2500m" }}
-              memory: {{ .Values.orchestrator.config.memoryLimit | default "5Gi" }}
+              cpu: {{ .Values.supervisor.config.cpuLimit | default "2500m" }}
+              memory: {{ .Values.supervisor.config.memoryLimit | default "5Gi" }}
           env:
             - name: GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Chart.Name }}-secrets
                   key: github-token
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Chart.Name }}-secrets
+                  key: openai-api-key
+            - name: ACCEPTOR_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Chart.Name }}-config
+                  key: acceptor-url
+            - name: JUDGE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Chart.Name }}-config
+                  key: judge-url
+            - name: JUDGE_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Chart.Name }}-config
+                  key: judge-model
       imagePullSecrets:
         - name: ghcr-secret

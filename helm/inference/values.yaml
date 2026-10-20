@@ -82,6 +82,10 @@ inference:
   gpuDeviceIds:
     gpu0: "0"
     gpu1: "1"
+  # One replica per GPU: cap the pod count to available GPU capacity so the
+  # Deployment can never over-subscribe GPUs (prevents the pending/insufficient
+  # GPU scheduling race). Set via inference.gpuCount.
+  gpuCount: 2
   # Resources: full P40 (23 GiB) requested to prevent oversubscription.
   resources:
     # CPU resource budget for the llama.cpp server pods.
