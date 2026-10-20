@@ -43,7 +43,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install langgraph langchain requests httpx pytest
+          # Install the full union of runtime dependencies declared in each
+          # sub-package requirements file (supervisor/worker/gateway).
+          # This guarantees prometheus_client, pydantic, langchain-core,
+          # langchain-sdk, tenacity, fastapi, uvicorn, httpx, openai, etc.
+          pip install -r orchestrator/supervisor/requirements.txt \
+            -r orchestrator/worker/requirements.txt \
+            -r orchestrator/gateway/requirements.txt
 
       - name: Run tests
         run: pytest orchestrator/ -v
