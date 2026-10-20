@@ -25,6 +25,8 @@ spec:
         component: gateway
         app.kubernetes.io/managed-by: Helm
     spec:
+      imagePullSecrets:
+        - name: ghcr-secret
       containers:
         - name: gateway
           image: {{ .Values.gateway.image | default "ghcr.io/utopiklab/code-factory-gateway:latest" }}
@@ -49,19 +51,16 @@ spec:
             limits:
               cpu: {{ .Values.gateway.config.cpuLimit | default "250m" }}
               memory: {{ .Values.gateway.config.memoryLimit | default "512Mi" }}
-          probes:
-            - name: readiness
-              httpGet:
-                path: /healthz
-                port: gateway
-              periodSeconds: 10
-            - name: liveness
-              httpGet:
-                path: /
-                port: gateway
-              periodSeconds: 15
-      imagePullSecrets:
-        - name: ghcr-secret
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: gateway
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: gateway
+            periodSeconds: 15
 ---
 apiVersion: v1
 kind: Service
@@ -77,6 +76,8 @@ spec:
     component: gateway
   ports:
     - name: task-acceptor
-      containerPort: 8000
       port: 8000
       targetPort: 8000
+    - name: metrics
+      port: 9000
+      targetPort: 9000

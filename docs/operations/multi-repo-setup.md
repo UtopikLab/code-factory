@@ -195,14 +195,14 @@ jobs:
 ### Watch orchestrator logs
 ```bash
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-kubectl logs -n orchestrator -l app=orchestrator -c task-acceptor -f
+kubectl logs -n orchestrator -l app=orchestrator -c gateway -f
 ```
 
 ### Check task-acceptor health
 ```bash
 kubectl exec -n orchestrator \
   $(kubectl get pods -n orchestrator -l app=orchestrator -o jsonpath='{.items[0].metadata.name}') \
-  -c task-acceptor -- \
+  -c gateway -- \
   python3 -c "import http.client; c=http.client.HTTPConnection('localhost',8000); c.request('GET','/'); print(c.getresponse().read().decode())"
 ```
 

@@ -79,7 +79,7 @@ family (Qwen2.5), which keeps the judge's evaluations meaningful.
   the best, and acts as the pre-action gate before anything is committed.
 - **Task-acceptor gateway Deployment (port 8000):** the task-acceptor is now
   its own always-on Deployment (`{{ .Chart.Name }}-orchestrator-gateway:latest`),
-  independent of the supervisor loop. The acceptor source (`supervisor-task-acceptor.py`)
+  independent of the supervisor loop. The acceptor source (`orchestrator/gateway/server.py`)
   is baked into a dedicated Docker image (pure stdlib `http.server`, no pip installs)
   rather than stored in a ConfigMap. The gateway Service routes `:8000` to it and
   it exposes a single **`POST /api/v1/tasks/spawn`** (auth: `Authorization: token <github-token>`,
@@ -110,12 +110,10 @@ sequenceDiagram
 
 #### 2.1.1 Task-acceptor API reference
 
-The task-acceptor is exposed by the always-on supervisor over HTTP on port **8000**
-(`:8000`), which is how the supervisor doubles as the task-acceptor. There is **no
-persistent HTTP surface**: the listener binds `:8000` only while a task is being
-accepted, then releases it. Requests therefore arrive only during active
-acceptance windows — the drain layer opens the connection, the supervisor accepts
-and creates the Kubernetes Job, and the port is released again.
+The task-acceptor is exposed by a dedicated always-on gateway Deployment over
+HTTP on port **8000** (`:8000`). This is a **persistent HTTP surface** for
+acceptor traffic: the drain layer opens the connection, the gateway validates
+and accepts, and then creates the Kubernetes Job.
 
 ##### Endpoints
 
@@ -136,7 +134,7 @@ Authorization: token <github-token>
 
 The `<github-token>` is the workflow Personal Access Token (PAT) supplied via the
 `orchestrator-secrets` secret. It authenticates the request against the
-acceptor; it is **not** a runner credential — the supervisor itself is the
+acceptor; it is **not** a runner credential — the gateway itself is the
 acceptor, so no `RUNNER_TOKEN` is involved.
 
 ##### Request payload — task registration
@@ -208,7 +206,7 @@ When `repo` is omitted it defaults to `ALLOWED_REPO` (sourced from the environme
 ```mermaid
 sequenceDiagram
     participant W as worker
-    participant SVC as supervisor :8000 (task-acceptor)
+  participant SVC as gateway :8000 (task-acceptor)
     W->>SVC: POST /api/v1/tasks/spawn (worker_id, payload)
     SVC->>SVC: derive task_id, validate + accept
     SVC-->>W: 202 {"status":"accepted", ...}

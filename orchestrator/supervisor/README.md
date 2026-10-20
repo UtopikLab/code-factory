@@ -1,18 +1,23 @@
 # Orchestrator Supervisor Image
 
-Orchestrator image for autonomous LangGraph supervisor loop. Builds a Python 3.11 container with LangGraph, OpenAI client, and GitHub integration.
+Orchestrator image for the autonomous LangGraph supervisor loop.
 
 ## Files
 - `Dockerfile` — supervisor image build definition
 - `requirements.txt` — Python dependencies
-- `supervisor_loop.py` — resident supervisor loop implementation
+- `supervisor.py` — resident supervisor loop implementation
 
 ## Build
-```
-docker build -f supervisor/Dockerfile -t ghcr.io/utopiklab/code-factory-supervisor:$TAG .
+```bash
+docker build -f orchestrator/supervisor/Dockerfile \
+	-t ghcr.io/utopiklab/code-factory-supervisor:$TAG \
+	orchestrator/supervisor
 ```
 
-## Supervisor loop entrypoint
-The supervisor loop runs in two modes:
-- **Resident loop** (default entrypoint): `langgraph cli serve` — the supervisor loop runs continuously inside the container.
-- **`--worker` mode**: the supervisor loop runs as a detached worker process, managed externally.
+## Runtime behavior
+- Container entrypoint is `python supervisor.py`.
+- Process is resident (always-on) and serves:
+	- `GET /healthz` on port `9000`
+	- `GET /metrics` on port `9000`
+- The supervisor remains idle between tasks and exposes Prometheus metrics for
+	external scraping.

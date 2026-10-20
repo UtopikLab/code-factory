@@ -39,17 +39,6 @@ spec:
             limits:
               cpu: {{ .Values.supervisor.config.cpuLimit | default "2500m" }}
               memory: {{ .Values.supervisor.config.memoryLimit | default "5Gi" }}
-          probes:
-            - name: liveness
-              httpGet:
-                path: /
-                port: http
-              periodSeconds: 15
-            - name: readiness
-              httpGet:
-                path: /healthz
-                port: http
-              periodSeconds: 10
           env:
             - name: GITHUB_TOKEN
               valueFrom:
@@ -76,5 +65,15 @@ spec:
                 configMapKeyRef:
                   name: {{ .Chart.Name }}-config
                   key: judge-model
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: metrics
+            periodSeconds: 15
       imagePullSecrets:
         - name: ghcr-secret

@@ -11,11 +11,18 @@ import asyncio
 import logging
 import os
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TypedDict
 
 import httpx
 from langgraph.graph import END, START, StateGraph
-from prometheus_client import Counter, Gauge, Histogram
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -454,15 +461,128 @@ class SupervisorLoop:
     def _record_task_metrics(self, state: TaskState, start_time: float) -> None:
         """Record supervisor metrics for a completed task."""
         duration = max(0.0, asyncio.get_running_loop().time() - start_time)
-        DURATION.labels().observe(duration)
+        DURATION.observe(duration)
         status = state.get("status", "unknown")
         TASKS.labels(status=status).inc()
-        ITERATIONS.inc()
-        ACTIVE_TASKS.dec()
+        ITERATIONS.inc(state.get("iteration", 1))
+        ACTIVE_TASKS.set(0)
         if state.get("best_output"):
             BEST_SCORE.set(state["best_output"].get("score", 0.0))
-        SUPERVISOR_STATE.set(status)
+        SUPERVISOR_STATE.set(self._state_to_value(status))
         CURRENT_ITERATION.set(state.get("iteration", 1))
         logger.info(
             f"[{state['task_id']}] Metrics: status={status} duration={duration:.2f}s "
             f"best_score={state['best_output']['score'] if state.get('best_output') else 'n/a'}")
+
+    @staticmethod
+    def _state_to_value(status: str) -> float:
+        mapping = {
+            "idle": 0.0,
+            "planning": 1.0,
+            "executing": 2.0,
+            "evaluating": 3.0,
+            "complete": 4.0,
+            "failed": -1.0,
+            "error": -2.0,
+        }
+        return mapping.get(status, -9.0)
+
+    async def run_task(self, task: TaskState) -> TaskState:
+        """Run one task through the graph and record metrics."""
+        start_time = asyncio.get_running_loop().time()
+        ACTIVE_TASKS.set(1)
+        SUPERVISOR_STATE.set(self._state_to_value("planning"))
+        result = await self.graph.ainvoke(task)
+        self._record_task_metrics(result, start_time)
+        return result
+
+    async def run_forever(self) -> None:
+        """Keep process alive and optionally run synthetic tasks for liveness."""
+        interval_seconds = int(os.getenv("SUPERVISOR_IDLE_SLEEP_SECONDS", "15"))
+        autorun = os.getenv("SUPERVISOR_AUTORUN", "false").lower() == "true"
+        task_seq = 0
+        SUPERVISOR_STATE.set(self._state_to_value("idle"))
+        logger.info("Supervisor loop started (idle mode).")
+
+        while True:
+            if autorun:
+                task_seq += 1
+                task: TaskState = {
+                    "task_id": f"bootstrap-{task_seq}",
+                    "issue_title": "bootstrap health task",
+                    "repo": os.getenv("ALLOWED_REPO", "*"),
+                    "issue_number": task_seq,
+                    "iteration": 1,
+                    "max_iterations": int(os.getenv("MAX_ITERATIONS", "2")),
+                    "status": "planning",
+                    "plan": "",
+                    "worker_outputs": [],
+                    "best_output": None,
+                    "error": None,
+                }
+                try:
+                    await self.run_task(task)
+                except Exception:
+                    logger.exception("Supervisor task failed")
+                    SUPERVISOR_STATE.set(self._state_to_value("error"))
+                    TASKS.labels(status="error").inc()
+                    ACTIVE_TASKS.set(0)
+            else:
+                SUPERVISOR_STATE.set(self._state_to_value("idle"))
+
+            await asyncio.sleep(interval_seconds)
+
+
+class _ProbeHandler(BaseHTTPRequestHandler):
+    """Minimal HTTP endpoints for readiness/liveness and Prometheus scrape."""
+
+    def do_GET(self):
+        if self.path == "/healthz" or self.path == "/":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"ok\n")
+            return
+
+        if self.path == "/metrics":
+            data = generate_latest()
+            self.send_response(200)
+            self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+        self.send_response(404)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"not found\n")
+
+    def log_message(self, fmt, *args):
+        logger.info("probe_http: " + fmt, *args)
+
+
+def _start_probe_server() -> ThreadingHTTPServer:
+    host = os.getenv("SUPERVISOR_BIND_HOST", "0.0.0.0")
+    port = int(os.getenv("SUPERVISOR_METRICS_PORT", "9000"))
+    server = ThreadingHTTPServer((host, port), _ProbeHandler)
+    logger.info("Supervisor probe server listening on %s:%s", host, port)
+    asyncio.get_running_loop().run_in_executor(None, server.serve_forever)
+    return server
+
+
+async def _main_async() -> None:
+    server = _start_probe_server()
+    loop = SupervisorLoop()
+    try:
+        await loop.run_forever()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def main() -> None:
+    asyncio.run(_main_async())
+
+
+if __name__ == "__main__":
+    main()

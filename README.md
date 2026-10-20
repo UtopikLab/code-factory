@@ -197,23 +197,12 @@ sits alongside — and is independent of — the `inference` inference stack:
   judge and coder brains over the network (the `inference` servers), it does not hold
   a GPU. Resources are capped (~2-3 cores, 4-6 GiB) so it never starves the GPU
   servers.
-  - The Deployment runs the loop in the background (resident, idle most of the
-    time) and `exec`s a lightweight **task-acceptor sidecar** (`supervisor-task-acceptor.py`,
-    ~800 lines) sharing the same pod and the same `:8000` port the Service
-    routes to. The sidecar is a plain `ThreadingHTTPServer`; it has **no
-    persistent HTTP surface** — it only binds `:8000` while a task is being
-    accepted and rendered, then releases it (so it never competes with the
-    resident loop for the port).
-  - The sidecar's `do_POST` handles a single endpoint,
-    **`/api/v1/tasks/spawn`**, gated by `Authorization: token <PAT>` (the
-    workflow-scoped PAT from `orchestrator-secrets/github-token`). It validates
-    the body `{name, ref, payload:{issue_number, issue_title, issue_url, repo,
-    default_branch}}`, refuses any task naming a repo other than the one it was
-    spawned for, renders `agent-job-template.yaml` (substituting `${IMAGE}`,
-    `${TASK_ID}`, `${ISSUE_URL}`, `${REPO}`, `${GITHUB_TOKEN}`), creates the
-    `Job`, and waits (`kubectl wait --for=jobcomplete`, 1800s) for it to finish
-    before deleting the Job and returning `{uid, task_id, issue_number,
-    status}`. `do_GET` returns `200` for any path (liveness).
+  - Task intake is handled by a dedicated **gateway Deployment**
+    (`orchestrator/gateway`) exposed on `:8000`, not by a sidecar in the
+    supervisor pod.
+  - The gateway handles **`POST /api/v1/tasks/spawn`** with
+    `Authorization: token <PAT>`, validates repo constraints, and returns
+    accepted task metadata.
 - **Workers (`orchestrator/worker.yaml`)** — the **spawn mechanism**. The
   supervisor triggers a `Job` that runs N parallel **coder** agents (pure CPU,
   no GPU). `N` (the worker count) is a policy knob in the ConfigMap so it can be
@@ -226,17 +215,17 @@ sits alongside — and is independent of — the `inference` inference stack:
 ### 4.4.2 Overnight workflow
 
 1. The supervisor is always resident (idle, listening for a task).
-2. A task arrives (webhook / cron / user). It is POSTed to the supervisor's
-   task-acceptor at `https://<svc>/api/v1/tasks/spawn` with
+2. A task arrives (webhook / cron / user). It is POSTed to the gateway
+  endpoint at `https://<svc>/api/v1/tasks/spawn` with
    `Authorization: token <PAT>` and a JSON body naming the repo + issue.
-3. The acceptor renders the Job template, creates the `Job`, and waits for it to
+3. The gateway accepts the task and the orchestrator flow creates worker `Job`s and waits for them to
    complete (`kubectl wait --for=jobcomplete`).
 4. The supervisor runs the LangGraph
    loop: plan → spawn coder workers → judge the result → retry / escalate,
    bounded by `max-iterations` (Open Question O5, default 8).
-3. Workers execute code, emit output; the judge approves/rejects.
-4. The supervisor opens a PR (or emits an event) and returns to idle.
-5. Node-exporter + hardware telemetry report health to central Prometheus
+5. Workers execute code, emit output; the judge approves/rejects.
+6. The supervisor opens a PR (or emits an event) and returns to idle.
+7. Node-exporter + hardware telemetry report health to central Prometheus
    (TrueNAS), so overnight runs are monitored (§4.5).
 
 ### 4.4.3 Telemetry (namespace `monitoring`)

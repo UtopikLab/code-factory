@@ -21,7 +21,7 @@ kubectl get pods -A | grep -E "Running|orchestrator|inference"
 kubectl logs -n orchestrator -l app=orchestrator -c supervisor --tail=20
 
 # Test task-acceptor
-kubectl exec -n orchestrator -l app=orchestrator -c task-acceptor -- \
+kubectl exec -n orchestrator -l app=orchestrator -c gateway -- \
   python3 -c "import http.client; c=http.client.HTTPConnection('localhost',8000); \
   c.request('GET','/'); print(c.getresponse().read().decode())"
 ```
@@ -104,7 +104,7 @@ GitHub Actions (drain.yaml)
       ↓
 POST /api/v1/tasks/spawn (auth: token $GITHUB_TOKEN)
       ↓
-task-acceptor sidecar (port 8000)
+gateway deployment (port 8000)
       ↓
 Supervisor Loop:
   1. PLAN: Read issue, set iteration budget
@@ -127,9 +127,8 @@ Merge / Reject
 > **Strategy:** Lightweight Prometheus **port-scraping** (Option 1). Each component
 > (gateway, supervisor, worker) exposes a `/metrics` endpoint on **:9000** served
 > by `prometheus_client` (Counter/Gauge/Histogram). No sidecars, no HTTP metrics, no
-> Loki, and **no second Prometheus/Grafana stack** — this chart only publishes the
-> metrics port + a Prometheus Operator `ServiceMonitor` so the parent stack can
-> scrape them. All application metrics are prefixed **`cfe_`**.
+> Loki, and **no second Prometheus/Grafana stack** — metrics are scraped by the
+> external parent Prometheus on TrueNAS via NodePort Services.
 
 ### Metrics Collected
 - **Host metrics** (node-exporter → central Prometheus on TrueNAS)
@@ -142,29 +141,31 @@ Merge / Reject
   - Per-pod CPU/memory
   - Container status
 
-- **Application metrics** (port-scraping on :9000, `cfe_`-prefixed)
-  - **Gateway** (`orchestrator/gateway`): `cfe_gateway_requests`,
-    `cfe_gateway_errors`, `cfe_request_duration_seconds`, `cfe_gateway_active`,
-    `cfe_healthz`, `cfe_scrape`
-  - **Supervisor** (`orchestrator/supervisor`): `cfe_supervisor_tasks`,
-    `cfe_supervisor_iterations`, `cfe_best_score`, `cfe_current_iteration`,
-    `cfe_supervisor_state`, `cfe_active_tasks`, `cfe_supervisor_duration`,
-    `cfe_supervisor_active`
-  - **Worker** (`orchestrator/worker`): `cfe_worker_tasks`, `cfe_worker_code_changes`,
-    `cfe_worker_eval_score`, `cfe_worker_job_duration_seconds`, `cfe_worker_last_status`,
-    `cfe_active_jobs`
+- **Application metrics** (port-scraping on :9000)
+  - **Gateway** (`orchestrator/gateway`): `http_requests_total`,
+    `http_request_duration_seconds`, `http_request_errors_total`,
+    `gateway_active_requests_gauge`, `gateway_healthz_gauge`,
+    `gateway_scrape_interval_seconds`
+  - **Supervisor** (`orchestrator/supervisor`): `orchestrator_tasks_total`,
+    `orchestrator_iterations_total`, `orchestrator_best_score`,
+    `orchestrator_current_iteration`, `orchestrator_supervisor_state`,
+    `orchestrator_duration_seconds`, `orchestrator_active_tasks`
+  - **Worker** (`orchestrator/worker`): `worker_tasks_total`,
+    `worker_code_changes_total`, `worker_evaluation_score`,
+    `worker_job_duration_seconds`, `worker_last_status`, `worker_active_jobs`
 
 ### Central Prometheus
 - **Endpoint:** http://truenas.utopiklab.lan:9090/  (Grafana + Prometheus)
 - **Scrape target:** node-exporter on k8s-node01:9100 (host/pod metrics)
-- **New scrape target:** `orchestrator` Services via **ServiceMonitor** (`app: orchestrator`,
-  port `cfe-metrics` → :9000). Created by `templates/prometheus-servicemonitor.yaml`;
-  only rendered when `metrics.enabled: true` in `values.yaml`.
+- **New scrape targets:**
+  - `k8s-node01:30900` (`orchestrator-gateway-metrics`)
+  - `k8s-node01:30901` (`orchestrator-supervisor-metrics`)
+  - `k8s-node01:30902` (`orchestrator-worker-metrics`)
 
 ### Grafana Dashboards
 - Add data source pointing to central Prometheus (http://truenas.utopiklab.lan:9090)
 - Import node-exporter dashboard
-- **Import** `templates/grafana-dashboard.json` (uid `cfe-orchestrator`) — combined
+- **Import** `dashboards/grafana-dashboard.json` (uid `cfe-orchestrator`) — combined
   pipeline dashboard: request/error rate + latency (gateway), tasks over time /
   current iteration / best score / active tasks (supervisor), code changes /
   eval score / job duration / active jobs (worker), plus active-workload gauges.
@@ -181,7 +182,7 @@ Push a branch that opens/assigns an issue on the repo:
 ```bash
 git push origin feature/your-feature
 # → GitHub Actions runs drain.yaml
-# → POST to supervisor task-acceptor
+# → POST to orchestrator gateway endpoint
 # → Orchestrator processes the task
 ```
 
@@ -249,11 +250,11 @@ Check that secrets are correctly configured and the image is available.
 
 ### Task-acceptor not responding
 ```bash
-kubectl exec -n orchestrator <pod-id> -c task-acceptor -- \
+kubectl exec -n orchestrator <pod-id> -c gateway -- \
   python3 -c "import http.client; c=http.client.HTTPConnection('localhost',8000); \
   c.request('GET','/'); print(c.getresponse().read())"
 ```
-Verify the sidecar container is ready and port 8000 is bound.
+Verify the gateway container is ready and port 8000 is bound.
 
 ### Workers not spawning
 ```bash

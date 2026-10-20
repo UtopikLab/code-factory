@@ -146,7 +146,7 @@ kubectl set env deployment/k8s-inference-orchestrator \
 The repo is now sending tasks to the orchestrator. Check the supervisor logs:
 
 ```bash
-kubectl logs -n orchestrator -l app=orchestrator -c task-acceptor -f
+kubectl logs -n orchestrator -l app=orchestrator -c gateway -f
 ```
 
 You'll see each task arrive:

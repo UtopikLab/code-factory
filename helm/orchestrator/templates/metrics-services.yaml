@@ -1,0 +1,61 @@
+{{- if .Values.metrics.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-gateway-metrics
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: orchestrator
+    component: gateway
+spec:
+  type: NodePort
+  selector:
+    app: orchestrator
+    component: gateway
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      nodePort: {{ .Values.metrics.external.gatewayNodePort }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-supervisor-metrics
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: orchestrator
+    component: supervisor
+spec:
+  type: NodePort
+  selector:
+    app: orchestrator
+    component: supervisor
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      nodePort: {{ .Values.metrics.external.supervisorNodePort }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-worker-metrics
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: orchestrator
+    component: worker
+spec:
+  type: NodePort
+  selector:
+    app: orchestrator
+    component: worker
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      nodePort: {{ .Values.metrics.external.workerNodePort }}
+{{- end }}

@@ -77,6 +77,13 @@ command -v kubectl >/dev/null 2>&1 || { warn "kubectl not found"; exit 1; }
 log "helm dir:  $HELM_DIR"
 log "node:      $(kubectl get node -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo 'unknown')"
 
+# Ensure dependency charts are present (notably nvidia-device-plugin under
+# inference/charts) so `helm upgrade --install` does not fail on missing deps.
+if [[ -f "$HELM_DIR/inference/Chart.yaml" ]]; then
+  log "build inference chart dependencies";
+  helm dependency build "$HELM_DIR/inference" >/dev/null
+fi
+
 # --- deploy inference ------------------------------------------------------
 log "deploy inference sub-chart into namespace '$NAMESPACE_IN'";
 reset_ns "$NAMESPACE_IN" "$RELEASE_IN" "inference";

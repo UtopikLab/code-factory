@@ -17,7 +17,8 @@
 
 ### What this plan builds
 - The **always-on CPU-only supervisor** (`orchestrator` Deployment) that holds
-  the LangGraph state machine and hosts the `:8000` task-acceptor sidecar.
+  the LangGraph state machine; a dedicated gateway Deployment owns
+  `/api/v1/tasks/spawn` on `:8000`.
 - The **on-demand coder-worker Job** template the supervisor renders per task.
 - The **judge brain** (llama.cpp server on a GPU pod) that the loop calls over
   the network — treated as a prerequisite runtime service, not part of the
@@ -116,7 +117,7 @@ cd orchestrator
 buildah login -u <gh-user> -p <gh-pat> ghcr.io
 
 # Build from the real Dockerfile (FROM python:3.11-slim + requirements.txt +
-# agent-job-template.yaml + supervisor-task-acceptor.py baked to /opt/orchestrator).
+# agent-job-template.yaml + orchestrator/gateway/server.py baked to /opt/orchestrator).
 buildah bud -f Dockerfile -t ghcr.io/utopiklab/code-factory-supervisor:latest .
 
 # Push to the registry.
@@ -199,8 +200,8 @@ kubectl get pods -n orchestrator -o wide
 kubectl get service orchestrator -n orchestrator -o wide
 
 # Readiness probe target: the resident LangGraph loop (the always-on signal).
-# :8000 is bound only while a task is being accepted, so it is NOT a reliable
-# readiness signal for the idle Deployment — use the resident-loop check instead.
+# :8000 is served by the dedicated gateway Deployment, so it is NOT a
+# readiness signal for the supervisor Deployment — use the resident-loop check.
 kubectl -n orchestrator exec orchestrator-<pod> -- sh -c \
   'pgrep -f langgraph >/dev/null && echo "langgraph resident" || echo "langgraph NOT resident"'
 
@@ -209,7 +210,7 @@ kubectl -n orchestrator exec orchestrator-<pod> -- sh -c \
   'pgrep -f langgraph >/dev/null && echo "langgraph resident" || echo "langgraph NOT resident"'
 
 # Accepter auth round-trip (dry, anonymous GET to confirm the port is bound).
-kubectl -n orchestrator exec orchestrator-<pod> -- sh -c \
+kubectl -n orchestrator exec <gateway-pod> -- sh -c \
   'curl -fsS http://localhost:8000/healthz'
 ```
 
@@ -276,7 +277,7 @@ curl -fsS -X POST "https://<ingress-host>/api/v1/tasks/spawn" \
     }
   }'
 ```
-The acceptor (see `supervisor-task-acceptor.py`) will: validate the token,
+The acceptor (see `orchestrator/gateway/server.py`) will: validate the token,
 refuse the task if `repo` is out of the PAT's scope, render
 `agent-job-template.yaml` (`${TASK_ID}`, `${ISSUE_URL}`, `${REPO}`,
 `${GITHUB_TOKEN}`), `kubectl apply`, `kubectl wait --for=jobcomplete`, reap the
@@ -357,11 +358,10 @@ Job, and return `{"uid":..., "task_id":"UtopikLab/code-factory#42", ...}`.
   GPU — it has none requested.
 - **Build must not run on the node:** the image build+push (Phase A) is a side
   job on a build host. Keep k8s-node01's `ctr`/`crictl`-only containerd clean.
-- **Port 8000 is the acceptor's only HTTP surface:** readiness = `GET
-  /healthz`; liveness = `pgrep -f langgraph`. A restart of the container
-  re-runs `langgraph.cli serve` which re-launches the loop *and* rebinds the
-  acceptor on the next task (the sidecar re-enters per task). Do not deploy a
-  second listener on :8000.
+- **Port 8000 is the gateway acceptor HTTP surface:** readiness = `GET
+  /healthz`; supervisor liveness remains `pgrep -f langgraph`. Gateway restarts
+  rebind `:8000` as an always-on endpoint; do not deploy a second listener on
+  `:8000`.
 - **Model baseline aligned (verified):** the judge brain is **Qwen2.5-Coder-7B**
   **GGUF** @ **Q4_K_M** with a **32768** context window. The actual manifests
   already match this: `helm/values.yaml` sets `model-format: gguf`,
