@@ -50,6 +50,9 @@ jobs:
           pip install -r orchestrator/supervisor/requirements.txt \
             -r orchestrator/worker/requirements.txt \
             -r orchestrator/gateway/requirements.txt
+          # pytest is not part of any requirements file, so install it
+          # separately to guarantee the `pytest` binary is on PATH.
+          pip install pytest
 
       - name: Run tests
         run: pytest orchestrator/ -v
