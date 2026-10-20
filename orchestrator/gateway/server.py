@@ -112,9 +112,16 @@ def _k8s_request(method, path, body=None):
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url=url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
-        raw = resp.read() or b"{}"
-        return json.loads(raw.decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
+            raw = resp.read() or b"{}"
+            return json.loads(raw.decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        logger.error(
+            "k8s-request-failed method=%s path=%s status=%s body=%s",
+            method, path, error.code, error.read().decode("utf-8", errors="replace")[:1000],
+        )
+        raise
 
 
 def _clone_job_from_template(template_job, namespace, job_name, task_id):
@@ -128,6 +135,14 @@ def _clone_job_from_template(template_job, namespace, job_name, task_id):
     pod_meta = dict(pod_template.get("metadata") or {})
     pod_labels = dict(pod_meta.get("labels") or {})
     pod_labels.update(labels)
+    for key in (
+        "controller-uid",
+        "batch.kubernetes.io/controller-uid",
+        "job-name",
+        "batch.kubernetes.io/job-name",
+    ):
+        labels.pop(key, None)
+        pod_labels.pop(key, None)
     pod_meta["labels"] = pod_labels
     pod_template = dict(pod_template)
     pod_template["metadata"] = pod_meta

@@ -5,8 +5,10 @@ These exercise the _parse_allowed_repos helper and the repo-validation logic,
 which are deterministic and do not require a running HTTP server.
 """
 
+import copy
 import os
 
+import pytest
 import server
 
 # --------------------------------------------------------------------------- #
@@ -118,3 +120,33 @@ def test_build_worker_job_name_sanitized_and_limited(monkeypatch):
     assert len(name) <= 63
     assert "_" not in name
     assert " " not in name
+
+
+@pytest.mark.parametrize("label_location", ["job", "pod", "both"])
+def test_clone_job_strips_generated_labels(label_location):
+    generated_labels = {
+        "controller-uid": "old-controller",
+        "batch.kubernetes.io/controller-uid": "old-controller",
+        "job-name": "old-job",
+        "batch.kubernetes.io/job-name": "old-job",
+    }
+    job_labels = {"app": "worker", "task-id": "old-task", "triggered-by": "old-trigger"}
+    pod_labels = {"component": "worker-pod"}
+    if label_location in ("job", "both"):
+        job_labels.update(generated_labels)
+    if label_location in ("pod", "both"):
+        pod_labels.update(generated_labels)
+    template = {
+        "metadata": {"labels": job_labels},
+        "spec": {"template": {"metadata": {"labels": pod_labels}}},
+    }
+    original = copy.deepcopy(template)
+
+    cloned = server._clone_job_from_template(template, "orchestrator", "new-job", 123)
+
+    expected_labels = {"app": "worker", "task-id": "123", "triggered-by": "gateway"}
+    assert cloned["metadata"]["labels"] == expected_labels
+    assert cloned["spec"]["template"]["metadata"]["labels"] == {
+        "component": "worker-pod", **expected_labels,
+    }
+    assert template == original
