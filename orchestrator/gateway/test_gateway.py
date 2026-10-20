@@ -5,17 +5,22 @@ These exercise the _parse_allowed_repos helper and the repo-validation logic,
 which are deterministic and do not require a running HTTP server.
 """
 
+import base64
 import copy
 import io
 import json
 import os
+import runpy
+import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 import server
+import yaml
 
 
 @pytest.fixture
@@ -23,6 +28,24 @@ def task_gateway(monkeypatch, tmp_path):
     monkeypatch.setenv("TASK_DB_PATH", str(tmp_path / "tasks.sqlite3"))
     monkeypatch.setattr(server, "TOKEN", "test-token")
     monkeypatch.setattr(server, "ALLOWED_REPOS", {"org/repo", "org/other"})
+    monkeypatch.setenv("ALLOW_LOCAL_HTTP", "true")
+    monkeypatch.setattr(server, "_validate_repository", Mock())
+    monkeypatch.setattr(server.secrets, "token_urlsafe", Mock(return_value="callback-test-only"))
+    stored = {}
+    def kubernetes(method, path, body=None):
+        name = path.rsplit("/", 1)[1]
+        if method == "POST":
+            name = body["metadata"]["name"]
+            if name in stored:
+                raise server.KubernetesError(409)
+            stored[name] = copy.deepcopy(body)
+            return body
+        if name not in stored:
+            raise server.KubernetesError(404)
+        if method == "DELETE":
+            return stored.pop(name)
+        return copy.deepcopy(stored[name])
+    monkeypatch.setattr(server, "_k8s_request", Mock(side_effect=kubernetes))
     create = Mock(return_value={"name": "assigned-worker", "uid": "uid"})
     monkeypatch.setattr(server, "_create_worker_job", create)
     github = Mock(side_effect=RuntimeError("GitHub unavailable"))
@@ -30,11 +53,13 @@ def task_gateway(monkeypatch, tmp_path):
     return create, github
 
 
-def task_request(method, path, payload=None, token="test-token"):
+def task_request(method, path, payload=None, token="test-token", repository_token="repo-test-only", callback="callback-test-only"):
     body = json.dumps(payload).encode()
     handler = server.Handler.__new__(server.Handler)
     handler.command = method
-    handler.headers = {"Authorization": f"token {token}", "Content-Length": str(len(body))}
+    handler.headers = {"Authorization": f"token {token}", "Content-Length": str(len(body)),
+                       "X-Repository-Token": repository_token, "X-Task-Token": callback}
+    handler.client_address = ("127.0.0.1", 1234)
     handler.path = path
     handler.rfile, handler.wfile = io.BytesIO(body), io.BytesIO()
     handler.send_response, handler.send_header, handler.end_headers = Mock(), Mock(), Mock()
@@ -44,6 +69,371 @@ def task_request(method, path, payload=None, token="test-token"):
 
 def issue_payload(repo="org/repo"):
     return {"name": "drain", "ref": "refs/heads/main", "payload": {"repo": repo, "issue_number": 2}}
+
+
+def test_gateway_auth_has_no_global_github_fallback():
+    output = subprocess.check_output([
+        sys.executable, "-c", "import server; print(bool(server.TOKEN))",
+    ], cwd=os.path.dirname(server.__file__),
+        env={**os.environ, "GITHUB_TOKEN": "legacy-test-only", "GATEWAY_AUTH_TOKEN": ""}, text=True)
+    assert output.strip() == "False"
+
+
+def test_task_secret_is_immutable_and_duplicate_cannot_replace(task_gateway):
+    _, github = task_gateway
+    task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    db = server._task_db()
+    task = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+    db.close()
+    assert "repo-test-only" not in json.dumps(dict(task))
+    assert "callback-test-only" not in json.dumps(dict(task))
+    secret = server._k8s_request("GET", server._secret_path(task["credential_ref"]))
+    assert secret["immutable"] is True
+    assert base64.b64decode(secret["data"]["repository-token"]) == b"repo-test-only"
+    assert task_request("POST", "/api/v1/tasks/spawn", issue_payload(), repository_token="different-repo-test-only")[0] == 202
+    assert server._task_repository_token(task) == "repo-test-only"
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", {
+        "task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "task-execution-failed",
+    }, callback="wrong-callback")[0] == 403
+    github.assert_not_called()
+
+
+def test_secret_cleanup_retry_does_not_repeat_github_updates(task_gateway, monkeypatch):
+    task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    sync = Mock()
+    monkeypatch.setattr(server, "_sync_lifecycle", sync)
+    delete = Mock(side_effect=server.KubernetesError(503))
+    monkeypatch.setattr(server, "_delete_task_secret", delete)
+    result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "task-execution-failed"}
+    path = f"/api/v1/tasks/{task_id}"
+    assert task_request("POST", path, result)[1]["lifecycle"] == "cleanup-pending"
+    delete.side_effect = None
+    assert task_request("POST", path, result)[1]["lifecycle"] == "synced"
+    assert sync.call_count == 1
+
+
+def test_secret_creation_failure_is_durable_without_dispatch(task_gateway, monkeypatch):
+    monkeypatch.setattr(server, "_k8s_request", Mock(side_effect=server.KubernetesError(503)))
+    code, body = task_request("POST", "/api/v1/tasks/spawn", issue_payload())
+    assert code == 503 and body["error"] == "credential-create-failed"
+    task_gateway[0].assert_not_called()
+    assert task_request("GET", f"/api/v1/tasks/{body['task_id']}")[1]["status"] == "failed"
+    assert task_request("POST", "/api/v1/tasks/spawn", issue_payload())[0] == 409
+
+
+@pytest.mark.parametrize("stage", ["secret", "dispatch"])
+def test_creation_failure_cleans_secret_after_terminal_processing(task_gateway, monkeypatch, stage):
+    monkeypatch.setattr(server, "_sync_lifecycle", Mock())
+    request = server._k8s_request
+    if stage == "secret":
+        def lost_creation_response(method, path, body=None):
+            response = request(method, path, body)
+            if method == "POST":
+                raise server.KubernetesError(503)
+            return response
+        monkeypatch.setattr(server, "_k8s_request", lost_creation_response)
+    else:
+        task_gateway[0].side_effect = RuntimeError("dispatch unavailable")
+    code, body = task_request("POST", "/api/v1/tasks/spawn", issue_payload())
+    assert code == (503 if stage == "secret" else 500)
+    task = task_request("GET", f"/api/v1/tasks/{body['task_id']}")[1]
+    assert task["status"] == "failed"
+    assert task["lifecycle"] == "synced" and task["credential_cleanup"] == "deleted"
+    with pytest.raises(server.KubernetesError) as raised:
+        request("GET", server._secret_path("task-credential-" + body["task_id"]))
+    assert raised.value.status == 404
+
+
+def test_stale_secret_is_neither_adopted_nor_deleted(task_gateway):
+    task_id = "issue-" + server.hashlib.sha256(b"org/repo#2").hexdigest()[:32]
+    server._create_task_secret(task_id, "org/repo", "previous-repo-test-only", "previous-callback")
+    assert task_request("POST", "/api/v1/tasks/spawn", issue_payload())[0] == 503
+    task_gateway[0].assert_not_called()
+    task_gateway[1].assert_not_called()
+    task = task_request("GET", f"/api/v1/tasks/{task_id}")[1]
+    assert task["lifecycle"] == "credential-binding-mismatch"
+    assert task["credential_cleanup"] == "pending"
+    secret = server._k8s_request("GET", server._secret_path("task-credential-" + task_id))
+    assert base64.b64decode(secret["data"]["repository-token"]) == b"previous-repo-test-only"
+
+
+def test_secret_cleanup_has_uid_precondition(task_gateway, monkeypatch):
+    task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    db = server._task_db()
+    task = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+    db.close()
+    secret = server._k8s_request("GET", server._secret_path(task["credential_ref"]))
+    secret["metadata"]["uid"] = "credential-uid"
+    request = Mock(return_value=secret)
+    monkeypatch.setattr(server, "_k8s_request", request)
+    server._delete_task_secret(task)
+    assert request.call_args.args == ("DELETE", server._secret_path(task["credential_ref"]), {
+        "apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": "credential-uid"},
+    })
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_lifecycle_revocation_is_explicit_and_cleans_owned_secret(task_gateway, status):
+    task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    task_gateway[1].side_effect = server.urllib.error.HTTPError("https://api.github.com/repos/org/repo", status, "repo-test-only", {}, None)
+    result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "repository-credential-denied"}
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[1]["lifecycle"] == "credential-denied"
+    task = task_request("GET", f"/api/v1/tasks/{task_id}")[1]
+    assert task["result"] == result and task["credential_cleanup"] == "deleted"
+
+
+def test_sync_endpoint_recovers_after_restart_without_new_credential(task_gateway, monkeypatch):
+    task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    path = f"/api/v1/tasks/{task_id}"
+    assert task_request("POST", path + "/sync", {})[0] == 409
+    result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "task-execution-failed"}
+    assert task_request("POST", path, result)[1]["lifecycle"] == "pending"
+    monkeypatch.setattr(server, "_sync_lifecycle", Mock())
+    assert task_request("POST", path + "/sync", {}, callback="", repository_token="")[1]["lifecycle"] == "synced"
+    assert task_request("GET", path)[1]["credential_cleanup"] == "deleted"
+    assert task_request("POST", path + "/sync", {"token": "replacement"})[0] == 400
+
+
+def test_secret_delete_lost_response_recovers(task_gateway, monkeypatch):
+    task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    monkeypatch.setattr(server, "_sync_lifecycle", Mock())
+    request = server._k8s_request
+    def lost_response(method, path, body=None):
+        response = request(method, path, body)
+        if method == "DELETE":
+            raise server.KubernetesError(503)
+        return response
+    monkeypatch.setattr(server, "_k8s_request", lost_response)
+    result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "completed",
+              "patch": "patch", "pr_url": "https://github.com/org/repo/pull/3"}
+    path = f"/api/v1/tasks/{task_id}"
+    assert task_request("POST", path, result)[1]["lifecycle"] == "cleanup-pending"
+    assert task_request("POST", path, result)[1]["lifecycle"] == "synced"
+
+
+@pytest.mark.parametrize("problem,expected", [(404, "credential-missing"), (503, "pending")])
+def test_secret_api_missing_is_not_transient_failure(task_gateway, monkeypatch, problem, expected):
+    task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    monkeypatch.setattr(server, "_k8s_request", Mock(side_effect=server.KubernetesError(problem)))
+    result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "task-execution-failed"}
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[1]["lifecycle"] == expected
+    assert task_request("GET", f"/api/v1/tasks/{task_id}")[1]["result"] == result
+
+
+def test_completed_result_is_durable_during_secret_api_outage(task_gateway, monkeypatch):
+    task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    monkeypatch.setattr(server, "_k8s_request", Mock(side_effect=server.KubernetesError(503)))
+    result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "completed",
+              "patch": "valid patch", "pr_url": "https://github.com/org/repo/pull/3"}
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[1]["lifecycle"] == "pending"
+    assert task_request("GET", f"/api/v1/tasks/{task_id}")[1]["result"] == result
+
+
+def test_token_shaped_result_is_rejected_without_secret_api(task_gateway, monkeypatch):
+    task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    monkeypatch.setattr(server, "_k8s_request", Mock(side_effect=server.KubernetesError(503)))
+    result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "completed",
+              "patch": "github_pat_" + "synthetic" * 10, "pr_url": "https://github.com/org/repo/pull/3"}
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[0] == 400
+    assert task_request("GET", f"/api/v1/tasks/{task_id}")[1]["result"] is None
+
+
+def test_expired_secret_preserves_terminal_result(task_gateway, monkeypatch):
+    task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    now = server.time.time()
+    monkeypatch.setattr(server.time, "time", lambda: now + 86401)
+    result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "repository-credential-expired"}
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[1]["lifecycle"] == "credential-expired"
+    assert task_request("GET", f"/api/v1/tasks/{task_id}")[1]["result"] == result
+
+
+@pytest.mark.parametrize("payload", [{"repository_token": "untrusted"}, {"payload": {"repo": "org/repo", "issue_number": 2, "description": "repo-test-only"}}])
+def test_credentials_rejected_in_payload(task_gateway, payload):
+    assert task_request("POST", "/api/v1/tasks/spawn", payload)[0] == 400
+    task_gateway[0].assert_not_called()
+
+
+def test_intake_requires_https_even_with_forwarded_header_untrusted(task_gateway, monkeypatch):
+    monkeypatch.delenv("ALLOW_LOCAL_HTTP")
+    assert task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1] == {"error": "https-required"}
+    task_gateway[0].assert_not_called()
+
+
+def test_forwarded_https_requires_trusted_proxy_source(monkeypatch):
+    monkeypatch.delenv("ALLOW_LOCAL_HTTP", raising=False)
+    monkeypatch.setenv("TRUST_TLS_PROXY", "true")
+    monkeypatch.setenv("TRUSTED_TLS_PROXY_CIDRS", "192.0.2.5/32")
+    handler = server.Handler.__new__(server.Handler)
+    handler.headers = {"X-Forwarded-Proto": "https"}
+    handler.client_address = ("192.0.2.6", 1234)
+    assert not handler._https_intake()
+    handler.client_address = ("192.0.2.5", 1234)
+    assert handler._https_intake()
+    handler.headers = {}
+    assert not handler._https_intake()
+
+
+@pytest.mark.parametrize("status,reason", [(401, "denied"), (403, "denied"), (404, "denied"), (503, "unavailable")])
+def test_repository_validation_errors_are_sanitized(monkeypatch, status, reason):
+    error = server.urllib.error.HTTPError("https://api.github.com/repos/org/repo", status, "repo-test-only", {}, io.BytesIO(b"repo-test-only"))
+    monkeypatch.setattr(server, "_github", Mock(side_effect=error))
+    with pytest.raises(server.CredentialError, match=reason) as raised:
+        server._validate_repository("org/repo", 2, "repo-test-only")
+    assert "repo-test-only" not in str(raised.value)
+
+
+def test_repository_validation_probes_with_only_originating_credential(monkeypatch):
+    github = Mock(side_effect=[{"full_name": "ORG/Repo", "permissions": {"push": True}}, [], [], [],
+                               {"number": 2, "html_url": "https://github.com/org/repo/issues/2"}])
+    monkeypatch.setattr(server, "_github", github)
+    server._validate_repository("org/repo", 2, "repo-test-only")
+    assert len(github.call_args_list) == 5
+    assert all(call.args[0] == "GET" and call.kwargs == {"token": "repo-test-only"} for call in github.call_args_list)
+
+
+def test_kubernetes_errors_never_include_secret_response(monkeypatch):
+    monkeypatch.setattr(server, "_k8s_bearer_token", lambda: "sa-test-only")
+    monkeypatch.setattr(server, "_k8s_ssl_context", lambda: None)
+    monkeypatch.setattr(server, "_k8s_base_url", lambda: "https://kubernetes.test")
+    error = server.urllib.error.HTTPError("https://kubernetes.test/api", 503, "repo-test-only", {}, io.BytesIO(b"repo-test-only"))
+    opener = Mock()
+    opener.open.side_effect = error
+    monkeypatch.setattr(server.urllib.request, "build_opener", Mock(return_value=opener))
+    log = Mock()
+    monkeypatch.setattr(server, "logger", log)
+    with pytest.raises(server.KubernetesError) as raised:
+        server._k8s_request("POST", server._secret_path(), {"data": {"repository-token": "repo-test-only"}})
+    assert raised.value.status == 503
+    assert "repo-test-only" not in str(raised.value) + repr(log.mock_calls)
+
+
+def test_task_callback_cannot_report_another_repository_task(task_gateway, monkeypatch):
+    monkeypatch.setattr(server.secrets, "token_urlsafe", Mock(side_effect=["callback-first", "callback-second"]))
+    first = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    second = task_request("POST", "/api/v1/tasks/spawn", issue_payload("org/other"))[1]["task_id"]
+    result = {"task_id": second, "repo": "org/other", "issue_number": 2, "status": "failed", "error": "task-execution-failed"}
+    assert first != second
+    assert task_request("POST", f"/api/v1/tasks/{second}", result, callback="callback-first")[0] == 403
+    assert task_request("GET", f"/api/v1/tasks/{second}")[1]["status"] == "running"
+
+
+@pytest.mark.parametrize("url,accepted", [("https://intake.test/api/v1/tasks/spawn", True), ("http://intake.test/api/v1/tasks/spawn", False),
+                                           ("https://user:pass@intake.test/api/v1/tasks/spawn", False)])
+def test_drain_workflow_credential_headers_and_https(monkeypatch, tmp_path, capsys, url, accepted):
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/drain.yaml").read_text())
+    step = next(step for step in workflow["jobs"]["send-to-orchestrator"]["steps"] if step.get("shell") == "python")
+    assert step["env"]["REPOSITORY_TOKEN"] == "${{ secrets.TASK_REPOSITORY_TOKEN }}"
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"repository": {"full_name": "org/repo"}, "issue": {"number": 2, "title": "untrusted $()"}}))
+    for key, value in {"ORCHESTRATOR_URL": url, "ORCHESTRATOR_TOKEN": "gateway-test-only", "REPOSITORY_TOKEN": "repo-test-only",
+                       "GITHUB_TOKEN": "legacy-test-only", "REGISTRY_TOKEN": "registry-test-only", "GITHUB_EVENT_PATH": str(event),
+                       "GITHUB_REPOSITORY": "org/repo"}.items():
+        monkeypatch.setenv(key, value)
+    response = Mock(status=202)
+    response.read.return_value = json.dumps({"task_id": "issue-" + "a" * 32, "status": "running"}).encode()
+    context = Mock()
+    context.__enter__ = Mock(return_value=response)
+    context.__exit__ = Mock(return_value=False)
+    opener = Mock()
+    opener.open.return_value = context
+    build = Mock(return_value=opener)
+    monkeypatch.setattr(server.urllib.request, "build_opener", build)
+    script_file = tmp_path / "intake.py"
+    script_file.write_text(step["run"])
+    if not accepted:
+        with pytest.raises(SystemExit):
+            runpy.run_path(str(script_file))
+        build.assert_not_called()
+        return
+    namespace = runpy.run_path(str(script_file))
+    request = opener.open.call_args.args[0]
+    assert request.get_header("Authorization") == "token gateway-test-only"
+    assert request.get_header("X-repository-token") == "repo-test-only"
+    assert json.loads(request.data) == {"repo": "org/repo", "issue_number": 2}
+    with pytest.raises(ValueError, match="redirect rejected"):
+        namespace["NoRedirect"]().redirect_request(None, None, 307, "", {}, "https://different.test")
+    output = capsys.readouterr().out
+    assert all(value not in output + request.data.decode() for value in ("gateway-test-only", "repo-test-only", "registry-test-only", "legacy-test-only"))
+
+
+def test_helm_credential_references_and_rbac():
+    if not shutil.which("helm"):
+        pytest.skip("helm unavailable")
+    root = Path(__file__).resolve().parents[2]
+    render = subprocess.run(["helm", "template", "credential-check", str(root / "helm/orchestrator")], capture_output=True, text=True, check=True)
+    documents = [document for document in yaml.safe_load_all(render.stdout) if document]
+    role = next(document for document in documents if document["kind"] == "Role")
+    assert role["rules"] == [
+        {"apiGroups": ["batch"], "resources": ["jobs"], "resourceNames": ["orchestrator-worker"], "verbs": ["get"]},
+        {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create"]},
+        {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get", "create", "delete"]},
+    ]
+    job = next(document for document in documents if document["kind"] == "Job")
+    assert job["spec"]["suspend"] is True
+    for document in documents:
+        if document["kind"] not in ("Deployment", "Job"):
+            continue
+        pod = document["spec"]["template"]["spec"]
+        assert pod["imagePullSecrets"] == [{"name": "ghcr-secret"}]
+        for container in pod["containers"]:
+            env = {entry["name"]: entry for entry in container.get("env", [])}
+            assert not {"GITHUB_TOKEN", "TASK_REPOSITORY_TOKEN"} & env.keys()
+            if container["name"] in ("gateway", "coder"):
+                assert env["GATEWAY_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+                    "name": "orchestrator-gateway-auth", "key": "gateway-auth-token",
+                }
+            else:
+                assert "GATEWAY_AUTH_TOKEN" not in env
+                assert pod["automountServiceAccountToken"] is False
+    ingress = next(document for document in documents if document["kind"] == "Ingress")
+    assert ingress["spec"]["tls"] and ingress["metadata"]["annotations"]["traefik.ingress.kubernetes.io/router.entrypoints"] == "websecure"
+    dedicated = subprocess.run(["helm", "template", "credential-check", str(root / "helm/orchestrator"), "--set", "gateway.auth.existingSecret=",
+                                "--set", "gateway.auth.token=gateway-test-only-32-character-value"], capture_output=True, text=True, check=True)
+    secrets = [document for document in yaml.safe_load_all(dedicated.stdout) if document and document["kind"] == "Secret"]
+    assert next(document for document in secrets if document["metadata"]["name"] == "orchestrator-gateway-auth")["data"].keys() == {"gateway-auth-token"}
+
+
+@pytest.mark.parametrize("setting", ["supervisor.config.acceptor-url=http://gateway", "gateway.trustTlsProxy=true",
+                                    "gateway.taskCredentialTtlSeconds=0", "gateway.auth.existingSecret=", "gateway.auth.token=conflicting-test-only"])
+def test_helm_rejects_unsafe_credential_configuration(setting):
+    if not shutil.which("helm"):
+        pytest.skip("helm unavailable")
+    chart = Path(__file__).resolve().parents[2] / "helm/orchestrator"
+    rendered = subprocess.run(["helm", "template", "credential-check", str(chart), "--set", setting],
+                              capture_output=True, text=True, check=False)
+    assert rendered.returncode != 0
+
+
+def test_gateway_github_transport_uses_only_explicit_repository_token(monkeypatch):
+    monkeypatch.setattr(server, "TOKEN", "gateway-test-only")
+    response = Mock()
+    response.read.return_value = b"{}"
+    context = Mock()
+    context.__enter__ = Mock(return_value=response)
+    context.__exit__ = Mock(return_value=False)
+    opener = Mock()
+    opener.open.return_value = context
+    monkeypatch.setattr(server.urllib.request, "build_opener", Mock(return_value=opener))
+    assert server._github("GET", "/repos/org/repo", token="repo-test-only") == {}
+    request = opener.open.call_args.args[0]
+    assert request.get_header("Authorization") == "Bearer repo-test-only"
+    assert request.full_url == "https://api.github.com/repos/org/repo"
+    with pytest.raises(ValueError, match="redirect-rejected"):
+        server.NoRedirect().redirect_request(None, None, 307, "", {}, "https://other.test")
+
+
+@pytest.mark.parametrize("metadata,error", [
+    ({"full_name": "org/other", "permissions": {"push": True}}, "identity-mismatch"),
+    ({"full_name": "org/repo", "permissions": {"push": False}}, "write-access-unverified"),
+    ({"full_name": "org/repo"}, "write-access-unverified"),
+])
+def test_repository_validation_rejects_wrong_identity_or_unproven_write(monkeypatch, metadata, error):
+    github = Mock(return_value=metadata)
+    monkeypatch.setattr(server, "_github", github)
+    with pytest.raises(server.CredentialError, match=error):
+        server._validate_repository("org/repo", 2, "repo-test-only")
+    assert github.call_args.kwargs == {"token": "repo-test-only"}
 
 
 def test_durable_repo_scoped_tasks_and_report_retry(task_gateway):
@@ -64,7 +454,8 @@ def test_durable_repo_scoped_tasks_and_report_retry(task_gateway):
     assert task_request("GET", path)[1]["result"] == result
     calls = []
 
-    def api(method, path, body=None):
+    def api(method, path, body=None, *, token):
+        assert token == "repo-test-only"
         calls.append((method, path, body))
         if path.endswith("/issues/2"):
             return {"number": 2, "html_url": "https://github.com/org/repo/issues/2"}
@@ -122,7 +513,7 @@ def test_spawn_failure_is_not_accepted(task_gateway):
     assert create.call_count == 1
 
 
-def test_task_storage_survives_new_process(task_gateway):
+def test_task_storage_survives_new_process(task_gateway, tmp_path):
     task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
     result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "validation-failed"}
     assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[0] == 200
@@ -134,6 +525,18 @@ def test_task_storage_survives_new_process(task_gateway):
     ], text=True)
     status, saved = json.loads(output)
     assert status == "failed" and json.loads(saved) == result
+    secret = server._k8s_request("GET", server._secret_path("task-credential-" + task_id))
+    secret_file = tmp_path / "mock-kubernetes-secret.json"
+    secret_file.write_text(json.dumps(secret))
+    recovered = subprocess.check_output([
+        sys.executable, "-c",
+        ("import json, server, sys; "
+         "server._k8s_request = lambda *args, **kwargs: json.load(open(sys.argv[2])); "
+         "db = server._task_db(); task = db.execute('SELECT * FROM tasks WHERE task_id=?', (sys.argv[1],)).fetchone(); "
+         "print(server._task_repository_token(task) == 'repo-test-only')"),
+        task_id, str(secret_file),
+    ], cwd=Path(server.__file__).parent, text=True)
+    assert recovered.strip() == "True"
 
 
 @pytest.mark.parametrize("bad", [
@@ -152,7 +555,8 @@ def test_invalid_issue_identity(task_gateway, bad):
 def test_failed_lifecycle_never_marks_done(task_gateway):
     _, github = task_gateway
     task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
-    def api(method, path, body=None):
+    def api(method, path, body=None, *, token):
+        assert token == "repo-test-only"
         if path.endswith("/issues/2"):
             return {"number": 2, "html_url": "https://github.com/org/repo/issues/2"}
         if method == "GET" and "/labels" in path:
@@ -328,7 +732,10 @@ def test_clone_job_passes_assigned_payload_to_one_worker():
     spec = cloned["spec"]
     assert (spec["parallelism"], spec["completions"], spec["backoffLimit"]) == (1, 1, 0)
     env = spec["template"]["spec"]["containers"][0]["env"]
-    assert env[0] == original["spec"]["template"]["spec"]["containers"][0]["env"][0]
+    assert not any(entry["name"] == "GITHUB_TOKEN" for entry in env)
+    assert next(entry for entry in env if entry["name"] == "TASK_REPOSITORY_TOKEN")["valueFrom"]["secretKeyRef"] == {
+        "name": "task-credential-2", "key": "repository-token",
+    }
     values = {entry["name"]: entry.get("value") for entry in env}
     assert values["ASSIGNED_TASK_ID"] == "2"
     assert json.loads(values["ASSIGNED_TASK_PAYLOAD"]) == payload

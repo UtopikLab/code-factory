@@ -6,13 +6,30 @@ logic, which are deterministic and do not require a running inference server.
 """
 
 
+import asyncio
+
+import pytest
 from supervisor import (
     build_evaluation_prompt,
     make_eval_result,
     make_worker_output,
+    node_execute_workers,
     passes_acceptance,
     should_retry,
 )
+
+
+def test_supervisor_never_uses_legacy_global_token(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "legacy-test-only")
+    monkeypatch.delenv("SUPERVISOR_MOCK_MODE", raising=False)
+    with pytest.raises(RuntimeError, match="direct-spawn-disabled"):
+        asyncio.run(node_execute_workers({"task_id": "task"}))
+
+
+def test_supervisor_mock_is_explicit(monkeypatch):
+    monkeypatch.setenv("SUPERVISOR_MOCK_MODE", "true")
+    state = {"task_id": "task", "worker_outputs": []}
+    assert asyncio.run(node_execute_workers(state))["worker_outputs"]
 
 # --------------------------------------------------------------------------- #
 # Evaluation helpers

@@ -33,7 +33,7 @@ spec:
         runAsNonRoot: true
         fsGroup: 1001
       imagePullSecrets:
-        - name: ghcr-secret
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
       containers:
         - name: gateway
           image: {{ .Values.gateway.image | default "ghcr.io/utopiklab/code-factory-gateway:latest" }}
@@ -47,11 +47,17 @@ spec:
             - name: task-state
               mountPath: /data/tasks
           env:
-            - name: GITHUB_TOKEN
+            - name: GATEWAY_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Chart.Name }}-secrets
-                  key: github-token
+                  name: {{ default (printf "%s-gateway-auth" .Chart.Name) .Values.gateway.auth.existingSecret }}
+                  key: gateway-auth-token
+            - name: TRUST_TLS_PROXY
+              value: {{ .Values.gateway.trustTlsProxy | quote }}
+            - name: TRUSTED_TLS_PROXY_CIDRS
+              value: {{ join "," .Values.gateway.trustedTlsProxyCidrs | quote }}
+            - name: TASK_CREDENTIAL_TTL_SECONDS
+              value: {{ .Values.gateway.taskCredentialTtlSeconds | quote }}
             - name: ALLOWED_REPOS
               value: {{ default .Values.supervisor.config.repo .Values.gateway.config.repo | quote }}
             - name: TASK_DB_PATH
@@ -128,7 +134,14 @@ metadata:
 rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["get", "create"]
+    resourceNames: [{{ printf "%s-worker" .Chart.Name | quote }}]
+    verbs: ["get"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

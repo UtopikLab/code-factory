@@ -3,6 +3,69 @@
     "title": "k8s-inference values",
     "type": "object",
     "properties": {
+        "registry": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "create",
+                "username",
+                "token"
+            ],
+            "properties": {
+                "create": {
+                    "type": "boolean"
+                },
+                "username": {
+                    "type": "string"
+                },
+                "token": {
+                    "type": "string"
+                }
+            },
+            "if": {
+                "properties": {
+                    "create": {
+                        "const": true
+                    }
+                }
+            },
+            "then": {
+                "properties": {
+                    "username": {
+                        "minLength": 1,
+                        "pattern": "^[^<>\\s]+$"
+                    },
+                    "token": {
+                        "minLength": 1,
+                        "pattern": "^[^<>\\s]+$"
+                    }
+                }
+            },
+            "else": {
+                "properties": {
+                    "username": {
+                        "maxLength": 0
+                    },
+                    "token": {
+                        "maxLength": 0
+                    }
+                }
+            }
+        },
+        "supervisor": {
+            "type": "object",
+            "properties": {
+                "config": {
+                    "type": "object",
+                    "properties": {
+                        "acceptor-url": {
+                            "type": "string",
+                            "pattern": "^https://[^/?#@]+/?$"
+                        }
+                    }
+                }
+            }
+        },
         "worker": {
             "type": "object",
             "properties": {
@@ -67,7 +130,104 @@
         },
         "gateway": {
             "type": "object",
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "trustTlsProxy": {
+                                "const": true
+                            }
+                        },
+                        "required": [
+                            "trustTlsProxy"
+                        ]
+                    },
+                    "then": {
+                        "properties": {
+                            "trustedTlsProxyCidrs": {
+                                "minItems": 1
+                            }
+                        },
+                        "required": [
+                            "trustedTlsProxyCidrs"
+                        ]
+                    }
+                }
+            ],
             "properties": {
+                "auth": {
+                    "type": "object",
+                    "required": [
+                        "existingSecret",
+                        "token"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                        "existingSecret": {
+                            "type": "string",
+                            "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+                            "maxLength": 253
+                        },
+                        "token": {
+                            "type": "string",
+                            "pattern": "^[^<>\\s]*$"
+                        }
+                    },
+                    "oneOf": [
+                        {
+                            "properties": {
+                                "existingSecret": {
+                                    "minLength": 1
+                                },
+                                "token": {
+                                    "maxLength": 0
+                                }
+                            }
+                        },
+                        {
+                            "properties": {
+                                "existingSecret": {
+                                    "maxLength": 0
+                                },
+                                "token": {
+                                    "minLength": 32
+                                }
+                            }
+                        }
+                    ]
+                },
+                "trustTlsProxy": {
+                    "type": "boolean"
+                },
+                "trustedTlsProxyCidrs": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "minLength": 1
+                    }
+                },
+                "ingress": {
+                    "type": "object",
+                    "required": [
+                        "host",
+                        "tlsSecretName"
+                    ],
+                    "properties": {
+                        "host": {
+                            "type": "string",
+                            "minLength": 1
+                        },
+                        "tlsSecretName": {
+                            "type": "string",
+                            "minLength": 1
+                        }
+                    }
+                },
+                "taskCredentialTtlSeconds": {
+                    "type": "integer",
+                    "minimum": 60,
+                    "maximum": 604800
+                },
                 "persistence": {
                     "type": "object",
                     "required": [
@@ -302,9 +462,6 @@
                     "type": "string"
                 },
                 "openaiApiKey": {
-                    "type": "string"
-                },
-                "githubToken": {
                     "type": "string"
                 },
                 "config": {

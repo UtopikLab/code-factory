@@ -25,6 +25,12 @@ from worker import (
     render_patch,
 )
 
+
+@pytest.fixture(autouse=True)
+def gateway_auth(monkeypatch):
+    monkeypatch.setenv("GATEWAY_AUTH_TOKEN", "gateway-test-secret")
+    monkeypatch.setenv("TASK_CALLBACK_TOKEN", "callback-test-secret")
+
 # --------------------------------------------------------------------------- #
 # Edit extraction
 # --------------------------------------------------------------------------- #
@@ -217,6 +223,8 @@ def test_gateway_job_to_assigned_worker(monkeypatch, tmp_path, edit_key):
     created_jobs = []
 
     def k8s_request(method, path, body=None):
+        if path.endswith("/secrets"):
+            return {}
         if method == "GET":
             assert path.endswith("/jobs/orchestrator-worker")
             return template
@@ -227,11 +235,14 @@ def test_gateway_job_to_assigned_worker(monkeypatch, tmp_path, edit_key):
     monkeypatch.setattr(server, "_k8s_request", k8s_request)
     monkeypatch.setattr(server, "ALLOWED_REPOS", {"org/repo"})
     monkeypatch.setattr(server, "TOKEN", "test-token")
+    monkeypatch.setenv("ALLOW_LOCAL_HTTP", "true")
+    monkeypatch.setattr(server, "_validate_repository", Mock())
     monkeypatch.setenv("TASK_DB_PATH", str(tmp_path / "tasks.sqlite3"))
     monkeypatch.setattr(server, "WORKER_JOB_TEMPLATE", "orchestrator-worker")
     body = json.dumps(payload).encode()
     handler = server.Handler.__new__(server.Handler)
-    handler.headers = {"Authorization": "token test-token", "Content-Length": str(len(body))}
+    handler.headers = {"Authorization": "token test-token", "Content-Length": str(len(body)), "X-Repository-Token": "repo-test-only"}
+    handler.client_address = ("127.0.0.1", 1234)
     handler.path = "/api/v1/tasks/spawn"
     handler.rfile, handler.wfile = io.BytesIO(body), io.BytesIO()
     handler.send_response, handler.send_header, handler.end_headers = Mock(), Mock(), Mock()
@@ -270,7 +281,7 @@ def test_gateway_job_to_assigned_worker(monkeypatch, tmp_path, edit_key):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("TASK_WORK_DIR", str(tmp_path))
     active_before = worker.ACTIVE_JOBS._value.get()
-    result = asyncio.run(worker.main_async(acceptor_url="http://acceptor"))
+    result = asyncio.run(worker.main_async(acceptor_url="https://acceptor"))
     assert result["task_id"] == task_id
     assert "error" not in result
     assert result["score"] == 0.7
@@ -306,28 +317,62 @@ def test_malformed_assignment_fails_before_io(monkeypatch, task_id, payload, err
     client.assert_not_called()
 
 
-def test_assigned_issue_only_requires_operator_policy(monkeypatch, tmp_path):
+def test_assigned_issue_reports_unsupported_discovery(monkeypatch, tmp_path):
     client = AsyncMock()
     client.post.return_value = httpx.Response(200, json={"task_id": "2", "status": "failed", "lifecycle": "synced"})
     monkeypatch.setenv("ALLOWED_REPOS", "org/repo")
     monkeypatch.setenv("TASK_REPO_POLICIES", "{}")
     monkeypatch.setenv("TASK_WORK_DIR", str(tmp_path))
-    monkeypatch.setattr(worker, "CodeEditor", Mock(side_effect=AssertionError("No editor expected")))
+    monkeypatch.setattr(worker, "_implement_issue", AsyncMock(side_effect=worker.TaskFailure("automatic-validation-unsupported")))
     monkeypatch.setattr(worker, "judge_review", AsyncMock(side_effect=AssertionError("No judge expected")))
     payload = {"payload": {"issue_number": 2, "repo": "org/repo", "issue_title": "Fix bug"}}
-    result = asyncio.run(worker._run_worker(client, "http://acceptor", "worker", payload, "2"))
+    result = asyncio.run(worker._run_worker(client, "https://acceptor", "worker", payload, "2"))
     assert result["task_id"] == "2"
     assert result["status"] == "failed"
     assert result["score"] == 0.0
-    assert result["error"] == "repository-policy-required"
+    assert result["error"] == "automatic-validation-unsupported"
     client.get.assert_not_awaited()
     client.post.assert_awaited_once_with(
-        "http://acceptor/api/v1/tasks/2", headers={"Authorization": f"token {worker.os.environ.get('GITHUB_TOKEN', '')}",
-                                                   "Content-Type": "application/json"}, json=result,
+        "https://acceptor/api/v1/tasks/2", headers={"Authorization": "token gateway-test-secret",
+                               "Content-Type": "application/json", "X-Task-Token": "callback-test-secret"},
+        json=result, follow_redirects=False,
     )
 
 
-def test_legacy_worker_still_spawns_polls_and_reports(monkeypatch, tmp_path):
+@pytest.mark.parametrize("repo", ["first/project", "another/backend"])
+def test_automatic_policy_needs_no_repository_entry(monkeypatch, tmp_path, repo):
+    monkeypatch.setenv("TASK_REPO_POLICIES", "{}")
+    files = {
+        "engine/app/__init__.py": "",
+        "engine/app/main.py": "value = 1\n",
+        "engine/tests/test_health.py": "def test_health(): assert True\n",
+        "engine/tests/helper.py": "value = 2\n",
+        "engine/pyproject.toml": "[project]\n",
+        ".github/workflows/ci.yml": "name: protected\n",
+    }
+    for path, content in files.items():
+        full = tmp_path / path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(content)
+    policy = worker._repo_policy(repo, str(tmp_path))
+    assert policy["editable_files"] == ["engine/app/__init__.py", "engine/app/main.py"]
+    assert "engine/tests/test_health.py" in policy["context_files"]
+    command = policy["validation_argv"]
+    assert command[:2] == ["/usr/local/bin/python", "-c"]
+    assert "/workspace/engine" in command[2]
+    assert "engine/tests/test_health.py" in command[2]
+    assert "no:cacheprovider" in command[2]
+    assert ".github/workflows/ci.yml" not in policy["context_files"]
+
+
+def test_automatic_policy_rejects_repository_without_tests(monkeypatch, tmp_path):
+    monkeypatch.setenv("TASK_REPO_POLICIES", "{}")
+    (tmp_path / "app.py").write_text("value = 1\n")
+    with pytest.raises(worker.TaskFailure, match="automatic-validation-unsupported"):
+        worker._repo_policy("any/repository", str(tmp_path))
+
+
+def test_legacy_worker_requires_assignment(monkeypatch, tmp_path):
     requests = []
 
     def acceptor(request):
@@ -343,10 +388,9 @@ def test_legacy_worker_still_spawns_polls_and_reports(monkeypatch, tmp_path):
     monkeypatch.setattr(worker.httpx, "AsyncClient", lambda **kwargs: client_class(transport=httpx.MockTransport(acceptor), **kwargs))
     monkeypatch.setenv("TASK_WORK_DIR", str(tmp_path))
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    result = asyncio.run(worker.run_worker("http://acceptor", "legacy", {"files": [{"path": "a.py", "content": "x=1"}]}))
-    assert result["task_id"] == "2"
-    assert requests == [("POST", "/api/v1/tasks/spawn"), ("GET", "/api/v1/tasks/2"), ("POST", "/api/v1/tasks/2")]
-    assert "x=1" in result["patch"]
+    with pytest.raises(ValueError, match="gateway-assignment-required"):
+        asyncio.run(worker.run_worker("https://acceptor", "legacy", {"files": [{"path": "a.py", "content": "x=1"}]}))
+    assert requests == []
     assert not list(tmp_path.glob("task-*"))
 
 
@@ -397,12 +441,81 @@ def test_judge_without_key_uses_heuristic(monkeypatch):
     factory.assert_not_called()
 
 
+def test_repository_client_has_no_global_token_fallback(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "legacy-test-only")
+    monkeypatch.delenv("TASK_REPOSITORY_TOKEN", raising=False)
+    with pytest.raises(worker.TaskFailure, match="repository-credential-required"):
+        worker.GitHub(None, "org/repo")
+
+
+@pytest.mark.parametrize("status,expired,reason", [(401, False, "repository-credential-denied"),
+                                                 (403, False, "repository-credential-denied"),
+                                                 (307, False, "github-api-failed"),
+                                                 (200, True, "repository-credential-expired")])
+def test_github_assigned_credential_failure_and_redirects(monkeypatch, status, expired, reason):
+    monkeypatch.setenv("TASK_REPOSITORY_TOKEN", "repo-test-only")
+    monkeypatch.setenv("TASK_REPOSITORY", "org/repo")
+    monkeypatch.setenv("TASK_CREDENTIAL_EXPIRES_AT", "1" if expired else "9999999999")
+    requests = []
+    def transport(request):
+        requests.append(request)
+        assert request.headers["Authorization"] == "Bearer repo-test-only"
+        assert "X-Task-Token" not in request.headers
+        return httpx.Response(status, headers={"Location": "https://different.test"}, json={})
+    async def fetch():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport), follow_redirects=True) as client:
+            await worker.GitHub(client, "org/repo").call("GET", "/contents")
+    with pytest.raises(worker.TaskFailure, match=reason):
+        asyncio.run(fetch())
+    assert len(requests) == (0 if expired else 1)
+
+
+def test_github_credential_rejects_cross_repo_assignment(monkeypatch):
+    monkeypatch.setenv("TASK_REPOSITORY_TOKEN", "repo-test-only")
+    monkeypatch.setenv("TASK_REPOSITORY", "org/other")
+    with pytest.raises(worker.TaskFailure, match="repository-credential-binding-mismatch"):
+        worker.GitHub(None, "org/repo")
+
+
+@pytest.mark.parametrize("url", ["http://acceptor", "https://user:password@acceptor", "https://acceptor?token=value", "https://acceptor/#fragment"])
+def test_gateway_url_rejects_unsafe_origins(url):
+    with pytest.raises(ValueError, match="https-gateway-origin-required"):
+        worker._validate_gateway_url(url)
+
+
+@pytest.mark.parametrize("name", ["TASK_REPOSITORY_TOKEN", "GATEWAY_AUTH_TOKEN", "TASK_CALLBACK_TOKEN", "OPENAI_API_KEY"])
+def test_model_input_rejects_all_assigned_secrets(monkeypatch, name):
+    monkeypatch.setenv(name, "secret-test-only")
+    with pytest.raises(worker.TaskFailure, match="secret-in-model-context"):
+        asyncio.run(worker.judge_review(None, "patch containing secret-test-only", "output"))
+
+
+def test_report_does_not_forward_credentials_on_redirect(monkeypatch):
+    calls = []
+    def transport(request):
+        calls.append(request)
+        assert request.headers["Authorization"] == "token gateway-test-secret"
+        assert request.headers["X-Task-Token"] == "callback-test-secret"
+        assert "repo-test-only" not in request.content.decode()
+        return httpx.Response(307, headers={"Location": "https://different-host/tasks"}, json={})
+    async def report():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport), follow_redirects=True) as client:
+            await worker._report_result(client, {"Authorization": "token gateway-test-secret", "X-Task-Token": "callback-test-secret"},
+                                        "https://acceptor", "task", {"task_id": "task", "status": "failed"})
+    with pytest.raises(worker.TaskFailure, match="result-report-failed"):
+        asyncio.run(report())
+    assert len(calls) == 3 and {request.url.host for request in calls} == {"acceptor"}
+
+
 @pytest.fixture
 def issue_pipeline(monkeypatch, tmp_path):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "gateway"))
     import server
 
-    monkeypatch.setenv("GITHUB_TOKEN", "github-test-secret")
+    monkeypatch.setenv("TASK_REPOSITORY_TOKEN", "github-test-secret")
+    monkeypatch.setenv("TASK_REPOSITORY", "org/repo")
+    monkeypatch.setenv("TASK_CREDENTIAL_EXPIRES_AT", "9999999999")
+    monkeypatch.setenv("ALLOW_LOCAL_HTTP", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "model-test-secret")
     monkeypatch.setenv("CODER_URL", "http://model/v1")
     monkeypatch.setenv("CODER_MODEL", "configured-coder")
@@ -415,18 +528,32 @@ def issue_pipeline(monkeypatch, tmp_path):
               "validation_argv": ["/usr/local/bin/python", "-m", "pytest", "tests/test_greeting.py"],
               "validation_timeout": 15}
     monkeypatch.setenv("TASK_REPO_POLICIES", json.dumps({"org/repo": policy}))
-    monkeypatch.setattr(server, "TOKEN", "github-test-secret")
+    monkeypatch.setattr(server, "TOKEN", "gateway-test-secret")
     monkeypatch.setattr(server, "ALLOWED_REPOS", {"org/repo", "org/other"})
     state = SimpleNamespace(jobs=[], api_calls=[], model_calls=[], labels={"queued"}, comments=[],
                             branches={}, pulls=[], edits=[{"path": "src/greeting.py", "content": "greeting = 'hello'\n"}],
                             score=0.95, model_error=False, fail_lifecycle=False, invalid_identity=False,
-                            tree_mode="100644", base_sha="base", policy=policy, malformed_api=False, empty_choices=False)
+                            tree_mode="100644", base_sha="base", policy=policy, malformed_api=False, empty_choices=False,
+                            context={"src/greeting.py": "greeting = 'hi'\n"})
+    stored = {}
+    def kubernetes(method, path, body=None):
+        name = path.rsplit("/", 1)[-1]
+        if method == "POST":
+            stored[body["metadata"]["name"]] = body
+            return body
+        if name not in stored:
+            raise server.KubernetesError(404)
+        return stored.pop(name) if method == "DELETE" else stored[name]
+    monkeypatch.setattr(server, "_k8s_request", kubernetes)
+    monkeypatch.setattr(server.secrets, "token_urlsafe", lambda length: "callback-test-secret")
 
     def gateway(method, path, body=None):
         raw = json.dumps(body).encode()
         handler = server.Handler.__new__(server.Handler)
         handler.command = method
-        handler.headers = {"Authorization": "token github-test-secret", "Content-Length": str(len(raw))}
+        handler.headers = {"Authorization": "token gateway-test-secret", "Content-Length": str(len(raw)),
+                   "X-Repository-Token": "github-test-secret", "X-Task-Token": "callback-test-secret"}
+        handler.client_address = ("127.0.0.1", 1234)
         handler.path = path
         handler.rfile, handler.wfile = io.BytesIO(raw), io.BytesIO()
         handler.send_response, handler.send_header, handler.end_headers = Mock(), Mock(), Mock()
@@ -443,13 +570,16 @@ def issue_pipeline(monkeypatch, tmp_path):
 
     monkeypatch.setattr(server, "_create_worker_job", create_job)
 
-    def api(method, path, body=None):
+    def api(method, path, body=None, *, token="github-test-secret"):
+        assert token == "github-test-secret"
         state.api_calls.append((method, path, body))
         suffix = path.removeprefix("/repos/org/repo")
         if suffix == "":
             if state.malformed_api:
                 return []
-            return {"full_name": "org/repo", "default_branch": "release/stable"}
+            return {"full_name": "org/repo", "default_branch": "release/stable", "permissions": {"push": True}}
+        if suffix in ("/contents", "/issues?per_page=1"):
+            return []
         if suffix == "/issues/2":
             return {"number": 2, "html_url": "https://github.com/org/other/issues/2" if state.invalid_identity else "https://github.com/org/repo/issues/2",
                     "state": "open", "title": "Update greeting", "body": "Return hello instead of hi."}
@@ -502,6 +632,9 @@ def issue_pipeline(monkeypatch, tmp_path):
 
     def transport(request):
         if request.url.host == "acceptor":
+            assert request.headers["Authorization"] == "token gateway-test-secret"
+            assert request.headers["X-Task-Token"] == "callback-test-secret"
+            assert "github-test-secret" not in request.content.decode()
             code, body = gateway(request.method, request.url.raw_path.decode(), json.loads(request.content))
             return httpx.Response(code, json=body)
         if request.url.host == "api.github.com":
@@ -520,7 +653,7 @@ def issue_pipeline(monkeypatch, tmp_path):
                                            "model": body["model"], "choices": []})
         if body["model"] == "configured-coder":
             prompt = json.loads(body["messages"][1]["content"])
-            assert prompt["files"] == {"src/greeting.py": "greeting = 'hi'\n"}
+            assert prompt["files"] == state.context
             content = json.dumps({"edits": state.edits})
         else:
             assert body["model"] == "configured-judge"
@@ -543,7 +676,7 @@ def issue_pipeline(monkeypatch, tmp_path):
     async def validate(workspace, config):
         assert Path(workspace).is_relative_to(tmp_path / "work")
         assert Path(workspace, "src/greeting.py").read_text() == "greeting = 'hello'\n"
-        assert config["validation_argv"] == policy["validation_argv"]
+        assert config["validation_argv"] == state.policy["validation_argv"]
         return "1 passed"
     state.runner = AsyncMock(side_effect=validate)
     monkeypatch.setattr(worker, "_run_validation", state.runner)
@@ -552,15 +685,41 @@ def issue_pipeline(monkeypatch, tmp_path):
     assert code == 202 and len(state.jobs) == 1
     env = state.jobs[0]["spec"]["template"]["spec"]["containers"][0]["env"]
     for entry in env:
-        monkeypatch.setenv(entry["name"], entry["value"])
+        if "value" in entry:
+            monkeypatch.setenv(entry["name"], entry["value"])
+        else:
+            reference = entry["valueFrom"]["secretKeyRef"]
+            monkeypatch.setenv(entry["name"], base64.b64decode(stored[reference["name"]]["data"][reference["key"]]).decode())
     state.task_id = spawned["task_id"]
     state.task_path = "/api/v1/tasks/" + state.task_id
     return state
 
 
+def test_issue_to_pr_without_repository_configuration(issue_pipeline, monkeypatch):
+    state = issue_pipeline
+    monkeypatch.setenv("TASK_REPO_POLICIES", "{}")
+    monkeypatch.setenv("ALLOWED_REPOS", "*")
+    snapshot = worker._snapshot
+
+    async def snapshot_with_tests(github, editor, sha):
+        await snapshot(github, editor, sha)
+        full = Path(editor.working_dir, "tests/test_greeting.py")
+        full.parent.mkdir()
+        full.write_text("def test_greeting(): assert True\n")
+        state.context["tests/test_greeting.py"] = full.read_text()
+        state.policy = worker._default_repo_policy(editor.working_dir)
+
+    monkeypatch.setattr(worker, "_snapshot", snapshot_with_tests)
+    final = asyncio.run(worker.main_async(acceptor_url="https://acceptor"))
+    assert final["status"] == "completed", final
+    assert final["pr_url"] == "https://github.com/org/repo/pull/3"
+    state.runner.assert_awaited_once()
+    assert state.gateway("GET", state.task_path)[1]["status"] == "completed"
+
+
 def test_issue_to_pr_terminal_end_to_end(issue_pipeline, tmp_path):
     state = issue_pipeline
-    final = asyncio.run(worker.main_async(acceptor_url="http://acceptor"))
+    final = asyncio.run(worker.main_async(acceptor_url="https://acceptor"))
     assert final["status"] == "completed" and "error" not in final, (final, state.api_calls, state.model_calls)
     assert final["pr_url"] == "https://github.com/org/repo/pull/3"
     assert len(state.jobs) == len(state.branches) == len(state.pulls) == 1
@@ -573,7 +732,7 @@ def test_issue_to_pr_terminal_end_to_end(issue_pipeline, tmp_path):
     assert not list((tmp_path / "work").iterdir())
     assert state.gateway("POST", state.task_path, final)[0] == 200
     assert len(state.comments) == 1
-    repeated = asyncio.run(worker.main_async(acceptor_url="http://acceptor"))
+    repeated = asyncio.run(worker.main_async(acceptor_url="https://acceptor"))
     assert repeated == final
     assert len(state.branches) == len(state.pulls) == 1
     assert len([call for call in state.api_calls if call[:2] == ("POST", "/repos/org/repo/pulls")]) == 1
@@ -606,7 +765,7 @@ def test_issue_failures_never_publish(issue_pipeline, monkeypatch, failure):
         state.malformed_api = True
     elif failure == "empty-choices":
         state.empty_choices = True
-    final = asyncio.run(worker.main_async(acceptor_url="http://acceptor"))
+    final = asyncio.run(worker.main_async(acceptor_url="https://acceptor"))
     assert final["status"] == "failed" and final["error"]
     assert not state.branches and not state.pulls
     assert not any(method == "POST" and ("/git/" in path or "/pulls" in path) for method, path, _ in state.api_calls)
@@ -618,7 +777,7 @@ def test_issue_failures_never_publish(issue_pipeline, monkeypatch, failure):
 def test_issue_lifecycle_retry_after_success(issue_pipeline):
     state = issue_pipeline
     state.fail_lifecycle = True
-    final = asyncio.run(worker.main_async(acceptor_url="http://acceptor"))
+    final = asyncio.run(worker.main_async(acceptor_url="https://acceptor"))
     assert final["status"] == "completed" and final["lifecycle_pending"], (final, state.api_calls, state.model_calls)
     saved = state.gateway("GET", state.task_path)[1]
     assert saved["lifecycle"] == "pending" and saved["result"]["pr_url"] == final["pr_url"]
@@ -634,7 +793,7 @@ def test_result_delivery_failure_is_not_success(monkeypatch, tmp_path):
     client = AsyncMock()
     client.post.return_value = httpx.Response(202, json={"status": "accepted"})
     payload = {"task_id": "2", "files": [{"path": "a.py", "content": "x=1"}]}
-    final = asyncio.run(worker._run_worker(client, "http://acceptor", "worker", payload, "2"))
+    final = asyncio.run(worker._run_worker(client, "https://acceptor", "worker", payload, "2"))
     assert final["error"] == "result-report-failed" and final["report_failed"]
     assert client.post.await_count == 3
 

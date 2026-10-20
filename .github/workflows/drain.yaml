@@ -1,57 +1,12 @@
-# NOTE: GitHub Actions workflow files intentionally omit apiVersion/kind
-# (kubectl flags them — that's expected for this file format).
-
-# ---------------------------------------------------------------------------
-# Autonomous drain-loop trigger workflow.
-# ---------------------------------------------------------------------------
-#
-# PROPOSAL (thinktank design discussion, not settled).
-#
-# This workflow fires on an issue `opened` or `assigned` event and drives ONE
-# autonomous drain pass: it reads the issue, POSTs the task to the in-cluster
-# SUPERVISOR Service (the always-on orchestrator pod, port 8000), triggers
-# asynchronously, exits after task acceptance, and the agent itself marks the
-# issue `done`.
-#
-# There is NO separate always-on runner pod. Task acceptance is handled by the
-# long-running orchestrator Deployment, which already keeps a Service at
-# `orchestrator.orchestrator.svc:8000`. This is the most resource-efficient
-# topology: one always-on pod (orchestrator) + ephemeral drain Jobs, no dedicated
-# runner, no RUNNER_TOKEN secret, no keepalive wrapper.
-#
-# Auth uses the built-in $GITHUB_TOKEN (already scoped by this workflow's
-# permissions: contents/actions/issues: write). No one-time RUNNER_TOKEN is
-# needed — the token is a permanent PAT that is only used by the machine token
-# GitHub issues these on operate with.
-#
-# === THE `done`-LABEL KILL-SWITCH (idempotency + loop termination) ===
-#
-# The agent's work (opening a PR) does NOT close the issue. So "pending = open
-# issues" can NEVER be satisfied by GitHub alone -> infinite loop. We add an
-# EXPLICIT terminal state: the agent labels the issue `done` only AFTER it
-# opens the PR successfully.
-#   - "pending"     = issues WITHOUT the `done` label  (what the loop works on)
-#   - "terminal"    = issues WITH the `done` label      (what the loop ignores)
-#   - the `done` label is the loop's kill-switch.
-#
-# Dedup by issue number + task id: if issue X's event fires a new run while X
-# is mid-flight, that run sees X is already `done` and skips to the next task —
-# no double-processing, no race. See orchestrator/agent-job.yaml for the Job's
-# dedup-by-TASK_ID detail.
----
 name: Autonomous drain loop
 
 on:
   issues:
-    types: [opened, reopened, assigned, labeled]
+    types: [opened, reopened, assigned]
 
-# Scoped permissions — NOT a free-for-all PAT. The workflow operates on the
-# implicit machine token GitHub issues these on; no RUNNER_TOKEN secret is
-# needed (built-in $GITHUB_TOKEN is used for every API call below).
 permissions:
-  contents: write
-  actions: write
-  issues: write
+  contents: read
+  issues: read
 
 concurrency:
   group: drain-${{ github.repository }}-${{ github.event.issue.number }}
@@ -59,192 +14,69 @@ concurrency:
 
 jobs:
   send-to-orchestrator:
-    if: ${{ github.event.action != 'labeled' && github.event.issue.pull_request == null }}
+    if: ${{ github.event.issue.pull_request == null }}
     runs-on: ubuntu-latest
-
     steps:
-      - name: Start status check
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const issue = context.issue;
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issue.number,
-              body: `Autonomous drain pass started for issue #${issue.number} (title: "${context.payload.issue?.title || ""}").`,
-            });
-
       - name: Check issue state
-        # Guard: skip if the issue is already `done` (mid-flight or completed).
-        # This is the event-level dedup for the kill-switch.
         id: issue-state
         uses: actions/github-script@v7
         with:
           script: |
-            try {
-              const { data: label } = await github.rest.issues.listLabelsOnIssue({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-              });
-              if (label.some(l => l.name === "done")) {
-                core.info(`Issue #${context.issue.number} already marked "done" — skipping this run.`);
-                core.setOutput("skip", "true");
-              }
-            } catch (e) {
-              core.setFailed(e.message);
-            }
-
-      - name: Skip if already done
-        if: steps.issue-state.outputs.skip == 'true'
-        run: exit 0
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Read issue payload
-        # Capture issue identity from the event payload for logging / tracing.
-        id: issue
-        run: |
-          echo "issue-number=${{ github.event.issue.number }}"
-          echo "issue-title=${{ github.event.issue.title }}"
-          echo "issue-url=${{ github.event.issue.html_url }}"
-          echo "issue-number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
-          echo "issue-title=${{ github.event.issue.title }}" >> "$GITHUB_OUTPUT"
-          echo "issue-url=${{ github.event.issue.html_url }}" >> "$GITHUB_OUTPUT"
-
-      - name: POST task to orchestrator
-        id: spawn
-        # Ask the always-on orchestrator to run the autonomous drain pass for this
-        # issue. The orchestrator accepts a task payload, runs the LangGraph drain
-        # loop, opens a PR, and labels the issue `done`. Auth uses the built-in
-        # $GITHUB_TOKEN (scoped by this workflow's permissions) — no RUNNER_TOKEN.
-        # The orchestrator's in-cluster Service is `orchestrator.orchestrator.svc:8000`.
-        env:
-          ORCHESTRATOR_URL: ${{ secrets.ORCHESTRATOR_URL }}
-          ORCHESTRATOR_TOKEN: ${{ secrets.ORCHESTRATOR_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          if [ -z "$ORCHESTRATOR_URL" ] || [ -z "$ORCHESTRATOR_TOKEN" ]; then
-            echo "ERROR: Missing ORCHESTRATOR_URL or ORCHESTRATOR_TOKEN secrets"
-            exit 1
-          fi
-
-          REF="${{ github.ref }}"
-          REPO="${{ github.repository }}"
-          ISSUE_NUM="${{ github.event.issue.number }}"
-          ISSUE_TITLE="${{ github.event.issue.title }}"
-          ISSUE_URL="${{ github.event.issue.html_url }}"
-          ORCHESTRATOR_URL="${ORCHESTRATOR_URL:-https://orchestrator.orchestrator.svc.cluster.local:8000}"
-          ORCHESTRATOR_URL="${ORCHESTRATOR_URL}"
-          ORCHESTRATOR_TOKEN="${ORCHESTRATOR_TOKEN}"
-          RESPONSE=$(curl -fsS -X POST "${ORCHESTRATOR_URL}" \
-            -H "Authorization: token $ORCHESTRATOR_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"name\":\"orchestrator-agent\",\"ref\":\"${REF}\",\"payload\":{\"issue_number\":${ISSUE_NUM},\"issue_title\":\"${ISSUE_TITLE}\",\"issue_url\":\"${ISSUE_URL}\",\"repo\":\"${REPO}\",\"default_branch\":\"${{ github.event.repository.default_branch }}\"}}")
-
-          echo "Spawn response: $RESPONSE"
-
-          STATUS=$(echo "$RESPONSE" | jq -r '.status // empty')
-          TASK_ID=$(echo "$RESPONSE" | jq -r '.task_id // empty')
-
-          if [ "$STATUS" != "accepted" ] || [ -z "$TASK_ID" ]; then
-            echo "ERROR: Orchestrator rejected task or returned empty task_id (status='${STATUS}', task_id='${TASK_ID}')"
-            exit 1
-          fi
-
-          echo "task-id=${TASK_ID}" >> "$GITHUB_OUTPUT"
-
-      - name: Mark issue queued
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const issue_number = context.issue.number;
-            const labelName = "queued";
-
-            try {
-              await github.rest.issues.getLabel({
-                owner,
-                repo,
-                name: labelName,
-              });
-            } catch (e) {
-              if (e.status === 404) {
-                await github.rest.issues.createLabel({
-                  owner,
-                  repo,
-                  name: labelName,
-                  color: "0e8a16",
-                  description: "Task accepted by orchestrator and queued",
-                });
-              } else {
-                throw e;
-              }
-            }
-
-            await github.rest.issues.addLabels({
-              owner,
-              repo,
-              issue_number,
-              labels: [labelName],
-            });
-
-      - name: Set drain status
-        if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const ok = "${{ job.status }}" === "success";
-            const taskId = "${{ steps.spawn.outputs.task-id }}";
-            const body = ok
-              ? `Task accepted and queued (task_id=${taskId}). Execution continues asynchronously in-cluster; a PR is opened later when the agent has a meaningful patch.`
-              : "FAILED before queueing — see workflow logs.";
-            await github.rest.issues.createComment({
+            const { data: labels } = await github.rest.issues.listLabelsOnIssue({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body,
             });
+            core.setOutput("skip", labels.some(label => label.name === "done") ? "true" : "false");
 
-  cleanup-queued-on-done:
-    if: ${{ github.event.action == 'labeled' && github.event.label.name == 'done' && github.event.issue.pull_request == null }}
-    runs-on: ubuntu-latest
+      - name: POST task to orchestrator
+        if: steps.issue-state.outputs.skip != 'true'
+        env:
+          ORCHESTRATOR_URL: ${{ secrets.ORCHESTRATOR_URL }}
+          ORCHESTRATOR_TOKEN: ${{ secrets.ORCHESTRATOR_TOKEN }}
+          REPOSITORY_TOKEN: ${{ secrets.TASK_REPOSITORY_TOKEN }}
+        shell: python
+        run: |
+          import json
+          import os
+          import re
+          import urllib.request
+          from urllib.parse import urlsplit
 
-    steps:
-      - name: Remove queued label after done
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const issue_number = context.issue.number;
+          url = os.environ["ORCHESTRATOR_URL"]
+          gateway_token = os.environ["ORCHESTRATOR_TOKEN"]
+          repository_token = os.environ["REPOSITORY_TOKEN"]
+          parsed = urlsplit(url)
+          if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                  or parsed.query or parsed.fragment or parsed.path != "/api/v1/tasks/spawn"):
+              raise SystemExit("ORCHESTRATOR_URL must be an HTTPS task intake URL")
+          if not gateway_token or not repository_token or gateway_token == repository_token:
+              raise SystemExit("Distinct gateway and source-repository secrets are required")
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as event_file:
+              event = json.load(event_file)
+          repo = os.environ["GITHUB_REPOSITORY"]
+          if event["repository"]["full_name"].lower() != repo.lower():
+              raise SystemExit("Repository identity mismatch")
+          payload = {"repo": repo, "issue_number": event["issue"]["number"]}
 
-            const { data: labels } = await github.rest.issues.listLabelsOnIssue({
-              owner,
-              repo,
-              issue_number,
-            });
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  raise ValueError("Intake redirect rejected")
 
-            const hasQueued = labels.some((l) => l.name === "queued");
-            if (!hasQueued) {
-              core.info(`Issue #${issue_number} does not have 'queued'; nothing to remove.`);
-              return;
-            }
-
-            await github.rest.issues.removeLabel({
-              owner,
-              repo,
-              issue_number,
-              name: "queued",
-            });
-
-            await github.rest.issues.createComment({
-              owner,
-              repo,
-              issue_number,
-              body: "Removed `queued` after `done` was applied.",
-            });
+          request = urllib.request.Request(url, method="POST", data=json.dumps(payload).encode(), headers={
+              "Authorization": "token " + gateway_token,
+              "X-Repository-Token": repository_token,
+              "Content-Type": "application/json",
+          })
+          try:
+              with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+                  raw = response.read(1048577)
+                  if response.status != 202 or len(raw) > 1048576:
+                      raise ValueError("Invalid intake response")
+                  result = json.loads(raw)
+              task_id = result.get("task_id", "")
+              if not re.fullmatch(r"issue-[a-f0-9]{32}", task_id) or result.get("status") not in ("running", "completed"):
+                  raise ValueError("Invalid task acknowledgement")
+          except (OSError, ValueError, TypeError, AttributeError):
+              raise SystemExit("Task intake failed; check transport, access and gateway task state") from None
+          print("Task accepted: " + task_id)

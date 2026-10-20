@@ -17,7 +17,7 @@ is missing.
 
 Gateway-assigned Jobs provide ASSIGNED_TASK_ID and ASSIGNED_TASK_PAYLOAD (JSON).
 They execute explicit edits directly without spawning or polling another task.
-Issue-only payloads use operator-configured repository policies and publish only
+Issue-only payloads use discovered defaults or optional repository policies and publish only
 after sandboxed validation and judge acceptance.
 """
 
@@ -34,7 +34,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path, PurePosixPath
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 import openai
@@ -46,7 +46,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("worker")
 
-DEFAULT_ACCEPTOR_URL = "http://orchestrator.local:8000"
+DEFAULT_ACCEPTOR_URL = "https://orchestrator.local"
 DEFAULT_JUDGE_MODEL = "qwen2.5-coder-7b-instruct-q4-km@32k"
 HTTP_TIMEOUT = 30.0
 POLL_TIMEOUT = 1800.0
@@ -181,9 +181,11 @@ def _issue_identity(payload):
     return repo, issue
 
 
-def _repo_policy(repo):
+def _repo_policy(repo, workspace=None):
     policies = json.loads(os.environ.get("TASK_REPO_POLICIES", "{}"))
     policy = next((value for key, value in policies.items() if key.lower() == repo.lower()), None)
+    if policy is None and workspace is not None:
+        return _default_repo_policy(workspace)
     if not isinstance(policy, dict):
         raise TaskFailure("repository-policy-required")
     for key in ("context_files", "editable_files"):
@@ -201,21 +203,76 @@ def _repo_policy(repo):
     return policy
 
 
+def _default_repo_policy(workspace):
+    editor = CodeEditor(workspace)
+    sources, tests, documents = [], [], []
+    for full in sorted(Path(workspace).rglob("*")):
+        if not full.is_file():
+            continue
+        path = full.relative_to(workspace).as_posix()
+        try:
+            editor.safe_path(path)
+        except ValueError:
+            continue
+        if full.suffix == ".py":
+            if full.name.startswith("test_") or full.name.endswith("_test.py"):
+                tests.append(path)
+            elif not {"tests", "test"}.intersection(full.relative_to(workspace).parts):
+                sources.append(path)
+        elif full.suffix.lower() == ".md":
+            documents.append(path)
+    if not sources or not tests:
+        raise TaskFailure("automatic-validation-unsupported: Python sources and tests required")
+    roots = {"/workspace"}
+    for path in sources:
+        full = Path(workspace, path)
+        parent = full.parent
+        while parent != Path(workspace) and (parent / "__init__.py").is_file():
+            parent = parent.parent
+        roots.add("/workspace/" + parent.relative_to(workspace).as_posix())
+    command = (
+        "import sys; sys.path[:0] = " + repr(sorted(roots)) + "; import pytest; "
+        "sys.exit(pytest.main(" + repr(tests + ["-p", "no:cacheprovider", "--basetemp=/tmp/pytest"]) + "))"
+    )
+    if len(command) > 8192:
+        raise TaskFailure("automatic-validation-too-large")
+    context, size = [], 0
+    for path in sources + tests + documents:
+        try:
+            content = Path(workspace, path).read_text(encoding="utf-8")
+        except UnicodeError:
+            continue
+        length = len(content.encode())
+        if len(context) < 20 and size + length <= 65536:
+            context.append(path)
+            size += length
+    if not context:
+        raise TaskFailure("model-context-required")
+    return {"context_files": context, "editable_files": sources,
+            "validation_argv": ["/usr/local/bin/python", "-c", command], "validation_timeout": 120}
+
+
 class GitHub:
     def __init__(self, client, repo):
         self.client = client
         self.repo = repo
         self.base = "/repos/" + quote(repo, safe="/")
-        self.headers = {"Authorization": "Bearer " + os.environ.get("GITHUB_TOKEN", ""),
+        self.headers = {"Authorization": "Bearer " + os.environ.get("TASK_REPOSITORY_TOKEN", ""),
                         "Accept": "application/vnd.github+json"}
-        if not os.environ.get("GITHUB_TOKEN"):
-            raise TaskFailure("github-token-required")
+        if not os.environ.get("TASK_REPOSITORY_TOKEN"):
+            raise TaskFailure("repository-credential-required")
+        if os.environ.get("TASK_REPOSITORY", "").lower() != repo.lower():
+            raise TaskFailure("repository-credential-binding-mismatch")
 
     async def call(self, method, path, body=None, optional=False):
+        if float(os.environ.get("TASK_CREDENTIAL_EXPIRES_AT", "0")) <= time.time():
+            raise TaskFailure("repository-credential-expired")
         async with self.client.stream(method, "https://api.github.com" + self.base + path,
                                       headers=self.headers, json=body, follow_redirects=False) as response:
             if optional and response.status_code == 404:
                 return None
+            if response.status_code in (401, 403):
+                raise TaskFailure("repository-credential-denied")
             if response.status_code not in (200, 201, 204):
                 raise TaskFailure("github-api-failed")
             data = bytearray()
@@ -262,9 +319,7 @@ async def _generate_edits(issue, context, policy):
         raise TaskFailure("coder-configuration-required")
     prompt = json.dumps({"issue": {"title": issue.get("title", "")[:1000], "body": (issue.get("body") or "")[:16000]},
                          "files": context, "editable_files": policy["editable_files"]})
-    for name in ("GITHUB_TOKEN", "OPENAI_API_KEY"):
-        if os.environ.get(name) and os.environ[name] in prompt:
-            raise TaskFailure("secret-in-model-context")
+    _reject_secret_content(prompt)
     async with openai.AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"], base_url=os.environ["CODER_URL"],
                                 timeout=HTTP_TIMEOUT, max_retries=0) as coder:
         response = await coder.chat.completions.create(
@@ -354,10 +409,7 @@ async def _publish(github, repo, issue, task_id, branch, base_sha, commit, edits
 
 async def _implement_issue(client, payload, task_id, workspace):
     repo, issue_number = _issue_identity(payload)
-    policy = _repo_policy(repo)
     editor = CodeEditor(workspace)
-    for path in policy["context_files"] + policy["editable_files"]:
-        editor.safe_path(path)
     github = GitHub(client, repo)
     metadata = await github.call("GET", "")
     issue = await github.call("GET", f"/issues/{issue_number}")
@@ -368,6 +420,9 @@ async def _implement_issue(client, payload, task_id, workspace):
     sha = ref["object"]["sha"]
     commit = await github.call("GET", "/git/commits/" + sha)
     await _snapshot(github, editor, sha)
+    policy = _repo_policy(repo, workspace)
+    for path in policy["context_files"] + policy["editable_files"]:
+        editor.safe_path(path)
     context = {path: editor.safe_path(path).read_text(encoding="utf-8") for path in policy["context_files"]}
     if sum(len(value.encode()) for value in context.values()) > 65536:
         raise TaskFailure("model-context-too-large")
@@ -398,9 +453,7 @@ async def _implement_issue(client, payload, task_id, workspace):
         raise TaskFailure("judge-configuration-required")
     review_context = json.dumps({"issue": {"title": issue.get("title"), "body": (issue.get("body") or "")[:16000]},
                                  "patch": patch, "validation_output": validation[:16000]})
-    for name in ("GITHUB_TOKEN", "OPENAI_API_KEY"):
-        if os.environ.get(name) and os.environ[name] in review_context:
-            raise TaskFailure("secret-in-model-context")
+    _reject_secret_content(review_context)
     score, review = await judge_review(client, review_context, validation)
     threshold = float(os.environ.get("JUDGE_ACCEPT_THRESHOLD", "0.8"))
     if not math.isfinite(score) or not 0 <= score <= 1 or not 0.8 <= threshold <= 1 or score < threshold:
@@ -445,6 +498,7 @@ def _extract_edits(payload: dict) -> list[dict]:
 # --------------------------------------------------------------------------- #
 
 async def judge_review(client, patch: str, output: str) -> tuple[float, str]:
+    _reject_secret_content(patch + output)
     if not os.environ.get("OPENAI_API_KEY"):
         logger.warning("OPENAI_API_KEY not set; falling back to heuristic self-review.")
         return (0.7, "No OpenAI API key available; self-review omitted. Changes applied deterministically.")
@@ -508,6 +562,9 @@ async def run_worker(
     spawn_payload: dict | None,
     assigned_task_id: str | None = None,
 ) -> dict:
+    _validate_gateway_url(acceptor_url)
+    if assigned_task_id is None:
+        raise ValueError("gateway-assignment-required")
     if assigned_task_id is not None:
         assigned_task_id = _validate_assigned_task(assigned_task_id, spawn_payload)
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
@@ -538,10 +595,15 @@ async def _run_worker(
     spawn_payload: dict | None,
     assigned_task_id: str | None,
 ) -> dict:
-    github_token = os.environ.get("GITHUB_TOKEN", "")
+    _validate_gateway_url(acceptor_url)
+    gateway_token = os.environ.get("GATEWAY_AUTH_TOKEN", "")
+    if not gateway_token or not os.environ.get("TASK_CALLBACK_TOKEN"):
+        raise ValueError("gateway-auth-and-task-callback-required")
+    _reject_secret_content(json.dumps(spawn_payload))
     headers = {
-        "Authorization": f"token {github_token}",
+        "Authorization": f"token {gateway_token}",
         "Content-Type": "application/json",
+        "X-Task-Token": os.environ["TASK_CALLBACK_TOKEN"],
     }
     job_start = time.monotonic()
     ACTIVE_JOBS.inc()
@@ -582,12 +644,17 @@ async def _execute_task(client, headers, acceptor_url, worker_id, spawn_payload,
                 if not changed or len(changed) != len(edits):
                     raise TaskFailure("edits-not-applied")
                 patch = render_patch(changed, contents)
+                _reject_secret_content(patch + output)
                 score, review = await judge_review(client, patch, output)
                 final = {"task_id": task_id, **identity, "status": "completed", "output": output,
                          "patch": patch, "score": score, "review": review}
     except Exception as exc:  # noqa: BLE001
         reason = str(exc) if isinstance(exc, TaskFailure) else "task-execution-failed"
         final = {"task_id": task_id, **identity, "status": "failed", "score": 0.0, "error": reason}
+    try:
+        _reject_secret_content(json.dumps(final))
+    except TaskFailure:
+        final = {"task_id": task_id, **identity, "status": "failed", "score": 0.0, "error": "secret-in-model-context"}
     try:
         report = await _report_result(client, headers, acceptor_url, task_id, final)
         if report.get("lifecycle") != "synced":
@@ -651,10 +718,12 @@ async def _report_result(
     task_id: str,
     final: dict,
 ) -> dict:
+    _validate_gateway_url(acceptor_url)
+    _reject_secret_content(json.dumps(final))
     url = f"{acceptor_url}/api/v1/tasks/{task_id}"
     for _attempt in range(3):
         try:
-            response = await client.post(url, headers=headers, json=final)
+            response = await client.post(url, headers=headers, json=final, follow_redirects=False)
             body = response.json()
             if response.status_code == 200 and isinstance(body, dict) and body.get("task_id") == task_id and body.get("status") == final["status"]:
                 logger.info("Persisted result for task %s.", task_id)
@@ -667,6 +736,19 @@ async def _report_result(
 # --------------------------------------------------------------------------- #
 # Health endpoint
 # --------------------------------------------------------------------------- #
+
+def _reject_secret_content(content):
+    for name in ("TASK_REPOSITORY_TOKEN", "GATEWAY_AUTH_TOKEN", "TASK_CALLBACK_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY"):
+        if os.environ.get(name) and os.environ[name] in content:
+            raise TaskFailure("secret-in-model-context")
+
+
+def _validate_gateway_url(url):
+    parsed = urlsplit(url)
+    local = parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1") and os.environ.get("ALLOW_LOCAL_HTTP") == "true"
+    if (parsed.scheme != "https" and not local) or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/"):
+        raise ValueError("https-gateway-origin-required")
+
 
 async def serve_healthz() -> None:
     server = http.Server("0.0.0.0", 8000)
@@ -691,7 +773,7 @@ async def main_async(
 ) -> dict:
     acceptor_url = acceptor_url or os.environ.get("ACCEPTOR_URL", DEFAULT_ACCEPTOR_URL)
     worker_id = worker_id or os.environ.get("WORKER_ID", "worker")
-    logger.info("Worker %s starting; acceptor=%s", worker_id, acceptor_url)
+    logger.info("Worker %s starting", worker_id)
     assigned_task_id = os.environ.get("ASSIGNED_TASK_ID")
     assigned_payload = os.environ.get("ASSIGNED_TASK_PAYLOAD")
     if assigned_task_id is not None or assigned_payload is not None:

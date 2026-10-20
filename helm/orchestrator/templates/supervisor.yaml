@@ -25,6 +25,7 @@ spec:
         app: orchestrator
         component: supervisor
     spec:
+      automountServiceAccountToken: false
       containers:
         - name: supervisor
           image: {{ .Values.supervisor.image | default "ghcr.io/utopiklab/code-factory-supervisor:latest" }}
@@ -40,11 +41,6 @@ spec:
               cpu: {{ .Values.supervisor.config.cpuLimit | default "2500m" }}
               memory: {{ .Values.supervisor.config.memoryLimit | default "5Gi" }}
           env:
-            - name: GITHUB_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Chart.Name }}-secrets
-                  key: github-token
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -76,4 +72,4 @@ spec:
               port: metrics
             periodSeconds: 15
       imagePullSecrets:
-        - name: ghcr-secret
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}

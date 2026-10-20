@@ -3,6 +3,55 @@
     "title": "k8s-inference values",
     "type": "object",
     "properties": {
+        "registry": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "create",
+                "username",
+                "token"
+            ],
+            "properties": {
+                "create": {
+                    "type": "boolean"
+                },
+                "username": {
+                    "type": "string"
+                },
+                "token": {
+                    "type": "string"
+                }
+            },
+            "if": {
+                "properties": {
+                    "create": {
+                        "const": true
+                    }
+                }
+            },
+            "then": {
+                "properties": {
+                    "username": {
+                        "minLength": 1,
+                        "pattern": "^[^<>\\s]+$"
+                    },
+                    "token": {
+                        "minLength": 1,
+                        "pattern": "^[^<>\\s]+$"
+                    }
+                }
+            },
+            "else": {
+                "properties": {
+                    "username": {
+                        "maxLength": 0
+                    },
+                    "token": {
+                        "maxLength": 0
+                    }
+                }
+            }
+        },
         "global": {
             "type": "object",
             "properties": {

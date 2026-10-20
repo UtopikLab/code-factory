@@ -8,10 +8,15 @@ namespace: "orchestrator"
 
 icon: ""
 
+registry:
+  create: false
+  username: ""
+  token: ""
+
 # Supervisor (code-factory-supervisor) Deployment — the resident LangGraph loop.
 # Shared values for both the supervisor and task-acceptor resources.
 supervisor:
-  image: "ghcr.io/utopiklab/code-factory-supervisor:32093d2660ac9356560d5f6cbe13867e6982f718"
+  image: "ghcr.io/utopiklab/code-factory-supervisor:bfb56cbc23ed5901dd4a5936473a66a1a82912f4"
   imagePullPolicy: Always
   replicas: 1
   labels:
@@ -27,7 +32,7 @@ supervisor:
     repo: "*"
     # In-cluster gateway DNS for the coder-worker's ACCEPTOR_URL. Defaults to the
     # gateway Service DNS (e.g. orchestrator-orchestrator-gateway.orchestrator.svc.cluster.local:8000).
-    acceptor-url: "http://orchestrator-orchestrator-gateway.orchestrator.svc.cluster.local:8000"
+    acceptor-url: "https://orchestrator.local"
     # OpenAI API key consumed by the supervisor loop + gateway. Sourced from the
     # secrets-values.yaml chart (passed via `--values`), so it is empty here by
     # default and overridden at deploy time.
@@ -46,7 +51,7 @@ supervisor:
 # (the worker Job image + resource config).
 worker:
   name: worker
-  image: "ghcr.io/utopiklab/code-factory-worker:32093d2660ac9356560d5f6cbe13867e6982f718"
+  image: "ghcr.io/utopiklab/code-factory-worker:bfb56cbc23ed5901dd4a5936473a66a1a82912f4"
   imagePullPolicy: Always
   labels:
     app: orchestrator
@@ -66,7 +71,16 @@ worker:
 # (e.g. `docker buildx build`), exactly like the supervisor and coder-worker
 # images. Overridable via values.
 gateway:
-  image: "ghcr.io/utopiklab/code-factory-gateway:32093d2660ac9356560d5f6cbe13867e6982f718"
+  auth:
+    existingSecret: "orchestrator-gateway-auth"
+    token: ""
+  trustTlsProxy: false
+  trustedTlsProxyCidrs: []
+  ingress:
+    host: "orchestrator.local"
+    tlsSecretName: "orchestrator-gateway-tls"
+  taskCredentialTtlSeconds: 86400
+  image: "ghcr.io/utopiklab/code-factory-gateway:bfb56cbc23ed5901dd4a5936473a66a1a82912f4"
   imagePullPolicy: Always
   replicas: 1
   persistence:

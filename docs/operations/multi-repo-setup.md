@@ -1,289 +1,79 @@
 # Multi-Repo Orchestrator Configuration
 
-Push tasks from **any GitHub repository** to the k8s-node01 orchestrator.
+Each originating repository supplies its own task credential. A shared registry
+token or global GitHub PAT is not a repository credential service.
+Read [credential separation and migration](credential-separation.md) and the
+[new repository execution contract](new-repo-setup.md) before rollout.
 
----
+## Per-Repository Setup
 
-## Quick Start
+Use the canonical [drain workflow](../../.github/workflows/drain.yaml) in each source
+repository. Issue-only requests are supported; PR-only events are not implementation
+requests. Configure these Actions secrets independently:
 
-### Step 1: Update Orchestrator to Accept Multiple Repos
+| Secret | Purpose |
+|---|---|
+| `ORCHESTRATOR_URL` | Trusted HTTPS task intake URL ending `/api/v1/tasks/spawn` |
+| `ORCHESTRATOR_TOKEN` | Dedicated gateway-authentication secret, not a GitHub PAT |
+| `TASK_REPOSITORY_TOKEN` | Fine-grained PAT scoped to this source repository |
 
-```bash
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+The URL and gateway-auth secret may be shared among trusted callers. The repository
+credential must not be shared across source repositories. It needs Contents, Pull
+requests and Issues read/write, with Metadata read and an actor with repository write
+access. The gateway checks identity, actor write metadata and authenticated reads
+before acceptance. These checks do not prove every token write grant; GitHub still
+enforces actual writes. Missing permission metadata is rejected, not guessed.
 
-# Option A: Accept tasks from ANY repo
-kubectl set env deployment/k8s-inference-orchestrator \
-  -n orchestrator \
-  ALLOWED_REPOS="*"
+GHCR credentials remain only in existing Kubernetes `imagePullSecrets`, with
+`read:packages`. They are not mounted into gateway/worker environments.
+The workflow has no implicit built-in `GITHUB_TOKEN` fallback. The migration guide
+explains workflow-token expiry, PR limitations and required rotation of the exposed PAT.
 
-# Option B: Whitelist specific repos
-kubectl set env deployment/k8s-inference-orchestrator \
-  -n orchestrator \
-  ALLOWED_REPOS="org/repo1,org/repo2,MyOrg/another-repo"
-```
+## Repository Selection
 
-Verify the change:
-```bash
-kubectl rollout status deployment/k8s-inference-orchestrator -n orchestrator --timeout=60s
-```
+Set `gateway.config.repo` (or the fallback `supervisor.config.repo`) through the
+operator-owned Helm configuration:
 
-### Step 2: On Each Repository, Create GitHub Actions Workflow
+| Value | Meaning |
+|---|---|
+| `*` | Any repository identity, still requiring its own credential/access validation |
+| `org/repo` | One allowed repository |
+| `org/repo,other/project` | An additional comma-separated allowlist |
 
-Create `.github/workflows/orchestrator-drain.yaml`:
+Automatic Python source/test discovery remains the default with
+`worker.repoPolicies: {}`. Optional policy overrides narrow context, editable paths
+and fixed validation commands. The sandbox and publication gates are unchanged.
+An allowlist neither grants GitHub permissions nor creates a sandbox.
 
-```yaml
-name: Send to Orchestrator
+## Task Ownership And Recovery
 
-on:
-  issues:
-    types: [opened, labeled]
-  pull_request:
-    types: [opened]
-  workflow_dispatch:
+Issue numbers collide across repositories. Keep the opaque task ID returned by
+intake and use authenticated task GET state. A duplicate task cannot replace the
+assigned credential, refresh its expiry or launch another worker. The task Secret
+persists across gateway restarts and is used only by the assigned worker and terminal
+lifecycle processing. Worker reports additionally require their task callback token.
 
-jobs:
-  send-to-orchestrator:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Send task to orchestrator
-        run: |
-          TASK_ID="${{ github.event.issue.number || github.event.pull_request.number }}"
-          ISSUE_TITLE="${{ github.event.issue.title || github.event.pull_request.title }}"
-          ISSUE_URL="${{ github.event.issue.html_url || github.event.pull_request.html_url }}"
-          
-          curl -X POST "${{ secrets.ORCHESTRATOR_URL }}" \
-            -H "Authorization: token ${{ secrets.ORCHESTRATOR_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d @- <<EOF
-          {
-            "task_id": "$TASK_ID",
-            "repo": "${{ github.repository }}",
-            "issue_number": $TASK_ID,
-            "issue_title": "$ISSUE_TITLE",
-            "issue_url": "$ISSUE_URL"
-          }
-          EOF
-```
+HTTP 202 means dispatched, not completed. Completion requires a recorded terminal
+result with a same-repository PR link and `lifecycle: synced`. Use authenticated
+`POST /api/v1/tasks/{task_id}/sync` with JSON `{}` for terminal retry; never resubmit
+another repository's credential. GET exposes lifecycle and credential cleanup state.
+Expiry/revocation fails explicitly and does not select a global credential.
 
-### Step 3: Add GitHub Secrets to Each Repo
+Transient failures retain credentials until retry. Owned Secrets are deleted after
+sync or a permanent unusable-credential outcome; failed deletion can be retried.
+Stale mismatched Secrets are not adopted or deleted automatically. Interrupted
+queued/running tasks require operator reconciliation, not automatic replay/reset.
 
-For each repository, add two secrets in:  
-**Settings → Secrets and variables → Actions**
+The gateway-auth secret still permits broad task read/intake/resync access. This
+is not tenant isolation. Use separate gateways/namespaces for separate trust domains;
+namespace-scoped dynamic Secret permissions cannot be limited by name prefix with RBAC.
 
-| Secret | Value | Notes |
-|---|---|---|
-| `ORCHESTRATOR_URL` | `http://orchestrator.local/api/v1/tasks/spawn` | Traefik `web` entrypoint on port 80 |
-| `ORCHESTRATOR_TOKEN` | Your GitHub PAT (repo scope minimum) | Same PAT used for `GITHUB_TOKEN` in orchestrator secrets |
+## Rollout Boundary
 
-#### Create the GitHub PAT:
-```bash
-# GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)
-# Scopes: repo (full control of private repositories)
-# Name: orchestrator-webhook
-# Save the token as ORCHESTRATOR_TOKEN in each repo
-```
-
-### Step 4: Trigger a Task
-
-**Option A: Automatic (on issue/PR)**
-- Create an issue on the repo → workflow runs automatically
-- Or open a PR → workflow runs on every PR
-
-**Option B: Manual workflow dispatch**
-```bash
-gh workflow run orchestrator-drain.yaml -R org/repo-name
-```
-
-**Option C: Test with curl**
-```bash
-curl -X POST http://k8s-inference-orchestrator.orchestrator.svc.cluster.local:8000/api/v1/tasks/spawn \
-  -H "Authorization: token <ORCHESTRATOR_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "task_id": "test-001",
-    "repo": "org/repo-name",
-    "issue_number": 123,
-    "issue_title": "Fix: something broken",
-    "issue_url": "https://github.com/org/repo-name/issues/123"
-  }'
-```
-
-Expected response (HTTP 202):
-```json
-{
-  "status": "accepted",
-  "task_id": "test-001",
-  "repo": "org/repo-name",
-  "issue_number": 123,
-  "endpoint": "/api/v1/tasks/spawn"
-}
-```
-
----
-
-## Configuration Options
-
-### ALLOWED_REPOS Environment Variable
-
-Set on the orchestrator deployment:
-
-| Value | Meaning | Example |
-|---|---|---|
-| `*` | Accept from ANY repository (no validation) | `ALLOWED_REPOS="*"` |
-| Single repo | Only this repo can send tasks | `ALLOWED_REPOS="UtopikLab/code-factory"` |
-| Multiple repos (comma-separated) | Whitelist specific repos | `ALLOWED_REPOS="org/repo1,org/repo2,other-org/repo3"` |
-
-Update the deployment:
-```bash
-kubectl set env deployment/k8s-inference-orchestrator \
-  -n orchestrator \
-  ALLOWED_REPOS="<value>"
-```
-
----
-
-## Workflow Configuration Options
-
-### Trigger on Issue Creation
-```yaml
-on:
-  issues:
-    types: [opened]
-```
-
-### Trigger on Issue with Specific Label
-```yaml
-on:
-  issues:
-    types: [opened, labeled]
-
-jobs:
-  send-to-orchestrator:
-    if: contains(github.event.issue.labels.*.name, 'orchestrator')
-    # ... rest of job
-```
-
-### Trigger on Every Pull Request
-```yaml
-on:
-  pull_request:
-    types: [opened, synchronize]
-```
-
-### Trigger on Manual Dispatch
-```yaml
-on:
-  workflow_dispatch:
-    inputs:
-      issue_number:
-        description: 'Issue number'
-        required: true
-```
-
-### Conditional: Only Run for Specific Branches
-```yaml
-jobs:
-  send-to-orchestrator:
-    if: github.event.pull_request.base.ref == 'main'
-    # ... rest of job
-```
-
----
-
-## Monitoring Tasks
-
-### Watch orchestrator logs
-```bash
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-kubectl logs -n orchestrator -l app=orchestrator -c gateway -f
-```
-
-### Check task-acceptor health
-```bash
-kubectl exec -n orchestrator \
-  $(kubectl get pods -n orchestrator -l app=orchestrator -o jsonpath='{.items[0].metadata.name}') \
-  -c gateway -- \
-  python3 -c "import http.client; c=http.client.HTTPConnection('localhost',8000); c.request('GET','/'); print(c.getresponse().read().decode())"
-```
-
-### View supervisor loop
-```bash
-kubectl logs -n orchestrator -l app=orchestrator -c supervisor -f
-```
-
----
-
-## Security Considerations
-
-### Token Management
-- Store `ORCHESTRATOR_TOKEN` as a GitHub secret (never hardcode)
-- Use a dedicated PAT with minimal scope (repo access only)
-- Rotate the PAT periodically
-
-### Endpoint Security
-- If using ingress: Enable TLS and require authentication
-- For internal cluster: Use `ALLOWED_REPOS` whitelist instead of `*`
-- Monitor task-acceptor logs for failed authentication attempts
-
-### Task Payload Validation
-- Orchestrator validates:
-  - GitHub token matches (401 if not)
-  - Repo is in whitelist (403 if not)
-  - JSON payload is well-formed (400 if not)
-
----
-
-## Troubleshooting
-
-### Workflow fails with "401 Unauthorized"
-**Check:**
-- `ORCHESTRATOR_TOKEN` secret is set correctly
-- Token has `repo` scope
-- Token is not expired
-
-### Workflow fails with "403 Forbidden"
-**Check:**
-- Repo name matches exactly: `owner/repo`
-- Repo is in `ALLOWED_REPOS` list (or `ALLOWED_REPOS="*"`)
-
-### Workflow fails with "Connection refused"
-**Check:**
-- Orchestrator service is running: `kubectl get svc -n orchestrator`
-- Endpoint URL is correct (internal DNS vs public ingress)
-- Network policy allows egress from GitHub Actions
-
-### Task appears to be accepted but nothing happens
-**Check:**
-- Supervisor pod is running: `kubectl get pods -n orchestrator`
-- Supervisor logs for errors: `kubectl logs -n orchestrator <pod> -c supervisor`
-- Worker job template is valid: `kubectl get job -n orchestrator`
-
----
-
-## Example: Multi-Org Setup
-
-To accept tasks from multiple orgs/repos:
-
-```bash
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-
-kubectl set env deployment/k8s-inference-orchestrator \
-  -n orchestrator \
-  ALLOWED_REPOS="UtopikLab/code-factory,MyCompany/backend,MyCompany/frontend,OpenSource/project"
-```
-
-Then on each repo's workflow, use the same `ORCHESTRATOR_URL` and `ORCHESTRATOR_TOKEN` secrets.
-
----
-
-## Next Steps
-
-1. **Apply to production:** `kubectl apply -f orchestrator-deployment-multi-repo.yaml`
-2. **Test with one repo:** Create a simple issue and verify the workflow runs
-3. **Add more repos:** Once confirmed, add the workflow file to other repos
-4. **Monitor:** Watch logs as tasks arrive and are processed
-5. **Tune:** Adjust `MAX_ITERATIONS` and `WORKER_COUNT` based on observed workload
-
----
-
-**The orchestrator is now ready to accept tasks from any (or all) configured repositories.**
+Configure TLS, trusted immediate proxy source CIDRs, gateway network restrictions,
+dedicated gateway auth and per-source credentials before separately authorized image
+builds and deployment. Preserve registry credentials and select rebuilt image pins
+explicitly. Never dump Secret manifests or send tokens in URLs, payloads, comments,
+model context or diagnostic output. Local mocked tests do not establish live GitHub
+access, sandbox support, TLS/network policy or PVC durability. No deployment, live task
+submission or token rotation is performed by the local implementation checks.

@@ -7,7 +7,7 @@ Faithful to inference/deployment.yaml (Deployments inference-server-gpu{0,1}).
 # Each pod runs the OpenAI-compatible server with the per-GPU args ConfigMap
 # mounted at /etc/llama-server-args and the model weights from the shared PVC.
 # ---------------------------------------------------------------------------
-{{- $ns := "inference" -}}
+{{- $ns := .Values.namespace -}}
 {{- $inf := .Values.inference -}}
 {{- range $idx, $cfg := $inf.configMaps }}
 ---
@@ -39,6 +39,8 @@ spec:
         app: inference-server
         gpu: "{{ $idx }}"
     spec:
+      imagePullSecrets:
+        {{- toYaml $inf.imagePullSecrets | nindent 8 }}
       # Single-node cluster: spread one pod per GPU so both cards are used.
       affinity:
         podAntiAffinity:

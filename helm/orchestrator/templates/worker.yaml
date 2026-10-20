@@ -6,7 +6,7 @@ Faithful to orchestrator/worker.yaml (ConfigMap + Job coder-worker).
   "max-iterations" (int (default (index .Values.supervisor.config "max-iterations") 8))
   "task-wait-seconds" (int (default (index .Values.supervisor.config "task-wait-seconds") 30))
   "loop-state-dir" (default (index .Values.supervisor.config "loop-state-dir") "/data/loop-state")
-  "acceptor-url" (default (index .Values.supervisor.config "acceptor-url") (printf "http://%s-orchestrator-gateway.%s.svc.cluster.local:8000" .Chart.Name .Values.namespace))
+  "acceptor-url" (required "supervisor.config.acceptor-url must be a trusted HTTPS gateway origin" (index .Values.supervisor.config "acceptor-url"))
   "judge-url" (default (index .Values.supervisor.config "judge-url") "https://inference.local/v1")
   "judge-model" (default (index .Values.supervisor.config "judge-model") "qwen2.5-coder-7b-instruct-q4-km@32k")
   "worker-roles" (index .Values.worker "worker-roles")
@@ -37,6 +37,7 @@ metadata:
     component: worker
     app.kubernetes.io/managed-by: Helm
 spec:
+  suspend: true
   # 2 parallel coder workers, each allowed up to 8 completions.
   parallelism: 2
   completions: 8
@@ -63,11 +64,11 @@ spec:
             - name: loop-state
               mountPath: /data/loop-state
           env:
-            - name: GITHUB_TOKEN
+            - name: GATEWAY_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Chart.Name }}-secrets
-                  key: github-token
+                  name: {{ default (printf "%s-gateway-auth" .Chart.Name) .Values.gateway.auth.existingSecret }}
+                  key: gateway-auth-token
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -115,4 +116,4 @@ spec:
         - name: loop-state
           emptyDir: {}
       imagePullSecrets:
-        - name: ghcr-secret
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}

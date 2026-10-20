@@ -7,6 +7,11 @@
 # Namespace the sub-chart's resources are placed in.
 namespace: "inference"
 
+registry:
+  create: false
+  username: ""
+  token: ""
+
 # Default image registry for containerd (K3s host). See inference/common.sh.
 global:
   IMAGE_REGISTRY: "ghcr.io"

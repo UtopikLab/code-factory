@@ -23,9 +23,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 # The chart dirs (inference/, orchestrator/) live directly under helm/, so the
 # helm dir defaults to the script's own directory (the helm/ directory).
 HELM_DIR="${HELM_DIR:-$SCRIPT_DIR}"
-# Optional local secrets chart: when present it is passed to helm via `--values`
-# so the orchestrator chart's secret templates can render github-token /
-# openai-api-key. The file is git-ignored and local-only, so it is optional: if
+# Optional private YAML values file, passed to both charts via `--values`.
+# The file is git-ignored and local-only, so it is optional: if
 # it is absent the deploy proceeds exactly as before (no `--values`).
 SECRETS_FILE="${SECRETS_FILE:-${SCRIPT_DIR}/secrets-values.yaml}"
 NAMESPACE_IN="inference"
@@ -53,13 +52,9 @@ reset_ns() {
   # `--install` so it creates the release on a fresh cluster and overwrites on a
   # re-run. `--wait=false` lets a not-yet-ready device-plugin (deferred GPU) not
   # block the release; GPUs come online later via NFD.
-  # If the optional local secrets-values.yaml file is present, pass it via
-  # `--values` so the orchestrator's secret templates can render the
-  # github-token / openai-api-key. The `[ -f ]` test is safe under `set -e`
-  # because it is used as a boolean condition.
-  values_args=""
+  local -a values_args=()
   if [[ -f "${SECRETS_FILE}" ]]; then
-    values_args="--values \"${SECRETS_FILE}\""
+    values_args=(--values "${SECRETS_FILE}")
   fi
   # Delete the controller-owned Job before the upgrade. Helm's strategic-merge
   # patch on a Job conflicts with the immutable fields the controller stamps on
@@ -68,7 +63,7 @@ reset_ns() {
   # "field is immutable". Removing the Job first lets it be recreated cleanly on
   # the next deploy. The Job name is "<release>-worker" (e.g. orchestrator-worker).
   kubectl delete job "${2}-worker" -n "$1" >/dev/null 2>&1 || true
-  helm upgrade --install --namespace "$1" "$2" "$HELM_DIR/$3" ${values_args} --wait=false || true
+  helm upgrade --install --namespace "$1" "$2" "$HELM_DIR/$3" "${values_args[@]}" --wait=false
 }
 
 # --- preflight ------------------------------------------------------------

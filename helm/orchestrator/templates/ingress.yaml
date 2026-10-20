@@ -1,9 +1,7 @@
 {{/*
 Ingress for the orchestrator gateway (task-acceptor).
 
-Exposes /api/v1/tasks/spawn over HTTP on port 80 via Traefik's `web`
-entrypoint, so GitHub Actions can POST to the gateway through
-`http://orchestrator.local/api/v1/tasks/spawn`.
+Exposes task intake and reporting through the TLS-only Traefik entrypoint.
 
 Note: `orchestrator.local` must resolve (Traefik hosts entry or a DNS
 record). For pure localhost testing you can temporarily change the host to
@@ -15,8 +13,8 @@ metadata:
   name: {{ .Chart.Name }}-orchestrator-gateway-ingress
   namespace: {{ .Values.namespace }}
   annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
-    traefik.ingress.kubernetes.io/rule.match: Host(`orchestrator.local`) && PathPrefix(`/api/v1`)
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
     traefik.ingress.kubernetes.io/service.method: ANY
   labels:
     app: {{ .Chart.Name }}
@@ -24,8 +22,11 @@ metadata:
     app.kubernetes.io/component: task-acceptor
     app.k8s.io/managed-by: Helm
 spec:
+  tls:
+    - hosts: [{{ .Values.gateway.ingress.host | quote }}]
+      secretName: {{ .Values.gateway.ingress.tlsSecretName }}
   rules:
-    - host: orchestrator.local
+    - host: {{ .Values.gateway.ingress.host }}
       http:
         paths:
           - path: /api/v1

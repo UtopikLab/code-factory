@@ -208,83 +208,11 @@ def build_role_payload(role: str, worker_id: int, issue_title: str) -> dict:
 
 
 async def node_execute_workers(state: TaskState) -> TaskState:
-    """Spawn and execute role-specific workers via HTTP to task-acceptor sidecar."""
-    logger.info(f"[{state['task_id']}] Spawning workers for iteration {state['iteration']}")
-    
-    state["status"] = "executing"
+    """Only explicit local mock execution is supported by the legacy supervisor."""
+    if os.getenv("SUPERVISOR_MOCK_MODE") != "true":
+        raise RuntimeError("supervisor-direct-spawn-disabled-use-repository-intake")
     worker_count = int(os.getenv("WORKER_COUNT", "2"))
-    acceptor_url = os.getenv("ACCEPTOR_URL", "http://orchestrator.local:8000")
-    github_token = os.getenv("GITHUB_TOKEN")
-    roles = role_assignment(worker_count)
-    
-    if not github_token:
-        logger.warning("[" + state["task_id"] + "] GITHUB_TOKEN not set, using mock mode")
-        return mock_worker_executor(state, worker_count, roles)
-    
-    async def _spawn_worker(i):
-        """Spawn a single role-specific worker concurrently via POST /api/v1/tasks/spawn.
-        Returns the accepted task_id, or None if the request was not accepted."""
-        role = roles[i]
-        payload = build_role_payload(role, i, state["issue_title"])
-        response = await client.post(
-            f"{acceptor_url}/api/v1/tasks/spawn",
-            headers={
-                "Authorization": f"token {github_token}",
-                "Content-Type": "application/json",
-            },
-            json=payload or {},
-        )
-        if response.status_code == 202:
-            task_result = response.json()
-            task_id = task_result["task_id"]
-            logger.info(f"[{state['task_id']}] Worker {task_id} ({role}) accepted")
-            return task_id
-        else:
-            logger.warning(f"[{state['task_id']}] Worker {i} spawn rejected (HTTP {response.status_code})")
-            return None
-    
-    async def _poll_worker(task_id, i):
-        """Poll a spawned worker until it completes (HTTP 200) or times out.
-        Runs concurrently with the other workers' poll loops."""
-        try:
-            wait_response = await client.get(
-                f"{acceptor_url}/api/v1/tasks/{task_id}",
-                headers={"Authorization": f"token {github_token}"},
-            )
-            if wait_response.status_code == 200:
-                worker_output = wait_response.json()
-                extra = {
-                    "output": worker_output.get("output", ""),
-                    "patch": worker_output.get("patch", ""),
-                    "score": float((worker_output.get("score", 0)) or 0),
-                    "review": worker_output.get("review", ""),
-                }
-                state["worker_outputs"].append(make_worker_output(
-                    task_id, i, "success", extra, datetime.now().isoformat()))
-                logger.info(f"[{state['task_id']}] Worker {i} ({roles[i]}) completed with score: {extra['score']}")
-            else:
-                state["worker_outputs"].append(make_worker_output(
-                    task_id, i, "timeout",
-                    {"error": "Worker timed out"}, datetime.now().isoformat()))
-                logger.warning(f"[{state['task_id']}] Worker {task_id} timed out")
-        except httpx.RequestException as e:
-            state["worker_outputs"].append(make_worker_output(
-                task_id, i, "error", {"error": str(e)}, datetime.now().isoformat()))
-            logger.error(f"[{state['task_id']}] Failed to get worker output: {e}")
-    
-    async with httpx.AsyncClient(timeout=30) as client:
-        # Phase 1 — spawn role-specific workers concurrently.
-        task_ids = await asyncio.gather(*[_spawn_worker(i) for i in range(worker_count)])
-        # Phase 2 — poll each spawned worker concurrently until it completes.
-        poll_coros = [
-            _poll_worker(task_id, i)
-            for i, task_id in enumerate(task_ids)
-            if task_id
-        ]
-        if poll_coros:
-            await asyncio.gather(*poll_coros)
-    logger.info(f"[{state['task_id']}] All {len(state['worker_outputs'])} workers completed")
-    return state
+    return mock_worker_executor(state, worker_count, role_assignment(worker_count))
 
 
 def mock_worker_executor(state: TaskState, worker_count: int, roles: list[str] | None = None) -> dict:
