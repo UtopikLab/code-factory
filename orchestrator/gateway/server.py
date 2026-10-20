@@ -1,14 +1,20 @@
 import copy
+import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import sqlite3
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, quote, urlsplit
 
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
 
@@ -52,6 +58,117 @@ WORKER_JOB_TEMPLATE = os.environ.get("WORKER_JOB_TEMPLATE", "orchestrator-worker
 
 SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 SA_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+DB_INIT_LOCK = threading.Lock()
+
+
+def _identity(payload):
+    nested = payload.get("payload", {})
+    repo = payload.get("repo") or nested.get("repo")
+    if any(value is not None and not isinstance(value, str) for value in (payload.get("repo"), nested.get("repo"))):
+        raise ValueError("invalid-repository")
+    if payload.get("repo") and nested.get("repo") and payload["repo"].lower() != nested["repo"].lower():
+        raise ValueError("repository-mismatch")
+    issue = nested.get("issue_number", payload.get("issue_number"))
+    if repo is not None and (not isinstance(repo, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)
+                             or any(part in (".", "..") for part in repo.split("/"))):
+        raise ValueError("invalid-repository")
+    if ("issue_number" in payload or "issue_number" in nested) and (type(issue) is not int or issue <= 0 or not repo):
+        raise ValueError("invalid-issue")
+    if "issue_number" in nested and "issue_number" in payload and nested["issue_number"] != payload["issue_number"]:
+        raise ValueError("issue-mismatch")
+    return repo, issue
+
+
+def _repo_allowed(repo):
+    return not repo or ALLOWED_REPOS is None or repo.lower() in {entry.lower() for entry in ALLOWED_REPOS}
+
+
+def _task_db():
+    path = os.environ.get("TASK_DB_PATH", "/data/tasks/tasks.sqlite3")
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with DB_INIT_LOCK:
+        db = sqlite3.connect(path, timeout=30, isolation_level=None)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("""CREATE TABLE IF NOT EXISTS tasks (
+            task_id TEXT PRIMARY KEY, repo TEXT, issue INTEGER, status TEXT NOT NULL,
+            payload TEXT NOT NULL, result TEXT, job TEXT, lifecycle TEXT NOT NULL DEFAULT 'pending',
+            sync_started REAL NOT NULL DEFAULT 0)""")
+    return db
+
+
+def _github(method, path, body=None):
+    request = urllib.request.Request(
+        "https://api.github.com" + path, method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json",
+                 "Content-Type": "application/json"},
+    )
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            raise ValueError("github-redirect-rejected")
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+        raw = response.read(1048577)
+        if len(raw) > 1048576:
+            raise ValueError("github-response-too-large")
+        return json.loads(raw) if raw else None
+
+
+def _sync_lifecycle(task):
+    if not task["issue"]:
+        return
+    repo, issue = task["repo"], task["issue"]
+    if not _repo_allowed(repo):
+        raise ValueError("repo-not-allowed")
+    base = f"/repos/{quote(repo, safe='/')}/issues/{issue}"
+    remote = _github("GET", base)
+    if remote.get("number") != issue or remote.get("html_url", "").lower() != f"https://github.com/{repo}/issues/{issue}".lower() or "pull_request" in remote:
+        raise ValueError("github-issue-mismatch")
+    labels = _github("GET", base + "/labels?per_page=100")
+    names = {label["name"] for label in labels}
+    for name in ("queued", "done" if task["status"] == "failed" else "failed"):
+        if name in names:
+            _github("DELETE", base + "/labels/" + quote(name, safe=""))
+    _github("POST", base + "/labels", {"labels": ["done" if task["status"] == "completed" else "failed"]})
+    result = json.loads(task["result"])
+    marker = f"<!-- code-factory:{task['task_id']} -->"
+    message = f"{marker}\nCode Factory: {task['status']}."
+    if task["status"] == "completed" and result.get("pr_url"):
+        message += "\n" + result["pr_url"]
+    found = False
+    for page in range(1, 11):
+        comments = _github("GET", base + f"/comments?per_page=100&page={page}")
+        if any(marker in comment.get("body", "") for comment in comments):
+            found = True
+            break
+        if len(comments) < 100:
+            break
+    else:
+        raise ValueError("comment-history-too-large")
+    if not found:
+        _github("POST", base + "/comments", {"body": message})
+
+
+def _retry_lifecycle(task_id):
+    db = _task_db()
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        task = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+        if task["lifecycle"] == "synced" or (task["lifecycle"] == "syncing" and time.time() - task["sync_started"] < 1800):
+            db.commit()
+            return task["lifecycle"]
+        db.execute("UPDATE tasks SET lifecycle='syncing', sync_started=? WHERE task_id=?", (time.time(), task_id))
+        db.commit()
+        try:
+            _sync_lifecycle(task)
+            status = "synced"
+        except Exception:  # noqa: BLE001
+            logger.warning("github-lifecycle-pending task=%s", task_id)
+            status = "pending"
+        db.execute("UPDATE tasks SET lifecycle=? WHERE task_id=?", (status, task_id))
+        return status
+    finally:
+        db.close()
 
 
 def _is_external_workflow_payload(payload):
@@ -119,8 +236,8 @@ def _k8s_request(method, path, body=None):
             return json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as error:
         logger.error(
-            "k8s-request-failed method=%s path=%s status=%s body=%s",
-            method, path, error.code, error.read().decode("utf-8", errors="replace")[:1000],
+            "k8s-request-failed method=%s path=%s status=%s",
+            method, path, error.code,
         )
         raise
 
@@ -238,6 +355,31 @@ SCRAPE = Gauge(
 )
 
 class Handler(BaseHTTPRequestHandler):
+    def _json(self, status, body):
+        if getattr(self, "command", "POST") == "POST":
+            self._post_record(status)
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def _authorized(self):
+        return bool(TOKEN) and hmac.compare_digest(self.headers.get("Authorization", ""), f"token {TOKEN}")
+
+    def _lookup(self, db):
+        parsed = urlsplit(self.path)
+        task_id = parsed.path.removeprefix("/api/v1/tasks/")
+        query = parse_qs(parsed.query)
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,63}", task_id):
+            raise ValueError("invalid-task-id")
+        repo = query.get("repo", [None])[0]
+        task = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+        if task is None and task_id.isdigit() and repo:
+            task = db.execute("SELECT * FROM tasks WHERE lower(repo)=lower(?) AND issue=?", (repo, int(task_id))).fetchone()
+        if task and (not _repo_allowed(task["repo"]) or (repo and repo.lower() != (task["repo"] or "").lower())):
+            raise PermissionError("repo-not-allowed")
+        return task
+
     def _post_record(self, status):
         """Record request metrics for the terminal POST response."""
         # Capture request start time for latency measurement.
@@ -272,89 +414,137 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(generate_latest())
             return
 
+        if path.startswith("/api/v1/tasks/"):
+            if not self._authorized():
+                self._json(401, {"error": "unauthorized"})
+                return
+            db = _task_db()
+            try:
+                task = self._lookup(db)
+                if task is None:
+                    self._json(404, {"error": "task-not-found"})
+                else:
+                    self._json(200, {"task_id": task["task_id"], "repo": task["repo"], "issue_number": task["issue"],
+                                     "status": task["status"], "result": json.loads(task["result"]) if task["result"] else None,
+                                     "lifecycle": task["lifecycle"], "job": json.loads(task["job"]) if task["job"] else None})
+            except PermissionError:
+                self._json(403, {"error": "repo-not-allowed"})
+            except ValueError:
+                self._json(400, {"error": "invalid-task-id"})
+            finally:
+                db.close()
+            return
+
+        if path != "/":
+            self._json(404, {"error": "not-found"})
+            return
+
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(b'{"status":"ok"}')
 
     def do_POST(self):
-        # Capture request start time for latency measurement.
-        self.request_time = time.time()
-        auth = self.headers.get("Authorization", "")
-        if auth != f"token {TOKEN}":
-            logger.warning("unauthorized request, auth=%r", auth)
-            self._post_record(401)
-            self.send_response(401)
-            self.end_headers()
-            self.wfile.write(b'{"error":"unauthorized"}')
+        if not self._authorized():
+            self._json(401, {"error": "unauthorized"})
             return
-
-        content_length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(content_length) if content_length else b"{}"
         try:
-            payload = json.loads(body.decode("utf-8"))
-        except json.JSONDecodeError:
-            logger.error("invalid-json: %s", body)
-            self._post_record(400)
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b'{"error":"invalid-json"}')
-            return
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 1048576:
+                raise ValueError("invalid-body-size")
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict) or not isinstance(payload.get("payload", {}), dict):
+                raise TypeError("invalid-payload")
+            if urlsplit(self.path).path == "/api/v1/tasks/spawn":
+                self._spawn(payload)
+            elif self.path.startswith("/api/v1/tasks/"):
+                self._result(payload)
+            else:
+                self._json(404, {"error": "not-found"})
+        except PermissionError:
+            self._json(403, {"error": "repo-not-allowed"})
+        except (ValueError, TypeError, UnicodeDecodeError):
+            self._json(400, {"error": "invalid-task-or-result"})
 
-        if not isinstance(payload, dict) or not isinstance(payload.get("payload", {}), dict):
-            self._post_record(400)
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b'{"error":"invalid-payload"}')
-            return
-
-        if _is_external_workflow_payload(payload):
-            try:
-                _validate_assigned_task_id(payload.get("task_id", payload["payload"]["issue_number"]))
-            except ValueError:
-                self._post_record(400)
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(b'{"error":"invalid-assigned-task-id"}')
+    def _spawn(self, payload):
+        repo, issue = _identity(payload)
+        if _is_external_workflow_payload(payload) and issue is None:
+            raise ValueError("issue-required")
+        if "task_id" in payload:
+            _validate_assigned_task_id(payload["task_id"])
+            if issue is not None and str(payload["task_id"]) != str(issue):
+                raise ValueError("issue-mismatch")
+        if not _repo_allowed(repo):
+            raise PermissionError("repo-not-allowed")
+        task_id = "issue-" + hashlib.sha256(f"{repo.lower()}#{issue}".encode()).hexdigest()[:32] if issue else uuid.uuid4().hex
+        assigned = copy.deepcopy(payload)
+        assigned["task_id"] = task_id
+        if repo:
+            assigned["repo"] = repo
+        db = _task_db()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+            if old:
+                db.commit()
+                code = 409 if old["status"] == "failed" else 503 if old["status"] == "queued" else 202
+                self._json(code, {"task_id": task_id, "repo": repo, "status": old["status"], "replayed": True})
                 return
+            db.execute("INSERT INTO tasks(task_id,repo,issue,status,payload) VALUES(?,?,?,?,?)",
+                       (task_id, repo, issue, "queued", json.dumps(assigned)))
+            db.commit()
+            job = None
+            if "worker_id" not in payload:
+                try:
+                    job = _create_worker_job(POD_NAMESPACE, WORKER_JOB_TEMPLATE, task_id, assigned)
+                except (OSError, ValueError, KeyError, RuntimeError, StopIteration):
+                    failure = json.dumps({"task_id": task_id, "repo": repo, "issue_number": issue,
+                                          "status": "failed", "error": "job-create-failed"})
+                    db.execute("UPDATE tasks SET status='failed', result=? WHERE task_id=? AND status='queued'", (failure, task_id))
+                    _retry_lifecycle(task_id)
+                    self._json(500, {"task_id": task_id, "error": "job-create-failed"})
+                    return
+            db.execute("UPDATE tasks SET status='running', job=? WHERE task_id=? AND status='queued'", (json.dumps(job), task_id))
+            self._json(202, {"task_id": task_id, "repo": repo, "status": "running", "job_name": (job or {}).get("name")})
+        finally:
+            db.close()
 
-        repo = payload.get("repo") or payload.get("payload", {}).get("repo")
-        if repo and ALLOWED_REPOS is not None and repo not in ALLOWED_REPOS:
-            logger.warning("repo-not-allowed: repo=%r", repo)
-            self._post_record(403)
-            self.send_response(403)
-            self.end_headers()
-            self.wfile.write(b'{"error":"repo-not-allowed"}')
-            return
-
-        response = {
-            "status": "accepted",
-            "task_id": payload.get("task_id", payload.get("payload", {}).get("issue_number", "unknown")),
-            "repo": repo or ALLOWED_REPOS_RAW,
-            "endpoint": "/api/v1/tasks/spawn",
-        }
-
-        if _is_external_workflow_payload(payload):
-            try:
-                job_info = _create_worker_job(POD_NAMESPACE, WORKER_JOB_TEMPLATE, response["task_id"], payload)
-            except (OSError, ValueError, KeyError, RuntimeError, StopIteration, urllib.error.URLError):
-                logger.exception("job-create-failed task_id=%r", response["task_id"])
-                self._post_record(500)
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"error":"job-create-failed"}')
+    def _result(self, payload):
+        repo, issue = _identity(payload)
+        db = _task_db()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            task = self._lookup(db)
+            if task is None:
+                db.commit()
+                self._json(404, {"error": "task-not-found"})
                 return
-            response["job_name"] = job_info.get("name")
-            if job_info.get("uid"):
-                response["job_uid"] = job_info.get("uid")
-
-        logger.info("task-accepted task_id=%r repo=%r", response["task_id"], response["repo"])
-        self._post_record(202)
-        self.send_response(202)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(response).encode("utf-8"))
+            legacy_id = urlsplit(self.path).path.rsplit("/", 1)[1].isdigit() and repo is not None
+            if str(payload.get("task_id")) != (str(task["issue"]) if legacy_id else task["task_id"]):
+                raise ValueError("task-id-mismatch")
+            if (repo or "").lower() != (task["repo"] or "").lower() or issue != task["issue"]:
+                raise ValueError("result-identity-mismatch")
+            if payload.get("status") not in ("completed", "failed"):
+                raise ValueError("terminal-status-required")
+            if payload["status"] == "completed" and (payload.get("error") or not payload.get("patch")):
+                raise ValueError("empty-completion")
+            original = json.loads(task["payload"])
+            nested = original.get("payload", original)
+            if (task["issue"] and not any(nested.get(key) or original.get(key) for key in ("files", "edits", "changes"))
+                    and payload["status"] == "completed" and not re.fullmatch(
+                        rf"https://github\.com/{re.escape(task['repo'])}/pull/[1-9][0-9]*", payload.get("pr_url", ""), re.IGNORECASE)):
+                raise ValueError("completion-pr-required")
+            serialized = json.dumps(payload, sort_keys=True)
+            if task["result"] and json.loads(task["result"]) != payload:
+                db.commit()
+                self._json(409, {"error": "terminal-result-conflict"})
+                return
+            db.execute("UPDATE tasks SET status=?, result=? WHERE task_id=?", (payload["status"], serialized, task["task_id"]))
+            db.commit()
+            lifecycle = _retry_lifecycle(task["task_id"])
+            self._json(200, {"task_id": task["task_id"], "status": payload["status"], "lifecycle": lifecycle})
+        finally:
+            db.close()
 
     def log_message(self, format, *args):
         logger.info("%s %s", self.command, self.path)

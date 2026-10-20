@@ -14,6 +14,8 @@ metadata:
     component: gateway
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: orchestrator
@@ -26,6 +28,10 @@ spec:
         app.kubernetes.io/managed-by: Helm
     spec:
       serviceAccountName: {{ .Chart.Name }}-gateway
+      securityContext:
+        runAsUser: 1001
+        runAsNonRoot: true
+        fsGroup: 1001
       imagePullSecrets:
         - name: ghcr-secret
       containers:
@@ -37,14 +43,19 @@ spec:
               containerPort: 8000
             - name: metrics
               containerPort: 9000
+          volumeMounts:
+            - name: task-state
+              mountPath: /data/tasks
           env:
             - name: GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Chart.Name }}-secrets
                   key: github-token
-            - name: ALLOWED_REPO
-              value: {{ .Values.gateway.config.repo | quote }}
+            - name: ALLOWED_REPOS
+              value: {{ default .Values.supervisor.config.repo .Values.gateway.config.repo | quote }}
+            - name: TASK_DB_PATH
+              value: /data/tasks/tasks.sqlite3
           resources:
             requests:
               cpu: {{ .Values.gateway.config.cpuRequest | default "100m" }}
@@ -62,6 +73,26 @@ spec:
               path: /
               port: gateway
             periodSeconds: 15
+      volumes:
+        - name: task-state
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-task-state" .Chart.Name) .Values.gateway.persistence.existingClaim }}
+{{- if not .Values.gateway.persistence.existingClaim }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Chart.Name }}-task-state
+  namespace: {{ .Values.namespace }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if .Values.gateway.persistence.storageClassName }}
+  storageClassName: {{ .Values.gateway.persistence.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.gateway.persistence.size | quote }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

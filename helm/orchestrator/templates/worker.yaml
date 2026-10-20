@@ -48,13 +48,18 @@ spec:
         component: worker
     spec:
       restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1001
+        runAsNonRoot: true
+        fsGroup: 1001
       containers:
         - name: coder
           image: {{ .Values.worker.image | default "ghcr.io/utopiklab/code-factory-worker:latest" }}
           imagePullPolicy: Always
           volumeMounts:
             - name: workspace
-              mountPath: /data/work
+              mountPath: /data/task-work
             - name: loop-state
               mountPath: /data/loop-state
           env:
@@ -83,6 +88,16 @@ spec:
                 configMapKeyRef:
                   name: {{ .Chart.Name }}-config
                   key: judge-model
+            - name: ALLOWED_REPOS
+              value: {{ default .Values.supervisor.config.repo .Values.gateway.config.repo | quote }}
+            - name: CODER_URL
+              value: {{ default (default "https://inference.local/v1" (index .Values.supervisor.config "judge-url")) .Values.worker.coderUrl | quote }}
+            - name: CODER_MODEL
+              value: {{ index .Values.worker "worker-model" | quote }}
+            - name: JUDGE_ACCEPT_THRESHOLD
+              value: {{ .Values.worker.judgeAcceptThreshold | quote }}
+            - name: TASK_REPO_POLICIES
+              value: {{ .Values.worker.repoPolicies | toJson | quote }}
           resources:
             requests:
               cpu: {{ .Values.supervisor.config.cpuRequest | default "500m" }}
@@ -95,7 +110,8 @@ spec:
               containerPort: 9000
       volumes:
         - name: workspace
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 512Mi
         - name: loop-state
           emptyDir: {}
       imagePullSecrets:

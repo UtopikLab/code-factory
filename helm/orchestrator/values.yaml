@@ -11,7 +11,7 @@ icon: ""
 # Supervisor (code-factory-supervisor) Deployment — the resident LangGraph loop.
 # Shared values for both the supervisor and task-acceptor resources.
 supervisor:
-  image: "ghcr.io/utopiklab/code-factory-supervisor:latest"
+  image: "ghcr.io/utopiklab/code-factory-supervisor:32093d2660ac9356560d5f6cbe13867e6982f718"
   imagePullPolicy: Always
   replicas: 1
   labels:
@@ -46,7 +46,7 @@ supervisor:
 # (the worker Job image + resource config).
 worker:
   name: worker
-  image: "ghcr.io/utopiklab/code-factory-worker:latest"
+  image: "ghcr.io/utopiklab/code-factory-worker:32093d2660ac9356560d5f6cbe13867e6982f718"
   imagePullPolicy: Always
   labels:
     app: orchestrator
@@ -56,6 +56,9 @@ worker:
   - refactor
   - test
   worker-model: "qwen2.5-coder-7b-instruct-q4-km@32k"
+  coderUrl: ""
+  judgeAcceptThreshold: 0.8
+  repoPolicies: {}
 
 # Gateway Deployment + Service — the always-on task-acceptor (:8000).
 # The gateway image is built from the Dockerfile in the non-Helm tree
@@ -63,9 +66,13 @@ worker:
 # (e.g. `docker buildx build`), exactly like the supervisor and coder-worker
 # images. Overridable via values.
 gateway:
-  image: "ghcr.io/utopiklab/code-factory-gateway:latest"
+  image: "ghcr.io/utopiklab/code-factory-gateway:32093d2660ac9356560d5f6cbe13867e6982f718"
   imagePullPolicy: Always
   replicas: 1
+  persistence:
+    size: "1Gi"
+    storageClassName: ""
+    existingClaim: ""
   labels:
     app: orchestrator
     component: gateway

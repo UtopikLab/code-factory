@@ -42,7 +42,7 @@ COPY --from=build /usr/local/bin /usr/local/bin
 COPY server.py /app/server.py
 
 # Working directory for HTTP listeners and prometheus /metrics.
-RUN mkdir -p /data/listeners && \
+RUN mkdir -p /data/listeners /data/tasks && \
     chown -R orchestrator:orchestrator /app /data
 
 EXPOSE 8000
