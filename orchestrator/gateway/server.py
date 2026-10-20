@@ -2,11 +2,7 @@ import json
 import logging
 import os
 import sys
-import threading
-import time
-from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from socketserver import ThreadingMixIn
 
 TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
