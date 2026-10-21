@@ -1,9 +1,19 @@
 gateway:
+  auth:
+    existingSecret: ""
   transportMode: edge-tls
   ingress:
     tlsTermination: external
     host: orchestrator.local
     tlsSecretName: ""
 supervisor:
+  auth:
+    existingSecret: orchestrator-supervisor-service-auth
+    pullRequestSecret: orchestrator-github-pr-auth
+    createSecret: true
   config:
     acceptor-url: https://gateway.example.com
+worker:
+  auth:
+    existingSecret: orchestrator-coder-model-auth
+    createSecret: false

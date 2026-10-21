@@ -61,8 +61,6 @@ spec:
               value: {{ .Values.gateway.transportMode | quote }}
             - name: TASK_CREDENTIAL_TTL_SECONDS
               value: {{ .Values.gateway.taskCredentialTtlSeconds | quote }}
-            - name: ALLOWED_REPOS
-              value: {{ default .Values.supervisor.config.repo .Values.gateway.config.repo | quote }}
             - name: TASK_DB_PATH
               value: /data/tasks/tasks.sqlite3
             - name: AGENT_CONFIG_VERSION

@@ -331,10 +331,16 @@ def test_malformed_assignment_fails_before_io(monkeypatch, task_id, payload, err
     client.assert_not_called()
 
 
+@pytest.mark.parametrize("legacy_value", ["", "*", "another/repo"])
+def test_issue_identity_does_not_require_repository_allowlist(monkeypatch, legacy_value):
+    monkeypatch.setenv("ALLOWED_REPOS", legacy_value)
+    monkeypatch.setenv("ALLOWED_REPO", legacy_value)
+    assert worker._issue_identity({"repo": "new/project", "issue_number": 2}) == ("new/project", 2)
+
+
 def test_assigned_issue_reports_unsupported_discovery(monkeypatch, tmp_path):
     client = AsyncMock()
     client.post.return_value = httpx.Response(200, json={"task_id": "2", "status": "candidate_failed"})
-    monkeypatch.setenv("ALLOWED_REPOS", "org/repo")
     monkeypatch.setenv("TASK_REPO_POLICIES", "{}")
     monkeypatch.setenv("TASK_WORK_DIR", str(tmp_path))
     monkeypatch.setattr(worker, "_implement_issue", AsyncMock(side_effect=worker.TaskFailure("automatic-validation-unsupported")))
@@ -361,7 +367,6 @@ def test_worker_contract_is_candidate_only_and_github_is_read_only(monkeypatch):
 
 @pytest.mark.parametrize("supervisor_plan", [None, "Update the app and validate the change"])
 def test_issue_implementation_returns_candidate_without_judging_or_publishing(monkeypatch, tmp_path, supervisor_plan):
-    monkeypatch.setenv("ALLOWED_REPOS", "org/repo")
     monkeypatch.setenv("TASK_REPO_POLICIES", json.dumps({"org/repo": {
         "context_files": ["src/app.py"], "editable_files": ["src/app.py"],
         "validation_argv": ["/usr/local/bin/python", "-m", "pytest"],
@@ -559,7 +564,6 @@ def issue_pipeline(monkeypatch, tmp_path):
     monkeypatch.setenv("CODER_MODEL", "configured-coder")
     monkeypatch.setenv("JUDGE_URL", "http://model/v1")
     monkeypatch.setenv("JUDGE_MODEL", "configured-judge")
-    monkeypatch.setenv("ALLOWED_REPOS", "org/repo")
     monkeypatch.setenv("TASK_WORK_DIR", str(tmp_path / "work"))
     monkeypatch.setenv("TASK_DB_PATH", str(tmp_path / "state" / "tasks.sqlite3"))
     policy = {"context_files": ["src/greeting.py"], "editable_files": ["src/greeting.py"],
@@ -567,7 +571,6 @@ def issue_pipeline(monkeypatch, tmp_path):
               "validation_timeout": 15}
     monkeypatch.setenv("TASK_REPO_POLICIES", json.dumps({"org/repo": policy}))
     monkeypatch.setattr(server, "TOKEN", "gateway-test-secret")
-    monkeypatch.setattr(server, "ALLOWED_REPOS", {"org/repo", "org/other"})
     state = SimpleNamespace(jobs=[], api_calls=[], model_calls=[], native_calls=[], native_downloads={}, labels={"queued"}, comments=[],
                             branches={}, pulls=[], edits=[{"path": "src/greeting.py", "content": "greeting = 'hello'\n"}],
                             score=0.95, model_error=False, fail_lifecycle=False, invalid_identity=False,
@@ -750,7 +753,6 @@ def issue_pipeline(monkeypatch, tmp_path):
 def test_issue_to_pr_without_repository_configuration(issue_pipeline, monkeypatch):
     state = issue_pipeline
     monkeypatch.setenv("TASK_REPO_POLICIES", "{}")
-    monkeypatch.setenv("ALLOWED_REPOS", "*")
     snapshot = worker._snapshot
 
     async def snapshot_with_tests(github, editor, sha):

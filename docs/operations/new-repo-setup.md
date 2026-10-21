@@ -14,8 +14,7 @@ validation commands; no live issue-to-PR execution is established by those tests
 
 ### Required Configuration
 
-By default `supervisor.config.repo: "*"` accepts repository identities without a
-per-repository allowlist. Every task must still supply a dedicated source-repository
+There is no repository-name allowlist. Every task must supply a dedicated source-repository
 credential and pass authenticated identity/access preflight. Prefer a fine-grained
 PAT limited to that repository with contents, pull requests and issues read/write.
 Read probes and actor write metadata do not prove every token write grant; see the
@@ -38,7 +37,6 @@ fixed validation command. They are not required for each repository:
 ```yaml
 supervisor:
   config:
-    repo: "owner/repository"
     judge-url: "https://inference.local/v1"
     judge-model: "your-configured-judge-model"
 worker:
@@ -64,10 +62,7 @@ Dependencies must already exist in the worker image; there is no dependency inst
 from fetched code. The example uses Python's standard-library unittest. Other test
 tools require a separately prepared worker image. The default worker includes pytest.
 Leave `repoPolicies: {}` for automatic discovery across token-accessible repositories.
-Use a comma-separated repo allowlist only if you want an additional restriction.
-`gateway.config.repo`, when set, overrides `supervisor.config.repo` for gateway and workers.
-
-The corresponding worker environment variables are `ALLOWED_REPOS`, `TASK_REPO_POLICIES`
+The corresponding worker environment variables are `TASK_REPO_POLICIES`
 (JSON map), `CODER_URL`, `CODER_MODEL`, `JUDGE_URL`, `JUDGE_MODEL`, and
 `JUDGE_ACCEPT_THRESHOLD` (0.8 through 1). Coder URL defaults in Helm to the judge URL;
 the coder model uses the existing `worker-model` setting. `REPO_GITHUB_PAT`
@@ -107,8 +102,8 @@ POST /api/v1/tasks/{opaque_task_id}
 GET  /api/v1/tasks/2?repo=owner%2Frepository
 ```
 
-All task GET/POST routes require `Authorization: token <gateway-auth>` and enforce
-the current repo allowlist. A bare numeric lookup is not supported because issue numbers
+Task lookup and intake require `Authorization: token <gateway-auth>`; callbacks
+require their assigned task token and matching repository identity. A bare numeric lookup is not supported because issue numbers
 collide across repositories. Legacy numeric reports require the repo-qualified URL.
 GET returns the recorded `queued`, `running`, `completed`, or `failed` state, stored
 result, Job metadata, and lifecycle sync status. `running` means dispatched, not a
@@ -259,7 +254,6 @@ lifecycle processing, use **Run workflow** with that failed task's ID to retry.
 - Do not substitute a repository or registry credential
 
 **Workflow fails with 403 Forbidden:**
-- Repo name doesn't match `ALLOWED_REPOS` setting on orchestrator
 - Check repository identity, access preflight, credential expiry/revocation, and explicit gateway transport configuration
 
 **Workflow fails with connection refused:**
@@ -271,21 +265,13 @@ lifecycle processing, use **Run workflow** with that failed task's ID to retry.
 
 ## Verify Orchestrator Configuration
 
-Check what repos are allowed:
-
-```bash
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-kubectl get deployment orchestrator-gateway -n orchestrator -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="ALLOWED_REPOS")].value}'
-```
-
-Current setting:
-- `*` = Accept from ANY repo
-- `repo1,repo2,repo3` = Whitelist only these repos
-
-Change the operator-owned Helm allowlist and worker policies together, then use your
-normal separately authorized deployment procedure. An allowlist is not a policy:
-each accepted issue repository still requires its own credential. Automatic worker
-policy discovery remains the default; repository policy overrides are optional.
+No repository registration or allowlist setting is required. Each accepted issue
+repository requires its own credential, independently of gateway authentication.
+Automatic worker policy discovery remains the default; `worker.repoPolicies`
+overrides are optional. Apply policy changes using the normal separately authorized
+deployment procedure. Rebuild gateway, supervisor, and worker images to remove the
+allowlist from existing deployments; changing Helm configuration alone does not
+update older application code.
 
 ---
 

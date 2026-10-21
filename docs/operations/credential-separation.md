@@ -28,68 +28,73 @@ test -e helm/local.secrets-values.yaml || (umask 077; cp helm/example.secrets-va
 chmod 600 helm/local.secrets-values.yaml
 ```
 
-Edit that private file locally. Replace the compromised PAT with a newly issued
-GHCR credential with **read:packages only**, never repository-operation grants.
-Remove the misplaced `orchestrator.ghcr-secret` entry; it is not used. Set:
+Edit that private file locally. Use a separate provider-issued PAT for GHCR
+`read:packages` and repository PR operations. Never reuse the GHCR PAT for
+repository access. Internal gateway and supervisor tokens are generated
+independently by the operator. This is the only supported chart credential
+structure:
+## Private Helm Values
 
-```yaml
-registry:
-   create: true
-   username: "<your-github-username>"
-   token: "<new-read-packages-only-token>"
-gateway:
-   auth:
-      existingSecret: ""
-      token: "<independent-random-gateway-token-at-least-32-characters>"
-supervisor:
-   config:
-      openai-api-key: "<your-openai-key>"
+Keep deployment behavior and credentials in separate files. Copy the tracked
+nonsecret examples only when the corresponding ignored local file does not exist:
+
+```sh
+test -e helm/local.values.yaml || cp helm/example.values.yaml helm/local.values.yaml
+test -e helm/orchestrator/local.values.yaml || cp helm/orchestrator/example.values.yaml helm/orchestrator/local.values.yaml
+test -e helm/local.secrets-values.yaml || (umask 077; cp helm/example.secrets-values.yaml helm/local.secrets-values.yaml)
+chmod 600 helm/local.secrets-values.yaml
 ```
 
-Replace every placeholder before deployment. The gateway token must be independently
-generated, at least 32 characters, and also configured as `CODEFACTORY_AUTH_TOKEN` in
-the source repositories. It is not the registry or repository token. Alternatively,
-keep `gateway.auth.existingSecret: orchestrator-gateway-auth` and `token: ""` to
-use a separately provisioned Secret with key `gateway-auth-token`.
+`helm/local.values.yaml` contains shared, nonsecret settings for both charts,
+including whether each chart creates the GHCR pull Secret and the registry
+username. `helm/orchestrator/local.values.yaml` contains orchestrator-only
+deployment settings such as Secret ownership and environment routing. The
+credentials-only `helm/local.secrets-values.yaml` contains exactly the grouped
+`credentials.internal.*`, `credentials.github.*`, and `credentials.models.*`
+values shown in `helm/example.secrets-values.yaml`. Use a separate provider-issued
+PAT for GHCR `read:packages` and repository PR operations; never reuse the GHCR
+PAT for repository access. Generate internal tokens independently.
 
-When separately authorized, run `./helm/deploy.sh`. It passes the same private
-YAML to both independent charts, without putting tokens in shell arguments.
-`registry.create: true` creates a `kubernetes.io/dockerconfigjson` Secret named
-`ghcr-secret` in each chart's configured namespace (`inference` and `orchestrator`
-by default), and the workload Pods reference it. Both charts can also be installed
-independently with `--values`. Partial, blank, and angle-bracket placeholder registry
-credentials fail validation. Nonempty credentials with creation disabled also fail.
+Replace placeholders with real values only in the ignored private credentials file.
+The gateway token must be independently generated, at least 32 characters, and
+also configured as `CODEFACTORY_AUTH_TOKEN` in source repositories. With the local
+orchestrator values example, Helm creates the gateway Secret named
+`orchestrator-gateway-auth` because `gateway.auth.existingSecret` is empty. It also
+creates `orchestrator-supervisor-service-auth` and `orchestrator-github-pr-auth`
+because `supervisor.auth.createSecret` is true. The coder key remains externally
+managed by default through `worker.auth.existingSecret`; set
+`worker.auth.createSecret: true` in the ordinary orchestrator values to have Helm
+create `orchestrator-coder-model-auth` from `credentials.models.coderApiKey`.
+The OpenAI key is stored in `orchestrator-openai-model-auth`.
 
-To retain manual pull Secrets, omit the registry block (the default is
-`create: false` with empty credentials). Custom `imagePullSecrets` names remain
-supported in that mode; creation requires a `ghcr-secret` reference. Do not enable
-creation over an externally managed same-name Secret: Helm refuses ownership
-conflicts rather than silently adopting it. Plan an explicit ownership transition.
-Disabling creation later removes the Helm-managed Secret; provision its replacement
-before doing so.
+The GHCR Secret is named `ghcr-read-packages-pull-secret` in each chart namespace,
+and all workloads reference that name by default. The checked-in shared values
+example enables chart creation and uses a username placeholder; set the actual
+username in the ignored `helm/local.values.yaml`. Do not enable creation over an
+externally managed same-name Secret: Helm refuses ownership conflicts rather than
+adopting it. Disabling creation later removes the Helm-managed Secret, so provision
+its replacement first.
 
-The real file is git-ignored and must never be committed or staged; the example
-is safe to commit. Ignoring a file is not a vault. Helm stores supplied values and
-rendered Secrets in release records, including the registry credential in both
-namespaces. Restrict Helm release/Secret RBAC, backups and local file access, and
-enable cluster encryption at rest. Do not use `helm get values`, rendered-manifest
-dumps, `--debug`, or shell tracing with real credentials. This change does not
-revoke/rotate any token, change the private file's contents, or deploy anything.
+This is a breaking values and resource-name change. Flat registry, gateway,
+supervisor, and model-key aliases are rejected; there is no fallback or automatic
+resource migration. The existing private file is not rewritten by setup. Migrate
+its credentials locally into the grouped structure and move all nonsecret settings
+to the appropriate ordinary values file; remove old flat keys. Provision or rename
+externally managed Secrets before upgrading.
 
-## Repository Permission Preflight
-
-Initially use a fine-grained PAT limited to the originating repository, with
-Contents, Pull requests, and Issues **read/write**, plus Metadata read. The
-token's actor must have repository write access. Provision the `queued`, `done`,
-and `failed` labels. GitHub Apps are future work, not implemented here.
-
-Intake verifies canonical repository identity, an explicit `permissions.push`
-value of true, non-archived state, authenticated contents/PR/issue reads, and the
-same-repository issue identity before accepting work. Missing permission metadata,
-read-only actor access, redirects, unauthorized reads, and inaccessible repositories
-fail closed. Renames/redirects require the caller to use the canonical identity.
-
-**Limitation:** repository metadata describes actor access, not every fine-grained
+When separately authorized, `./helm/deploy.sh` applies chart defaults first,
+`helm/local.values.yaml` to both charts, `helm/orchestrator/local.values.yaml` to
+the orchestrator chart only, and `helm/local.secrets-values.yaml` last. This keeps
+credentials out of behavior settings and shell arguments. For manual installs,
+pass the same files in that order (omit the orchestrator override for inference).
+Partial, blank, and angle-bracket placeholder registry credentials fail validation.
+The real credentials file is git-ignored and must never be committed or staged.
+Helm stores supplied values and rendered Secrets in release records, including the
+registry credential in both namespaces. Restrict Helm release/Secret RBAC, backups
+and local file access, and enable cluster encryption at rest. Do not use `helm get
+values`, rendered-manifest dumps, `--debug`, or shell tracing with real credentials.
+This change does not revoke/rotate any token, alter the existing private file, or
+deploy anything.
 token grant. These safe read probes do not prove the token has every write scope,
 nor bypass branch rules or organization policies. No throwaway write is performed
 as preflight. Operators must configure the required grants; actual writes remain
@@ -110,8 +115,9 @@ Before a separately authorized rollout:
 
 1. Provision a dedicated gateway-auth Secret through your secret manager. Set
    `gateway.auth.existingSecret` to its name; the key is `gateway-auth-token`.
-   Alternatively set `existingSecret` empty and supply `gateway.auth.token` through
-   your secure Helm mechanism. It must be at least 32 characters. Do not dump
+   Alternatively set `existingSecret` empty and supply
+   `credentials.internal.gatewayClientToken` through your secure Helm mechanism. It
+   must be at least 32 characters. Do not dump
    rendered Secret manifests, enable shell tracing, or put secrets in CLI arguments.
 2. Choose `gateway.ingress.tlsTermination`: `internal` (default) uses Traefik
    `websecure` and requires a nonempty `gateway.ingress.tlsSecretName` for the
@@ -180,24 +186,25 @@ git check-ignore helm/orchestrator/local.values.yaml
 
 Edit the local file's public HTTPS origin and routing host for your environment.
 The example uses `gateway.example.com`; it is never automatically loaded.
-During a separately authorized rollout, `./helm/deploy.sh` automatically loads
-the local override if present, for the orchestrator chart only. Precedence is
-chart `values.yaml`, then `helm/orchestrator/local.values.yaml`, then private
-`helm/local.secrets-values.yaml`
-(last wins). Set `ORCHESTRATOR_VALUES_FILE` to use a different local path;
-`SECRETS_FILE` still selects the private file. Keep custom paths ignored too.
-For manual Helm commands, pass the local override with `--values` before the
-private values file. Without an override, generic chart defaults retain internal TLS.
+During a separately authorized rollout, `./helm/deploy.sh` loads the shared
+`helm/local.values.yaml` for both charts, then the orchestrator local override
+for the orchestrator chart, then the private credentials file. Later files win.
+Set `LOCAL_VALUES_FILE`, `ORCHESTRATOR_VALUES_FILE`, or `SECRETS_FILE` to select
+different paths; keep custom local paths ignored too. For manual Helm commands,
+pass the same applicable files in that order. Without an orchestrator override,
+generic chart defaults retain internal TLS and external Secret management.
 
-The filename prefix identifies the environment: `values.yaml` holds shared,
-tracked defaults; `example.values.yaml` is a tracked generic example;
-`local.values.yaml` is an ignored environment override; and
-`local.secrets-values.yaml` holds ignored credentials. The tracked credential
+The filename prefix identifies the environment: chart `values.yaml` files hold
+tracked defaults; `example.values.yaml` files are tracked generic examples;
+`helm/local.values.yaml` is the ignored shared nonsecret override;
+`helm/orchestrator/local.values.yaml` is the ignored orchestrator override; and
+`helm/local.secrets-values.yaml` holds ignored credentials. The tracked credential
 example remains `helm/example.secrets-values.yaml`. Future environments may use
 `dev`, `staging`, or `prod` prefixes, but the script only defaults to `local`;
-other paths require the explicit overrides above. Inference receives the shared
-private file, never the orchestrator's local override. Keep private files and
-environment-specific overrides ignored before using other prefixes.
+other paths require the explicit overrides above. Both charts receive the shared
+local values and credentials; only the orchestrator receives its own local override.
+Keep private files and environment-specific overrides ignored before using other
+prefixes.
 
 `.gitignore` does not protect files already tracked by Git. If this local override
 was previously tracked, run `git rm --cached -- helm/orchestrator/local.values.yaml`

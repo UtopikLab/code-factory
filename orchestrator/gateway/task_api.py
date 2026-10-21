@@ -17,8 +17,8 @@ class TaskAPI:
         task = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
         if task is None and task_id.isdigit() and repo:
             task = db.execute("SELECT * FROM tasks WHERE lower(repo)=lower(?) AND issue=?", (repo, int(task_id))).fetchone()
-        if task and (not gateway._repo_allowed(task["repo"]) or (repo and repo.lower() != (task["repo"] or "").lower())):
-            raise PermissionError("repo-not-allowed")
+        if task and repo and repo.lower() != (task["repo"] or "").lower():
+            raise PermissionError("repository-mismatch")
         return task
 
     def get_task(self):
@@ -40,7 +40,7 @@ class TaskAPI:
                 "job": gateway.json.loads(task["job"]) if task["job"] else None,
             })
         except PermissionError:
-            handler._json(403, {"error": "repo-not-allowed"})
+            handler._json(403, {"error": "repository-mismatch"})
         except ValueError:
             handler._json(400, {"error": "invalid-task-id"})
         finally:
@@ -78,8 +78,6 @@ class TaskAPI:
             gateway._validate_assigned_task_id(payload["task_id"])
             if issue is not None and str(payload["task_id"]) != str(issue):
                 raise ValueError("issue-mismatch")
-        if not gateway._repo_allowed(repo):
-            raise PermissionError("repo-not-allowed")
         if not handler._transport_allowed():
             raise gateway.CredentialError("transport-not-allowed")
         gateway._validate_repository(repo, issue, token)

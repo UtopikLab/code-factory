@@ -89,8 +89,6 @@ spec:
                 configMapKeyRef:
                   name: {{ .Chart.Name }}-config
                   key: acceptor-url
-            - name: ALLOWED_REPOS
-              value: {{ default .Values.supervisor.config.repo .Values.gateway.config.repo | quote }}
             - name: CODER_URL
               value: {{ $coderUrl | quote }}
             - name: CODER_MODEL

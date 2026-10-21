@@ -10,14 +10,6 @@ class CredentialError(Exception):
     pass
 
 
-def parse_allowed_repos(raw):
-    """Return an explicit repository allowlist; empty and wildcard values deny all."""
-    raw = (raw or "").strip()
-    if raw == "" or raw == "*":
-        return set()
-    return {repo for repo in (item.strip() for item in raw.split(",")) if repo}
-
-
 def reject_credentials(payload, *tokens, global_token=""):
     serialized = json.dumps(payload)
     if (any(token and token in serialized for token in (*tokens, global_token))
@@ -77,10 +69,6 @@ def identity(payload):
     if "issue_number" in nested and "issue_number" in payload and nested["issue_number"] != payload["issue_number"]:
         raise ValueError("issue-mismatch")
     return repo, issue
-
-
-def repo_allowed(repo, allowed_repos):
-    return bool(repo) and repo.lower() in {entry.lower() for entry in (allowed_repos or set())}
 
 
 def is_external_workflow_payload(payload):

@@ -65,7 +65,7 @@ def test_pinned_catalog_is_schema_validated_and_role_tools_are_bounded(monkeypat
                           "judge_url": "http://p40-1/v1", "judge_model": "judge-model",
                           "threshold": 0.8, "max_total_attempts": 8,
                           "allowed_base_branches": "main", "reviewers": "reviewer",
-                          "allowed_repos": "org/repo", "repo_policies": {},
+                          "repo_policies": {},
                           "worker_parallelism": 1}, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256((content + schema + runtime).encode()).hexdigest()
     monkeypatch.setattr(supervisor_module, "_k8s_request", lambda *_args: {
@@ -256,12 +256,13 @@ def test_dispatch_injects_only_task_scoped_credentials_and_pinned_catalog(monkey
             "config_version": "1", "payload": '{"repo":"org/repo"}', "plan": "test plan",
             "repo": "org/repo", "credential_ref": "task-credential-issue-123"}
     runtime = {"coder_url": "http://coder", "coder_model": "coder-model", "coder_native_download": False,
-               "acceptor_url": "https://gateway", "allowed_repos": "org/repo", "repo_policies": {}}
+               "acceptor_url": "https://gateway", "repo_policies": {}}
     name = supervisor_module._dispatch_task(task, runtime)
     assert name == "code-factory-worker-issue-123-1"
     job = requests[-1][2]
     env = {entry["name"]: entry for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]}
     assert "CODEFACTORY_AUTH_TOKEN" not in env and "JUDGE_URL" not in env
+    assert "ALLOWED_REPOS" not in env and "ALLOWED_REPO" not in env
     assert env["TASK_CALLBACK_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == task["credential_ref"]
     assert json.loads(env["ASSIGNED_TASK_PAYLOAD"]["value"])["supervisor_plan"] == "test plan"
     assert job["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"].endswith(catalog_hash[:12])

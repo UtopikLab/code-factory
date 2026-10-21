@@ -63,7 +63,7 @@ spec:
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Chart.Name }}-secrets
+                  name: {{ .Chart.Name }}-openai-model-auth
                   key: openai-api-key
             - name: ACCEPTOR_URL
               valueFrom:
@@ -116,7 +116,7 @@ spec:
             - name: PR_GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.supervisor.auth.existingSecret }}
+                  name: {{ .Values.supervisor.auth.pullRequestSecret }}
                   key: pr-github-token
             - name: WORKER_JOB_TEMPLATE
               value: {{ printf "%s-worker" .Chart.Name | quote }}

@@ -171,9 +171,6 @@ def _issue_identity(payload):
         raise TaskFailure("invalid-issue")
     if "issue_number" in payload and "issue_number" in nested and payload["issue_number"] != issue:
         raise TaskFailure("issue-mismatch")
-    allowed = os.environ.get("ALLOWED_REPOS", os.environ.get("ALLOWED_REPO", ""))
-    if allowed.strip() != "*" and repo.lower() not in {entry.strip().lower() for entry in allowed.split(",")}:
-        raise TaskFailure("repo-not-allowed")
     return repo, issue
 
 

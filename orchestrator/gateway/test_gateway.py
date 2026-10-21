@@ -1,9 +1,4 @@
-"""
-Unit tests for the gateway repo-allowlist helpers (server.py).
-
-These exercise the _parse_allowed_repos helper and the repo-validation logic,
-which are deterministic and do not require a running HTTP server.
-"""
+"""Tests for gateway task intake, credential validation, and lifecycle handling."""
 
 import base64
 import copy
@@ -28,7 +23,6 @@ def task_gateway(monkeypatch, tmp_path):
     monkeypatch.setenv("TASK_DB_PATH", str(tmp_path / "tasks.sqlite3"))
     monkeypatch.setattr(server, "TOKEN", "test-token")
     monkeypatch.setattr(server, "SUPERVISOR_TOKEN", "supervisor-test-token")
-    monkeypatch.setattr(server, "ALLOWED_REPOS", {"org/repo", "org/other"})
     monkeypatch.setenv("GATEWAY_TRANSPORT_MODE", "local-http")
     monkeypatch.setattr(server, "_validate_repository", Mock())
     monkeypatch.setattr(server.secrets, "token_urlsafe", Mock(return_value="callback-test-only"))
@@ -187,14 +181,12 @@ def test_retry_rejects_invalid_requests(task_gateway, payload):
     task_gateway[0].assert_not_called()
 
 
-def test_retry_revalidates_access_and_repository_allowlist(task_gateway, monkeypatch):
+def test_retry_revalidates_repository_access(task_gateway, monkeypatch):
     original = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
     finish_failed_task(task_gateway, monkeypatch, original)
     path = f"/api/v1/tasks/{original}/retry"
     assert task_request("POST", path, {"retry_key": "manual-1"}, token="wrong")[0] == 401
     monkeypatch.setattr(server, "_validate_repository", Mock(side_effect=server.CredentialError("repository-credential-denied")))
-    assert task_request("POST", path, {"retry_key": "manual-1"})[0] == 403
-    monkeypatch.setattr(server, "ALLOWED_REPOS", {"another/repo"})
     assert task_request("POST", path, {"retry_key": "manual-1"})[0] == 403
     task_gateway[0].assert_not_called()
 
@@ -652,7 +644,7 @@ def test_helm_credential_references_and_rbac():
         if document["kind"] not in ("Deployment", "Job"):
             continue
         pod = document["spec"]["template"]["spec"]
-        assert pod["imagePullSecrets"] == [{"name": "ghcr-secret"}]
+        assert pod["imagePullSecrets"] == [{"name": "ghcr-read-packages-pull-secret"}]
         for container in pod["containers"]:
             env = {entry["name"]: entry for entry in container.get("env", [])}
             assert not {"GITHUB_TOKEN", "REPO_GITHUB_PAT"} & env.keys()
@@ -669,13 +661,14 @@ def test_helm_credential_references_and_rbac():
     ingress = next(document for document in documents if document["kind"] == "Ingress")
     assert ingress["spec"]["tls"] and ingress["metadata"]["annotations"]["traefik.ingress.kubernetes.io/router.entrypoints"] == "websecure"
     dedicated = subprocess.run(["helm", "template", "credential-check", str(root / "helm/orchestrator"), "--set", "gateway.auth.existingSecret=",
-                                "--set", "gateway.auth.token=gateway-test-only-32-character-value"], capture_output=True, text=True, check=True)
+                                "--set", "credentials.internal.gatewayClientToken=gateway-test-only-32-character-value"], capture_output=True, text=True, check=True)
     secrets = [document for document in yaml.safe_load_all(dedicated.stdout) if document and document["kind"] == "Secret"]
     assert next(document for document in secrets if document["metadata"]["name"] == "orchestrator-gateway-auth")["data"].keys() == {"gateway-auth-token"}
     supervisor = next(document for document in documents if document["kind"] == "Deployment"
                       and document["metadata"]["name"] == "orchestrator-supervisor")
     supervisor_env = {entry["name"]: entry for entry in supervisor["spec"]["template"]["spec"]["containers"][0]["env"]}
-    assert supervisor_env["PR_GITHUB_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == "orchestrator-supervisor-auth"
+    assert supervisor_env["PR_GITHUB_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == "orchestrator-github-pr-auth"
+    assert supervisor_env["SUPERVISOR_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == "orchestrator-supervisor-service-auth"
 
 
 def test_helm_pins_nonsecret_catalog_runtime_and_p40_routes():
@@ -715,6 +708,11 @@ def test_helm_ingress_tls_termination(mode, secret, profile):
     if profile:
         values = yaml.safe_load((chart / "example.values.yaml").read_text())
         origin = values["supervisor"]["config"]["acceptor-url"]
+        values["credentials"] = {
+            "internal": {"gatewayClientToken": "gateway-test-only-32-character-value",
+                         "supervisorServiceToken": "supervisor-test-only"},
+            "github": {"pullRequestPat": "pr-test-only"},
+        }
     rendered = subprocess.run(["helm", "template", "ingress-check", str(chart), "--values", "-"],
                               input=yaml.safe_dump(values), capture_output=True, text=True, check=True)
     documents = [document for document in yaml.safe_load_all(rendered.stdout) if document]
@@ -917,76 +915,14 @@ def test_failed_lifecycle_never_marks_done(task_gateway):
     assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[1]["lifecycle"] == "synced"
     github.assert_not_called()
 
-# --------------------------------------------------------------------------- #
-# _parse_allowed_repos helper
-# --------------------------------------------------------------------------- #
-
-
-def test_wildcard_does_not_enable_any_repo():
-    assert server._parse_allowed_repos("*") == set()
-
-
-def test_single_repo_whitelist():
-    result = server._parse_allowed_repos("org/repo1")
-    assert result == {"org/repo1"}
-
-
-def test_multiple_comma_separated_repos():
-    result = server._parse_allowed_repos("org/a,org/b, other/c ")
-    assert result == {"org/a", "org/b", "other/c"}
-
-
-def test_empty_and_blank_fallbacks():
-    assert server._parse_allowed_repos("") == set()
-    assert server._parse_allowed_repos("   ") == set()
-    assert server._parse_allowed_repos(None) == set()
-
-
-def test_legacy_allowed_repo_variable():
-    # Backward-compatible: ALLOWED_REPO is read when ALLOWED_REPOS is unset.
-    os.environ.pop("ALLOWED_REPOS", None)
-    os.environ["ALLOWED_REPO"] = "UtopikLab/code-factory"
-    del server.ALLOWED_REPOS_RAW
-    del server.ALLOWED_REPOS
-    server.ALLOWED_REPOS_RAW = os.environ.get(
-        "ALLOWED_REPOS", os.environ.get("ALLOWED_REPO", "")
-    )
-    server.ALLOWED_REPOS = server._parse_allowed_repos(server.ALLOWED_REPOS_RAW)
-    assert server.ALLOWED_REPOS == {"UtopikLab/code-factory"}
-
-
-# --------------------------------------------------------------------------- #
-# Repo validation (mirrors the do_POST branch)
-# --------------------------------------------------------------------------- #
-
-
-def _repo_allowed(repo, allowed):
-    if allowed is None:
-        return True  # "*" -> accept any repo
-    return allowed is not None and (repo in allowed)
-
-
-def test_any_repo_policy_accepts_all():
-    assert _repo_allowed("anything/else", None) is True
-
-
-def test_whitelist_rejects_unknown():
-    allowed = {"org/a"}
-    assert _repo_allowed("org/a", allowed) is True
-    assert _repo_allowed("org/b", allowed) is False
-
-
-def test_single_repo_whitelist_rejects_others():
-    allowed = {"UtopikLab/code-factory"}
-    assert _repo_allowed("UtopikLab/code-factory", allowed) is True
-    assert _repo_allowed("other/repo", allowed) is False
-
-
-def test_multi_repo_whitelist():
-    allowed = {"org/a", "org/b"}
-    assert _repo_allowed("org/a", allowed) is True
-    assert _repo_allowed("org/b", allowed) is True
-    assert _repo_allowed("org/c", allowed) is False
+@pytest.mark.parametrize("legacy_value", ["", "*", "another/repo"])
+def test_intake_relies_on_repository_credentials_not_allowlist(task_gateway, monkeypatch, legacy_value):
+    monkeypatch.setenv("ALLOWED_REPOS", legacy_value)
+    monkeypatch.setenv("ALLOWED_REPO", legacy_value)
+    code, result = task_request("POST", "/api/v1/tasks/spawn", {"repo": "new/project", "issue_number": 2})
+    assert code == 202
+    assert result["repo"] == "new/project"
+    server._validate_repository.assert_called_once_with("new/project", 2, "repo-test-only")
 
 
 # --------------------------------------------------------------------------- #

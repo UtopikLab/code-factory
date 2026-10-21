@@ -25,7 +25,6 @@ RUN groupadd --gid 1001 orchestrator && \
 
 WORKDIR /app
 
-ENV ALLOWED_REPOS="*"
 ENV PORT=8000
 
 # System dependencies.

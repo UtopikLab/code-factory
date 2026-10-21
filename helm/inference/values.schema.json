@@ -49,17 +49,13 @@
             "additionalProperties": false,
             "required": [
                 "create",
-                "username",
-                "token"
+                "username"
             ],
             "properties": {
                 "create": {
                     "type": "boolean"
                 },
                 "username": {
-                    "type": "string"
-                },
-                "token": {
                     "type": "string"
                 }
             },
@@ -75,10 +71,6 @@
                     "username": {
                         "minLength": 1,
                         "pattern": "^[^<>\\s]+$"
-                    },
-                    "token": {
-                        "minLength": 1,
-                        "pattern": "^[^<>\\s]+$"
                     }
                 }
             },
@@ -86,9 +78,48 @@
                 "properties": {
                     "username": {
                         "maxLength": 0
-                    },
-                    "token": {
-                        "maxLength": 0
+                    }
+                }
+            }
+        },
+        "credentials": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "internal": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "gatewayClientToken": {
+                            "type": "string"
+                        },
+                        "supervisorServiceToken": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "github": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "ghcrReadPackagesPat": {
+                            "type": "string"
+                        },
+                        "pullRequestPat": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "models": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "openaiApiKey": {
+                            "type": "string"
+                        },
+                        "coderApiKey": {
+                            "type": "string"
+                        }
                     }
                 }
             }
@@ -347,5 +378,51 @@
                 }
             }
         }
-    }
+    },
+    "allOf": [
+        {
+            "if": {
+                "properties": {
+                    "registry": {
+                        "properties": {
+                            "create": {
+                                "const": true
+                            }
+                        },
+                        "required": [
+                            "create"
+                        ]
+                    }
+                },
+                "required": [
+                    "registry"
+                ]
+            },
+            "then": {
+                "properties": {
+                    "credentials": {
+                        "properties": {
+                            "github": {
+                                "properties": {
+                                    "ghcrReadPackagesPat": {
+                                        "minLength": 1,
+                                        "pattern": "^[^<>\\s]+$"
+                                    }
+                                },
+                                "required": [
+                                    "ghcrReadPackagesPat"
+                                ]
+                            }
+                        },
+                        "required": [
+                            "github"
+                        ]
+                    }
+                },
+                "required": [
+                    "credentials"
+                ]
+            }
+        }
+    ]
 }

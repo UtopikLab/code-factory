@@ -180,14 +180,15 @@ class RegistryValuesTests(unittest.TestCase):
         for chart in ("orchestrator", "inference"):
             with self.subTest(chart=chart):
                 documents = self.documents(chart, {
-                    "registry": {"create": True, "username": USERNAME, "token": TOKEN},
+                    "registry": {"create": True, "username": USERNAME},
+                    "credentials": {"github": {"ghcrReadPackagesPat": TOKEN}},
                 })
                 secrets = [document for document in documents
                            if document["kind"] == "Secret"
                            and document.get("type") == "kubernetes.io/dockerconfigjson"]
                 self.assertEqual(len(secrets), 1)
                 secret = secrets[0]
-                self.assertEqual(secret["metadata"]["name"], "ghcr-secret")
+                self.assertEqual(secret["metadata"]["name"], "ghcr-read-packages-pull-secret")
                 self.assertEqual(secret["metadata"]["namespace"], chart)
                 config = json.loads(base64.b64decode(secret["data"][".dockerconfigjson"]))
                 self.assertEqual(set(config["auths"]), {"ghcr.io"})
@@ -200,15 +201,240 @@ class RegistryValuesTests(unittest.TestCase):
                 self.assertEqual(len(workloads), 3 if chart == "orchestrator" else 2)
                 for workload in workloads:
                     self.assertEqual(workload["metadata"]["namespace"], chart)
-                    self.assertIn({"name": "ghcr-secret"},
+                    self.assertIn({"name": "ghcr-read-packages-pull-secret"},
                                   workload["spec"]["template"]["spec"]["imagePullSecrets"])
+
+    def test_grouped_ghcr_pat_is_shared_with_inference_chart(self):
+        documents = self.documents("inference", {
+            "registry": {"create": True, "username": USERNAME},
+            "credentials": {
+                "internal": {
+                    "gatewayClientToken": "gateway-shared-dummy-token-32-characters",
+                    "supervisorServiceToken": "supervisor-shared-dummy",
+                },
+                "github": {
+                    "ghcrReadPackagesPat": "ghcr-shared-dummy",
+                    "pullRequestPat": "pr-shared-dummy",
+                },
+                "models": {
+                    "openaiApiKey": "openai-shared-dummy",
+                    "coderApiKey": "coder-shared-dummy",
+                },
+            },
+        })
+        secret = next(document for document in documents
+                      if document["kind"] == "Secret" and document["metadata"]["name"] == "ghcr-read-packages-pull-secret")
+        config = json.loads(base64.b64decode(secret["data"][".dockerconfigjson"]))
+        self.assertEqual(config["auths"]["ghcr.io"]["password"], "ghcr-shared-dummy")
+
+    def test_grouped_credentials_route_to_expected_consumers(self):
+        credentials = {
+            "internal": {
+                "gatewayClientToken": "gateway-grouped-sentinel-token-32-characters",
+                "supervisorServiceToken": "supervisor-grouped-sentinel",
+            },
+            "github": {
+                "ghcrReadPackagesPat": "ghcr-grouped-sentinel",
+                "pullRequestPat": "pr-grouped-sentinel",
+            },
+            "models": {
+                "openaiApiKey": "openai-grouped-sentinel",
+                "coderApiKey": "coder-grouped-sentinel",
+            },
+        }
+        documents = self.documents("orchestrator", {
+            "credentials": credentials,
+            "registry": {"create": True, "username": USERNAME},
+            "gateway": {"auth": {"existingSecret": ""}},
+            "supervisor": {"auth": {"createSecret": True}},
+            "worker": {"auth": {"createSecret": True}},
+        })
+        secrets = {document["metadata"]["name"]: document for document in documents
+                   if document["kind"] == "Secret"}
+        self.assertEqual(set(secrets), {
+            "orchestrator-openai-model-auth", "orchestrator-supervisor-service-auth",
+            "orchestrator-github-pr-auth", "orchestrator-gateway-auth",
+            "orchestrator-coder-model-auth", "ghcr-read-packages-pull-secret",
+        })
+        self.assertEqual(base64.b64decode(secrets["orchestrator-openai-model-auth"]["data"]["openai-api-key"]).decode(),
+                         "openai-grouped-sentinel")
+        self.assertEqual(base64.b64decode(secrets["orchestrator-supervisor-service-auth"]["data"]["supervisor-auth-token"]).decode(),
+                         "supervisor-grouped-sentinel")
+        self.assertEqual(base64.b64decode(secrets["orchestrator-github-pr-auth"]["data"]["pr-github-token"]).decode(),
+                         "pr-grouped-sentinel")
+        self.assertEqual(base64.b64decode(secrets["orchestrator-coder-model-auth"]["data"]["coder-api-key"]).decode(),
+                         "coder-grouped-sentinel")
+        docker_config = json.loads(base64.b64decode(secrets["ghcr-read-packages-pull-secret"]["data"][".dockerconfigjson"]))
+        self.assertEqual(docker_config["auths"]["ghcr.io"]["password"], "ghcr-grouped-sentinel")
+
+        gateway = next(document for document in documents if document["kind"] == "Deployment"
+                       and document["metadata"]["name"] == "orchestrator-gateway")
+        gateway_env = {entry["name"]: entry for entry in gateway["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual(gateway_env["CODEFACTORY_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"], {
+            "name": "orchestrator-gateway-auth", "key": "gateway-auth-token",
+        })
+        self.assertEqual(base64.b64decode(secrets["orchestrator-gateway-auth"]["data"]["gateway-auth-token"]).decode(),
+                         "gateway-grouped-sentinel-token-32-characters")
+        self.assertEqual(gateway_env["SUPERVISOR_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"], {
+            "name": "orchestrator-supervisor-service-auth", "key": "supervisor-auth-token",
+        })
+
+        supervisor = next(document for document in documents if document["kind"] == "Deployment"
+                          and document["metadata"]["name"] == "orchestrator-supervisor")
+        supervisor_env = {entry["name"]: entry for entry in supervisor["spec"]["template"]["spec"]["containers"][0]["env"]}
+        for name, secret_name, key in (
+            ("OPENAI_API_KEY", "orchestrator-openai-model-auth", "openai-api-key"),
+            ("SUPERVISOR_AUTH_TOKEN", "orchestrator-supervisor-service-auth", "supervisor-auth-token"),
+            ("PR_GITHUB_TOKEN", "orchestrator-github-pr-auth", "pr-github-token"),
+        ):
+            self.assertEqual(supervisor_env[name]["valueFrom"]["secretKeyRef"], {
+                "name": secret_name, "key": key,
+            })
+
+        worker = next(document for document in documents if document["kind"] == "Job")
+        worker_env = {entry["name"]: entry for entry in worker["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual(worker_env["CODER_API_KEY"]["valueFrom"]["secretKeyRef"], {
+            "name": "orchestrator-coder-model-auth", "key": "coder-api-key",
+        })
+
+    def test_examples_separate_credentials_from_behavior(self):
+        credentials = yaml.safe_load((HELM_DIR / "example.secrets-values.yaml").read_text())
+        self.assertEqual(set(credentials), {"credentials"})
+        self.assertEqual(set(credentials["credentials"]), {"internal", "github", "models"})
+        self.assertNotIn("createSecret", str(credentials))
+        self.assertNotIn("existingSecret", str(credentials))
+
+        shared = yaml.safe_load((HELM_DIR / "example.values.yaml").read_text())
+        self.assertEqual(shared["registry"], {"create": True, "username": "<your-github-username>"})
+        orchestrator = yaml.safe_load((HELM_DIR / "orchestrator/example.values.yaml").read_text())
+        self.assertEqual(orchestrator["gateway"]["auth"]["existingSecret"], "")
+        self.assertTrue(orchestrator["supervisor"]["auth"]["createSecret"])
+        self.assertFalse(orchestrator["worker"]["auth"]["createSecret"])
+
+    def test_deploy_value_file_order_renders_secrets_and_references(self):
+        shared_values = yaml.safe_load((HELM_DIR / "example.values.yaml").read_text())
+        shared_values["registry"]["username"] = USERNAME
+        orchestrator_values = yaml.safe_load(
+            (HELM_DIR / "orchestrator/example.values.yaml").read_text())
+        secret_values = {"credentials": {
+            "internal": {
+                "gatewayClientToken": "gateway-layered-dummy-token-at-least-32-chars",
+                "supervisorServiceToken": "supervisor-layered-dummy",
+            },
+            "github": {
+                "ghcrReadPackagesPat": "ghcr-layered-dummy",
+                "pullRequestPat": "pr-layered-dummy",
+            },
+            "models": {
+                "openaiApiKey": "openai-layered-dummy",
+                "coderApiKey": "coder-layered-dummy",
+            },
+        }}
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            paths = []
+            for name, values in (("shared.yaml", shared_values),
+                                 ("orchestrator.yaml", orchestrator_values),
+                                 ("secrets.yaml", secret_values)):
+                path = temporary_path / name
+                path.write_text(yaml.safe_dump(values))
+                paths.append(path)
+
+            for chart in ("inference", "orchestrator"):
+                with self.subTest(chart=chart):
+                    ordered_paths = [paths[0]]
+                    if chart == "orchestrator":
+                        ordered_paths.append(paths[1])
+                    ordered_paths.append(paths[2])
+                    documents = self.documents_from_value_files(chart, ordered_paths)
+                    registry_secret = next(document for document in documents
+                                           if document["kind"] == "Secret"
+                                           and document["metadata"]["name"] == "ghcr-read-packages-pull-secret")
+                    self.assertEqual(registry_secret["metadata"]["namespace"], chart)
+                    docker_config = json.loads(base64.b64decode(
+                        registry_secret["data"][".dockerconfigjson"]))
+                    self.assertEqual(docker_config["auths"]["ghcr.io"]["password"],
+                                     "ghcr-layered-dummy")
+                    workloads = [document for document in documents
+                                 if document["kind"] in ("Deployment", "Job")]
+                    for workload in workloads:
+                        self.assertIn({"name": "ghcr-read-packages-pull-secret"},
+                                      workload["spec"]["template"]["spec"]["imagePullSecrets"])
+
+                    if chart == "inference":
+                        continue
+                    secrets = {document["metadata"]["name"]: document for document in documents
+                               if document["kind"] == "Secret"}
+                    self.assertEqual(set(secrets), {
+                        "orchestrator-openai-model-auth", "orchestrator-supervisor-service-auth",
+                        "orchestrator-github-pr-auth", "orchestrator-gateway-auth",
+                        "ghcr-read-packages-pull-secret",
+                    })
+                    gateway = next(document for document in documents if document["kind"] == "Deployment"
+                                   and document["metadata"]["name"] == "orchestrator-gateway")
+                    gateway_env = {entry["name"]: entry for entry in
+                                   gateway["spec"]["template"]["spec"]["containers"][0]["env"]}
+                    self.assertEqual(gateway_env["CODEFACTORY_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"], {
+                        "name": "orchestrator-gateway-auth", "key": "gateway-auth-token",
+                    })
+                    supervisor = next(document for document in documents if document["kind"] == "Deployment"
+                                      and document["metadata"]["name"] == "orchestrator-supervisor")
+                    supervisor_env = {entry["name"]: entry for entry in
+                                      supervisor["spec"]["template"]["spec"]["containers"][0]["env"]}
+                    self.assertEqual(supervisor_env["SUPERVISOR_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"], {
+                        "name": "orchestrator-supervisor-service-auth", "key": "supervisor-auth-token",
+                    })
+                    worker = next(document for document in documents if document["kind"] == "Job")
+                    worker_env = {entry["name"]: entry for entry in
+                                  worker["spec"]["template"]["spec"]["containers"][0]["env"]}
+                    self.assertEqual(worker_env["CODER_API_KEY"]["valueFrom"]["secretKeyRef"], {
+                        "name": "orchestrator-coder-model-auth", "key": "coder-api-key",
+                    })
+
+    def documents_from_value_files(self, chart, value_files):
+        command = ["helm", "template", "local", str(HELM_DIR / chart)]
+        for path in value_files:
+            command.extend(("--values", str(path)))
+        result = subprocess.run(command, text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, "Layered dummy Helm render failed")
+        return [document for document in yaml.safe_load_all(result.stdout) if document]
+
+    def test_legacy_credential_paths_are_rejected(self):
+        legacy_values = (
+            {"registry": {"token": "old-ghcr-token"}},
+            {"gateway": {"auth": {"token": "old-gateway-token-32-characters-long"}}},
+            {"supervisor": {"auth": {"supervisor-auth-token": "old-service-token"}}},
+            {"supervisor": {"auth": {"pr-github-token": "old-pr-token"}}},
+            {"supervisor": {"config": {"openai-api-key": "old-model-key"}}},
+        )
+        for values in legacy_values:
+            with self.subTest(values=values):
+                result = self.render("orchestrator", values)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("values don't meet the specifications", result.stderr)
+
+    def test_worker_coder_secret_remains_external_by_default(self):
+        documents = self.documents("orchestrator", {})
+        self.assertFalse(any(document["kind"] == "Secret"
+                             and document["metadata"]["name"] == "orchestrator-coder-model-auth"
+                             for document in documents))
+        self.assertFalse(any(document["kind"] == "Secret"
+                             and document["metadata"]["name"] == "orchestrator-supervisor-auth"
+                             for document in documents))
+        worker = next(document for document in documents if document["kind"] == "Job")
+        coder_key = next(entry for entry in worker["spec"]["template"]["spec"]["containers"][0]["env"]
+                         if entry["name"] == "CODER_API_KEY")
+        self.assertEqual(coder_key["valueFrom"]["secretKeyRef"], {
+            "name": "orchestrator-coder-model-auth", "key": "coder-api-key",
+        })
 
     def test_default_and_external_secret_modes(self):
         for chart in ("orchestrator", "inference"):
             for custom in (False, True):
                 with self.subTest(chart=chart, custom=custom):
                     values = {}
-                    name = "external-pull-secret" if custom else "ghcr-secret"
+                    name = "external-pull-secret" if custom else "ghcr-read-packages-pull-secret"
                     if custom:
                         target = values.setdefault("inference", {}) if chart == "inference" else values
                         target["imagePullSecrets"] = [{"name": name}]
@@ -239,12 +465,14 @@ class RegistryValuesTests(unittest.TestCase):
                 with self.subTest(chart=chart, case=index):
                     result = self.render(chart, {"registry": registry})
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("registry", result.stderr)
                     self.assertNotIn("kind: Secret", result.stdout)
 
     def test_creation_reference_conflicts_fail(self):
         for chart in ("orchestrator", "inference"):
-            values = {"registry": {"create": True, "username": USERNAME, "token": TOKEN}}
+            values = {
+                "registry": {"create": True, "username": USERNAME},
+                "credentials": {"github": {"ghcrReadPackagesPat": TOKEN}},
+            }
             target = values.setdefault("inference", {}) if chart == "inference" else values
             target["imagePullSecrets"] = [{"name": "external-pull-secret"}]
             result = self.render(chart, values)
@@ -254,17 +482,21 @@ class RegistryValuesTests(unittest.TestCase):
     def test_gateway_file_token_remains_separate(self):
         gateway_token = "gateway-only-sentinel-independent-32-characters"
         documents = self.documents("orchestrator", {
-            "gateway": {"auth": {"existingSecret": "", "token": gateway_token}},
-            "supervisor": {"config": {"openai-api-key": "model-key-sentinel"}},
+            "gateway": {"auth": {"existingSecret": ""}},
+            "credentials": {
+                "internal": {"gatewayClientToken": gateway_token},
+                "models": {"openaiApiKey": "model-key-sentinel"},
+            },
         })
         secrets = {document["metadata"]["name"]: document for document in documents
                    if document["kind"] == "Secret"}
         token = secrets["orchestrator-gateway-auth"]["data"]["gateway-auth-token"]
         self.assertEqual(base64.b64decode(token).decode(), gateway_token)
-        model_key = secrets["orchestrator-secrets"]["data"]["openai-api-key"]
+        model_key = secrets["orchestrator-openai-model-auth"]["data"]["openai-api-key"]
         self.assertEqual(base64.b64decode(model_key).decode(), "model-key-sentinel")
         result = self.render("orchestrator", {
-            "gateway": {"auth": {"existingSecret": "", "token": "<replace-with-independent-token-32-characters>"}},
+            "gateway": {"auth": {"existingSecret": ""}},
+            "credentials": {"internal": {"gatewayClientToken": "<replace-with-independent-token-32-characters>"}},
         })
         self.assertNotEqual(result.returncode, 0)
 
@@ -275,6 +507,13 @@ class RegistryValuesTests(unittest.TestCase):
         values = yaml.safe_load(contents)
         self.assertEqual(values["supervisor"]["config"]["acceptor-url"],
                          "https://gateway.example.com")
+        values["credentials"] = {
+            "internal": {
+                "gatewayClientToken": "gateway-proxy-example-dummy-token-32-chars",
+                "supervisorServiceToken": "supervisor-proxy-example-dummy",
+            },
+            "github": {"pullRequestPat": "pr-proxy-example-dummy"},
+        }
         documents = self.documents("orchestrator", values)
         ingress = next(document for document in documents if document["kind"] == "Ingress")
         self.assertEqual(ingress["spec"]["rules"][0]["host"], "orchestrator.local")

@@ -1,24 +1,62 @@
 {
     "$schema": "https://json-schema.org/schema",
-    "title": "k8s-inference values",
+    "title": "orchestrator values",
     "type": "object",
     "properties": {
+        "credentials": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "internal": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "gatewayClientToken": {
+                            "type": "string"
+                        },
+                        "supervisorServiceToken": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "github": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "ghcrReadPackagesPat": {
+                            "type": "string"
+                        },
+                        "pullRequestPat": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "models": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "openaiApiKey": {
+                            "type": "string"
+                        },
+                        "coderApiKey": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "registry": {
             "type": "object",
             "additionalProperties": false,
             "required": [
                 "create",
-                "username",
-                "token"
+                "username"
             ],
             "properties": {
                 "create": {
                     "type": "boolean"
                 },
                 "username": {
-                    "type": "string"
-                },
-                "token": {
                     "type": "string"
                 }
             },
@@ -34,19 +72,12 @@
                     "username": {
                         "minLength": 1,
                         "pattern": "^[^<>\\s]+$"
-                    },
-                    "token": {
-                        "minLength": 1,
-                        "pattern": "^[^<>\\s]+$"
                     }
                 }
             },
             "else": {
                 "properties": {
                     "username": {
-                        "maxLength": 0
-                    },
-                    "token": {
                         "maxLength": 0
                     }
                 }
@@ -55,8 +86,33 @@
         "supervisor": {
             "type": "object",
             "properties": {
+                "auth": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                        "existingSecret",
+                        "pullRequestSecret",
+                        "createSecret"
+                    ],
+                    "properties": {
+                        "existingSecret": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+                            "maxLength": 253
+                        },
+                        "createSecret": {
+                            "type": "boolean"
+                        },
+                        "pullRequestSecret": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+                            "maxLength": 253
+                        }
+                    }
+                },
                 "config": {
                     "type": "object",
+                    "additionalProperties": false,
                     "properties": {
                         "acceptor-url": {
                             "type": "string",
@@ -92,6 +148,22 @@
                         },
                         "reviewers": {
                             "type": "string"
+                        },
+                        "worker-parallelism": {
+                            "type": "integer",
+                            "minimum": 1
+                        },
+                        "max-iterations": {
+                            "type": "integer",
+                            "minimum": 1
+                        },
+                        "task-wait-seconds": {
+                            "type": "integer",
+                            "minimum": 1
+                        },
+                        "loop-state-dir": {
+                            "type": "string",
+                            "minLength": 1
                         }
                     }
                 }
@@ -124,6 +196,9 @@
                             "type": "string",
                             "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
                             "maxLength": 253
+                        },
+                        "createSecret": {
+                            "type": "boolean"
                         }
                     }
                 },
@@ -196,8 +271,7 @@
                 "auth": {
                     "type": "object",
                     "required": [
-                        "existingSecret",
-                        "token"
+                        "existingSecret"
                     ],
                     "additionalProperties": false,
                     "properties": {
@@ -205,34 +279,8 @@
                             "type": "string",
                             "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
                             "maxLength": 253
-                        },
-                        "token": {
-                            "type": "string",
-                            "pattern": "^[^<>\\s]*$"
                         }
-                    },
-                    "oneOf": [
-                        {
-                            "properties": {
-                                "existingSecret": {
-                                    "minLength": 1
-                                },
-                                "token": {
-                                    "maxLength": 0
-                                }
-                            }
-                        },
-                        {
-                            "properties": {
-                                "existingSecret": {
-                                    "maxLength": 0
-                                },
-                                "token": {
-                                    "minLength": 32
-                                }
-                            }
-                        }
-                    ]
+                    }
                 },
                 "transportMode": {
                     "type": "string",
@@ -532,16 +580,10 @@
                 "verified": {
                     "type": "string"
                 },
-                "openaiApiKey": {
-                    "type": "string"
-                },
                 "config": {
                     "type": "object",
                     "properties": {
                         "max-iterations": {
-                            "type": "string"
-                        },
-                        "openai-api-key": {
                             "type": "string"
                         },
                         "task-wait-seconds": {
@@ -585,5 +627,215 @@
                 }
             }
         }
-    }
+    },
+    "allOf": [
+        {
+            "if": {
+                "properties": {
+                    "registry": {
+                        "properties": {
+                            "create": {
+                                "const": true
+                            }
+                        },
+                        "required": [
+                            "create"
+                        ]
+                    }
+                },
+                "required": [
+                    "registry"
+                ]
+            },
+            "then": {
+                "properties": {
+                    "credentials": {
+                        "properties": {
+                            "github": {
+                                "properties": {
+                                    "ghcrReadPackagesPat": {
+                                        "minLength": 1,
+                                        "pattern": "^[^<>\\s]+$"
+                                    }
+                                },
+                                "required": [
+                                    "ghcrReadPackagesPat"
+                                ]
+                            }
+                        },
+                        "required": [
+                            "github"
+                        ]
+                    }
+                },
+                "required": [
+                    "credentials"
+                ]
+            }
+        },
+        {
+            "if": {
+                "properties": {
+                    "gateway": {
+                        "properties": {
+                            "auth": {
+                                "properties": {
+                                    "existingSecret": {
+                                        "maxLength": 0
+                                    }
+                                },
+                                "required": [
+                                    "existingSecret"
+                                ]
+                            }
+                        },
+                        "required": [
+                            "auth"
+                        ]
+                    }
+                },
+                "required": [
+                    "gateway"
+                ]
+            },
+            "then": {
+                "properties": {
+                    "credentials": {
+                        "properties": {
+                            "internal": {
+                                "properties": {
+                                    "gatewayClientToken": {
+                                        "minLength": 32,
+                                        "pattern": "^[^<>\\s]+$"
+                                    }
+                                },
+                                "required": [
+                                    "gatewayClientToken"
+                                ]
+                            }
+                        },
+                        "required": [
+                            "internal"
+                        ]
+                    }
+                },
+                "required": [
+                    "credentials"
+                ]
+            }
+        },
+        {
+            "if": {
+                "properties": {
+                    "supervisor": {
+                        "properties": {
+                            "auth": {
+                                "properties": {
+                                    "createSecret": {
+                                        "const": true
+                                    }
+                                },
+                                "required": [
+                                    "createSecret"
+                                ]
+                            }
+                        },
+                        "required": [
+                            "auth"
+                        ]
+                    }
+                },
+                "required": [
+                    "supervisor"
+                ]
+            },
+            "then": {
+                "properties": {
+                    "credentials": {
+                        "properties": {
+                            "internal": {
+                                "properties": {
+                                    "supervisorServiceToken": {
+                                        "minLength": 1,
+                                        "pattern": "^[^<>\\s]+$"
+                                    }
+                                },
+                                "required": [
+                                    "supervisorServiceToken"
+                                ]
+                            },
+                            "github": {
+                                "properties": {
+                                    "pullRequestPat": {
+                                        "minLength": 1,
+                                        "pattern": "^[^<>\\s]+$"
+                                    }
+                                },
+                                "required": [
+                                    "pullRequestPat"
+                                ]
+                            }
+                        },
+                        "required": [
+                            "internal",
+                            "github"
+                        ]
+                    }
+                },
+                "required": [
+                    "credentials"
+                ]
+            }
+        },
+        {
+            "if": {
+                "properties": {
+                    "worker": {
+                        "properties": {
+                            "auth": {
+                                "properties": {
+                                    "createSecret": {
+                                        "const": true
+                                    }
+                                },
+                                "required": [
+                                    "createSecret"
+                                ]
+                            }
+                        },
+                        "required": [
+                            "auth"
+                        ]
+                    }
+                },
+                "required": [
+                    "worker"
+                ]
+            },
+            "then": {
+                "properties": {
+                    "credentials": {
+                        "properties": {
+                            "models": {
+                                "properties": {
+                                    "coderApiKey": {
+                                        "minLength": 1
+                                    }
+                                },
+                                "required": [
+                                    "coderApiKey"
+                                ]
+                            }
+                        },
+                        "required": [
+                            "models"
+                        ]
+                    }
+                },
+                "required": [
+                    "credentials"
+                ]
+            }
+        }
+    ]
 }

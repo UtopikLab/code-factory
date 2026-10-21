@@ -29,13 +29,7 @@ from security import (
     is_external_workflow_payload as _security_is_external_workflow_payload,
 )
 from security import (
-    parse_allowed_repos as _security_parse_allowed_repos,
-)
-from security import (
     reject_credentials as _security_reject_credentials,
-)
-from security import (
-    repo_allowed as _security_repo_allowed,
 )
 from security import (
     validate_assigned_task_id as _security_validate_assigned_task_id,
@@ -62,19 +56,6 @@ stream.flushLevel = logging.DEBUG
 logger.addHandler(stream)
 logger.setLevel(logging.INFO)
 logger.propagate = False
-
-def _parse_allowed_repos(raw):
-    return _security_parse_allowed_repos(raw)
-
-# ALLOWED_REPOS controls which repositories may push tasks to the orchestrator.
-#   - "*"            -> deny all; wildcards are intentionally unsupported
-#   - "a/b,c/d"      -> whitelist of specific owner/name repositories
-#   - "a/b"          -> whitelist of a single repository
-# The legacy "ALLOWED_REPO" variable is accepted for backward compatibility.
-ALLOWED_REPOS_RAW = os.environ.get(
-    "ALLOWED_REPOS", os.environ.get("ALLOWED_REPO", "")
-)
-ALLOWED_REPOS = _parse_allowed_repos(ALLOWED_REPOS_RAW)
 
 POD_NAMESPACE = os.environ.get("POD_NAMESPACE", "orchestrator")
 WORKER_JOB_TEMPLATE = os.environ.get("WORKER_JOB_TEMPLATE", "orchestrator-worker")
@@ -142,10 +123,6 @@ def _delete_task_secret(task):
 
 def _identity(payload):
     return _security_identity(payload)
-
-
-def _repo_allowed(repo):
-    return _security_repo_allowed(repo, ALLOWED_REPOS)
 
 
 def _task_db():
@@ -371,7 +348,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(404, {"error": "not-found"})
         except PermissionError:
-            self._json(403, {"error": "repo-not-allowed"})
+            self._json(403, {"error": "repository-mismatch"})
         except CredentialError as error:
             self._json(403, {"error": str(error)})
         except KubernetesError:
@@ -408,5 +385,4 @@ def _create_server():
 if __name__ == "__main__":
     server = _create_server()
     logger.info("gateway starting in %s mode", os.environ["GATEWAY_TRANSPORT_MODE"])
-    logger.info("ALLOWED_REPOS=%r", ALLOWED_REPOS)
     server.serve_forever()

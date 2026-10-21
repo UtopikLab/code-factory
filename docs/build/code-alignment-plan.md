@@ -107,7 +107,7 @@ No tests or render checks are claimed as run for this review.
 
 - Confirm the selected cluster storage class permits both pods to mount the same `ReadWriteOnce` claim on one node and supports SQLite locking/durability semantics. This chart has not been installed or exercised against the cluster.
 - Provision external `orchestrator-supervisor-auth` (`supervisor-auth-token`, `pr-github-token`) and `orchestrator-coder-inference-auth` (`coder-api-key`) Secrets with least-privilege GitHub scopes; confirm the task repository token supplied by workflows is read-only.
-- Configure an explicit repository allowlist, allowed base branches, reviewers, and the existing P40 endpoints/model IDs. Empty/default PR policy intentionally prevents publication.
+- Configure per-repository credentials, allowed base branches, reviewers, and the existing P40 endpoints/model IDs. Empty/default PR policy intentionally prevents publication.
 - Validate actual worker Job lifecycle/status across supervisor restart, the selected GPU router compatibility with JSON response formats, reviewer policy availability, and GitHub branch/PR permissions in a non-production environment.
 
 No deployment or external infrastructure provisioning is claimed by this implementation.

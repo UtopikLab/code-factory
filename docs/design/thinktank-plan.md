@@ -122,9 +122,10 @@ Task API requests must carry the workflow's GitHub token:
 Authorization: token <github-token>
 ```
 
-The `<github-token>` authenticates the external workflow to the gateway. The
-gateway validates the repository against its allow-list before registering and
-handing off a task.
+The current implementation uses a dedicated gateway-auth token, separate from the
+source-repository token supplied in `X-Repository-Token`. Repository identity and
+access are validated before registering and handing off a task; no repository-name
+allowlist is required. See [credential separation](../operations/credential-separation.md).
 
 ##### Request payload — task registration
 
@@ -134,7 +135,7 @@ context needed by the supervisor:
 | Field | Meaning |
 | --- | --- |
 | `task_id` | Identifier for the task. |
-| `repo` | Repository path. Defaults to `ALLOWED_REPO` when omitted. |
+| `repo` | Required repository path, validated against the source-repository credential. |
 | `issue_number` | Issue / PR number. |
 | `issue_title` | Issue / PR title. |
 | `issue_url` | Issue / PR URL. |
@@ -153,9 +154,9 @@ The `task_id` value is derived in this order of precedence:
 | --- | --- | --- |
 | `202` | Task registered and handed to the supervisor for processing; completion is not implied. | `{status: "accepted", task_id, repo, endpoint: "/api/v1/tasks/spawn"}` |
 | `400` | Malformed JSON body. | `{"error": "invalid-json"}` |
-| `403` | Repository not in the allow-list (`repo != ALLOWED_REPO`). | `{"error": "repo-not-allowed"}` |
+| `403` | Repository credential validation or transport policy failed. | `{"error": "repository-credential-denied"}` (example) |
 
-When `repo` is omitted it defaults to `ALLOWED_REPO` (sourced from the environment).
+The repository must be supplied explicitly; it is not inferred from environment configuration.
 
 ##### Related endpoints
 

@@ -1,0 +1,5 @@
+# Nonsecret local deployment settings shared by both charts.
+# Copy to helm/local.values.yaml and replace the username placeholder.
+registry:
+  create: true
+  username: "<your-github-username>"

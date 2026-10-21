@@ -102,15 +102,13 @@ def load_pinned_catalog(task, k8s_request):
         raise RuntimeError("task-catalog-capability-boundary-invalid")
     runtime = json.loads(runtime_content)
     required = {"acceptor_url", "coder_url", "coder_model", "coder_native_download", "judge_url", "judge_model",
-                "threshold", "max_total_attempts", "allowed_base_branches", "reviewers", "allowed_repos",
+                "threshold", "max_total_attempts", "allowed_base_branches", "reviewers",
                 "repo_policies", "worker_parallelism"}
     if (not isinstance(runtime, dict) or not required <= runtime.keys()
             or runtime.get("max_total_attempts") != MAX_TOTAL_ATTEMPTS
             or type(runtime.get("threshold")) not in (float, int)
             or not 0 <= runtime["threshold"] <= 1
-            or runtime.get("worker_parallelism") != 1
-            or not isinstance(runtime.get("allowed_repos"), str)
-            or runtime["allowed_repos"].strip() in ("", "*")):
+            or runtime.get("worker_parallelism") != 1):
         raise RuntimeError("task-runtime-config-invalid")
     for endpoint in (runtime["acceptor_url"], runtime["coder_url"], runtime["judge_url"]):
         parsed = urllib.parse.urlsplit(endpoint)
@@ -152,7 +150,7 @@ def dispatch_task(task, runtime, k8s_request):
         "TASK_CREDENTIAL_EXPIRES_AT", "CODEFACTORY_AUTH_TOKEN", "REPO_GITHUB_PAT",
         "AGENT_CONFIG_VERSION", "AGENT_CONFIG_HASH", "JUDGE_URL", "JUDGE_MODEL",
         "JUDGE_NATIVE_DOWNLOAD", "JUDGE_ACCEPT_THRESHOLD", "OPENAI_API_KEY", "CODER_URL",
-        "CODER_MODEL", "CODER_NATIVE_DOWNLOAD", "ACCEPTOR_URL", "ALLOWED_REPOS",
+        "CODER_MODEL", "CODER_NATIVE_DOWNLOAD", "ACCEPTOR_URL", "ALLOWED_REPOS", "ALLOWED_REPO",
         "TASK_REPO_POLICIES", "WORKER_ROLE"}]
     env.extend([
         {"name": "ASSIGNED_TASK_ID", "value": task["task_id"]},
@@ -171,7 +169,6 @@ def dispatch_task(task, runtime, k8s_request):
         {"name": "CODER_MODEL", "value": runtime["coder_model"]},
         {"name": "CODER_NATIVE_DOWNLOAD", "value": str(runtime.get("coder_native_download", False)).lower()},
         {"name": "ACCEPTOR_URL", "value": runtime["acceptor_url"]},
-        {"name": "ALLOWED_REPOS", "value": runtime["allowed_repos"]},
         {"name": "TASK_REPO_POLICIES", "value": json.dumps(runtime["repo_policies"], sort_keys=True)},
     ])
     container["env"] = env

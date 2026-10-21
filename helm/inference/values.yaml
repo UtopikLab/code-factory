@@ -10,7 +10,11 @@ namespace: "inference"
 registry:
   create: false
   username: ""
-  token: ""
+
+# Shared provider-issued GHCR read:packages PAT, also used by the orchestrator chart.
+credentials:
+  github:
+    ghcrReadPackagesPat: ""
 
 # Default image registry for containerd (K3s host). See inference/common.sh.
 global:
@@ -53,7 +57,7 @@ inference:
   imagePullPolicy: Always
   # Shared pull secret applied to all containers.
   imagePullSecrets:
-  - name: ghcr-secret
+  - name: ghcr-read-packages-pull-secret
   # Per-GPU server argument ConfigMaps. One entry per GPU, numeric index used by
   # the template so they render without needing `helm install ... -f
   # inference-configmaps.yaml`.

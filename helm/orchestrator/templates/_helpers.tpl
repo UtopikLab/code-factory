@@ -22,7 +22,6 @@
 	"max_total_attempts" (index .Values.supervisor.config "max-total-attempts")
 	"allowed_base_branches" (index .Values.supervisor.config "allowed-base-branches")
 	"reviewers" (index .Values.supervisor.config "reviewers")
-	"allowed_repos" (default (index .Values.supervisor.config "repo") .Values.gateway.config.repo)
 	"repo_policies" .Values.worker.repoPolicies
 	"worker_parallelism" (index .Values.supervisor.config "worker-parallelism")
 -}}

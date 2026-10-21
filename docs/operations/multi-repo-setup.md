@@ -31,19 +31,15 @@ explains workflow-token expiry, PR limitations and required rotation of the expo
 
 ## Repository Selection
 
-Set `gateway.config.repo` (or the fallback `supervisor.config.repo`) through the
-operator-owned Helm configuration:
-
-| Value | Meaning |
-|---|---|
-| `*` | Any repository identity, still requiring its own credential/access validation |
-| `org/repo` | One allowed repository |
-| `org/repo,other/project` | An additional comma-separated allowlist |
+No repository-name allowlist or Helm repository registration is required. Intake
+requires gateway authentication and validates the supplied source-repository
+credential against the requested repository and issue. Workers retain task-bound
+repository identity and credential checks.
 
 Automatic Python source/test discovery remains the default with
 `worker.repoPolicies: {}`. Optional policy overrides narrow context, editable paths
 and fixed validation commands. The sandbox and publication gates are unchanged.
-An allowlist neither grants GitHub permissions nor creates a sandbox.
+Repository credentials do not replace sandbox isolation or publication policy.
 
 ## Task Ownership And Recovery
 

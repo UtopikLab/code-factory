@@ -23,9 +23,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 # The chart dirs (inference/, orchestrator/) live directly under helm/, so the
 # helm dir defaults to the script's own directory (the helm/ directory).
 HELM_DIR="${HELM_DIR:-$SCRIPT_DIR}"
-# Optional private YAML values file, passed to both charts via `--values`.
-# The file is git-ignored and local-only, so it is optional: if
-# it is absent the deploy proceeds exactly as before (no `--values`).
+# Optional nonsecret YAML values file, passed to both charts via `--values`.
+LOCAL_VALUES_FILE="${LOCAL_VALUES_FILE:-${HELM_DIR}/local.values.yaml}"
+# Private credentials are applied last and contain no deployment behavior.
 SECRETS_FILE="${SECRETS_FILE:-${SCRIPT_DIR}/local.secrets-values.yaml}"
 ORCHESTRATOR_VALUES_FILE="${ORCHESTRATOR_VALUES_FILE:-${HELM_DIR}/orchestrator/local.values.yaml}"
 NAMESPACE_IN="inference"
@@ -55,6 +55,9 @@ reset_ns() {
   # re-run. `--wait=false` lets a not-yet-ready device-plugin (deferred GPU) not
   # block the release; GPUs come online later via NFD.
   local -a values_args=()
+  if [[ -f "${LOCAL_VALUES_FILE}" ]]; then
+    values_args+=(--values "${LOCAL_VALUES_FILE}")
+  fi
   if [[ "$3" == "orchestrator" && -f "${ORCHESTRATOR_VALUES_FILE}" ]]; then
     values_args+=(--values "${ORCHESTRATOR_VALUES_FILE}")
   fi
