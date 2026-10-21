@@ -47,8 +47,9 @@ logging.basicConfig(
 logger = logging.getLogger("worker")
 
 DEFAULT_ACCEPTOR_URL = "https://orchestrator.local"
-DEFAULT_JUDGE_MODEL = "qwen2.5-coder-7b-instruct-q4-km@32k"
+DEFAULT_JUDGE_MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M"
 HTTP_TIMEOUT = 30.0
+NATIVE_MODEL_TIMEOUT = 1800.0
 POLL_TIMEOUT = 1800.0
 
 # --------------------------------------------------------------------------- #
@@ -314,6 +315,37 @@ async def _snapshot(github, editor, sha):
         full.write_bytes(data)
 
 
+async def _prepare_native_model(base_url, model, enabled):
+    if not enabled:
+        return
+    endpoint = base_url.rstrip("/").removesuffix("/v1") + "/models"
+    headers = {"Authorization": "Bearer " + os.environ["OPENAI_API_KEY"]}
+    async with asyncio.timeout(NATIVE_MODEL_TIMEOUT):
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, headers=headers) as client:
+            requested = False
+            while True:
+                response = await client.get(endpoint)
+                response.raise_for_status()
+                entry = next((entry for entry in response.json()["data"]
+                              if entry["id"] == model or model in entry.get("aliases", [])), None)
+                if entry:
+                    status = entry.get("status", {})
+                    if status.get("failed"):
+                        raise TaskFailure("native-model-download-or-load-failed")
+                    if status.get("value") in ("unloaded", "loaded", "sleeping"):
+                        return
+                if not requested and (entry is None or entry.get("status", {}).get("value") == "incomplete"):
+                    response = await client.post(endpoint, json={"model": model})
+                    if response.status_code == 400:
+                        detail = response.json().get("error", {}).get("message", "")
+                        if "is already downloading" not in detail and "is running, unload it first" not in detail:
+                            response.raise_for_status()
+                    else:
+                        response.raise_for_status()
+                    requested = True
+                await asyncio.sleep(1)
+
+
 async def _generate_edits(issue, context, policy):
     if not os.environ.get("OPENAI_API_KEY") or not os.environ.get("CODER_URL") or not os.environ.get("CODER_MODEL"):
         raise TaskFailure("coder-configuration-required")
@@ -321,8 +353,11 @@ async def _generate_edits(issue, context, policy):
                          "files": context, "editable_files": policy["editable_files"]})
     _reject_secret_content(prompt)
     try:
+        await _prepare_native_model(os.environ["CODER_URL"], os.environ["CODER_MODEL"],
+                                    os.environ.get("CODER_NATIVE_DOWNLOAD", "false").lower() == "true")
         async with openai.AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"], base_url=os.environ["CODER_URL"],
-                                    timeout=HTTP_TIMEOUT, max_retries=0) as coder:
+                                    timeout=NATIVE_MODEL_TIMEOUT if os.environ.get("CODER_NATIVE_DOWNLOAD", "false").lower() == "true" else HTTP_TIMEOUT,
+                                    max_retries=0) as coder:
             response = await coder.chat.completions.create(
                 model=os.environ["CODER_MODEL"], temperature=0.1, max_tokens=6000,
                 response_format={"type": "json_object"}, messages=[
@@ -524,10 +559,13 @@ async def judge_review(client, patch: str, output: str) -> tuple[float, str]:
         return (0.7, "No OpenAI API key available; self-review omitted. Changes applied deterministically.")
 
     try:
+        await _prepare_native_model(os.environ.get("JUDGE_URL", ""),
+                                    os.environ.get("JUDGE_MODEL", DEFAULT_JUDGE_MODEL),
+                                    os.environ.get("JUDGE_NATIVE_DOWNLOAD", "false").lower() == "true")
         async with openai.AsyncOpenAI(
             api_key=os.environ["OPENAI_API_KEY"],
             base_url=os.environ.get("JUDGE_URL") or None,
-            timeout=HTTP_TIMEOUT,
+            timeout=NATIVE_MODEL_TIMEOUT if os.environ.get("JUDGE_NATIVE_DOWNLOAD", "false").lower() == "true" else HTTP_TIMEOUT,
             max_retries=0,
         ) as judge_client:
             response = await judge_client.chat.completions.create(

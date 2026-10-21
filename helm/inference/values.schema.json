@@ -3,6 +3,47 @@
     "title": "k8s-inference values",
     "type": "object",
     "properties": {
+        "inference": {
+            "type": "object",
+            "properties": {
+                "modelSource": {
+                    "description": "Removed: requesters select HF models through the native router API, not deployment values.",
+                    "not": {}
+                },
+                "gpuCount": {
+                    "type": "integer",
+                    "const": 1
+                },
+                "configMaps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "model"
+                        ],
+                        "properties": {
+                            "model": {
+                                "type": "object",
+                                "required": [
+                                    "model-dir"
+                                ],
+                                "properties": {
+                                    "model-dir": {
+                                        "type": "string",
+                                        "pattern": "^/[^.]*[^/]$"
+                                    },
+                                    "model-name": {
+                                        "type": "string",
+                                        "pattern": "^[A-Za-z0-9_.-]+$"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "registry": {
             "type": "object",
             "additionalProperties": false,

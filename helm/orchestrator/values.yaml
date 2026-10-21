@@ -36,7 +36,7 @@ supervisor:
     # OpenAI API key consumed by the supervisor loop + gateway. Sourced from the
     # local.secrets-values.yaml file (passed via `--values`), so it is empty here by
     # default and overridden at deploy time.
-    openai-api-key: "<your-openai-key>"
+    openai-api-key: ""
 
 # Coder-worker (orchestrator-worker Job) image. Kept separate from the
 # supervisor image so the worker Job runs code-factory-worker — never
@@ -60,8 +60,11 @@ worker:
   - coder
   - refactor
   - test
-  worker-model: "qwen2.5-coder-7b-instruct-q4-km@32k"
+  worker-model: "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M"
   coderUrl: ""
+  # Null enables native preparation only for the corresponding default router URL.
+  coderNativeDownload: null
+  judgeNativeDownload: null
   judgeAcceptThreshold: 0.8
   repoPolicies: {}
 

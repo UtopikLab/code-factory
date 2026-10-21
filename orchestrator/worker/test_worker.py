@@ -31,6 +31,64 @@ from worker import (
 def gateway_auth(monkeypatch):
     monkeypatch.setenv("CODEFACTORY_AUTH_TOKEN", "gateway-test-secret")
     monkeypatch.setenv("TASK_CALLBACK_TOKEN", "callback-test-secret")
+    monkeypatch.delenv("CODER_NATIVE_DOWNLOAD", raising=False)
+    monkeypatch.delenv("JUDGE_NATIVE_DOWNLOAD", raising=False)
+
+
+@pytest.mark.parametrize("initial", [None, "incomplete", "downloading", "unloaded", "loaded"])
+def test_native_model_preparation(monkeypatch, initial):
+    model = "owner/new-model-GGUF:Q4_K_M"
+    calls = []
+    statuses = iter([initial, "downloaded", "unloaded"])
+    monkeypatch.setenv("OPENAI_API_KEY", "model-test-secret")
+    monkeypatch.setattr(worker.asyncio, "sleep", AsyncMock())
+    def transport(request):
+        calls.append(request)
+        assert request.url == "http://model/models"
+        assert request.headers["Authorization"] == "Bearer model-test-secret"
+        if request.method == "POST":
+            assert json.loads(request.content) == {"model": model}
+            return httpx.Response(200, json={"success": True})
+        status = next(statuses)
+        return httpx.Response(200, json={"data": [] if status is None else [
+            {"id": model, "status": {"value": status}},
+        ]})
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(worker.httpx, "AsyncClient", lambda **kwargs: client_class(
+        transport=httpx.MockTransport(transport), **kwargs))
+    asyncio.run(worker._prepare_native_model("http://model/v1/", model, True))
+    assert sum(request.method == "POST" for request in calls) == (initial in (None, "incomplete"))
+
+
+def test_native_model_preparation_disabled(monkeypatch):
+    monkeypatch.setattr(worker.httpx, "AsyncClient", Mock(side_effect=AssertionError("No native API expected")))
+    asyncio.run(worker._prepare_native_model("https://external/v1", "custom-model", False))
+
+
+@pytest.mark.parametrize("failure", ["download", "status", "concurrent", "timeout"])
+def test_native_model_preparation_failures(monkeypatch, failure):
+    monkeypatch.setenv("OPENAI_API_KEY", "model-test-secret")
+    monkeypatch.setattr(worker.asyncio, "sleep", AsyncMock(side_effect=TimeoutError if failure == "timeout" else None))
+    responses = iter([
+        httpx.Response(200, json={"data": []}),
+        httpx.Response(400, json={"error": {"message": "is already downloading" if failure == "concurrent" else "bad HF repo"}}),
+        httpx.Response(200, json={"data": [{"id": "owner/repo:Q4_K_M", "status": {"value": "unloaded"}}]}),
+    ] if failure in ("download", "concurrent") else [
+        httpx.Response(200, json={"data": [{"id": "owner/repo:Q4_K_M", "status": {
+            "value": "downloading", "failed": failure == "status",
+        }}]}),
+    ])
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(worker.httpx, "AsyncClient", lambda **kwargs: client_class(
+        transport=httpx.MockTransport(lambda request: next(responses)), **kwargs))
+    async def prepare():
+        await worker._prepare_native_model("http://model/v1", "owner/repo:Q4_K_M", True)
+    if failure == "concurrent":
+        asyncio.run(prepare())
+    else:
+        with pytest.raises({"download": httpx.HTTPStatusError, "status": worker.TaskFailure,
+                            "timeout": TimeoutError}[failure]):
+            asyncio.run(prepare())
 
 
 @pytest.mark.parametrize("status", ["success", "failed", "completed"])
@@ -560,7 +618,7 @@ def issue_pipeline(monkeypatch, tmp_path):
     monkeypatch.setenv("TASK_REPO_POLICIES", json.dumps({"org/repo": policy}))
     monkeypatch.setattr(server, "TOKEN", "gateway-test-secret")
     monkeypatch.setattr(server, "ALLOWED_REPOS", {"org/repo", "org/other"})
-    state = SimpleNamespace(jobs=[], api_calls=[], model_calls=[], labels={"queued"}, comments=[],
+    state = SimpleNamespace(jobs=[], api_calls=[], model_calls=[], native_calls=[], native_downloads={}, labels={"queued"}, comments=[],
                             branches={}, pulls=[], edits=[{"path": "src/greeting.py", "content": "greeting = 'hello'\n"}],
                             score=0.95, model_error=False, fail_lifecycle=False, invalid_identity=False,
                             tree_mode="100644", base_sha="base", policy=policy, malformed_api=False, empty_choices=False,
@@ -673,8 +731,20 @@ def issue_pipeline(monkeypatch, tmp_path):
                        json.loads(request.content) if request.content else None)
             return httpx.Response(404 if data is None else 200, json=data)
         assert request.url.host == "model"
+        if request.url.path == "/models":
+            state.native_calls.append((request.method, request.url.path))
+            if request.method == "POST":
+                model = json.loads(request.content)["model"]
+                assert ":" in model and "/" in model
+                state.native_downloads[model] = True
+                return httpx.Response(200, json={"success": True})
+            return httpx.Response(200, json={"data": [
+                {"id": model, "status": {"value": "unloaded"}} for model in state.native_downloads
+            ]})
         body = json.loads(request.content)
         state.model_calls.append(body)
+        if state.native_calls:
+            assert body["model"] in state.native_downloads
         assert "github-test-secret" not in request.content.decode() and "model-test-secret" not in request.content.decode()
         if state.model_error:
             if isinstance(state.model_error, httpx.Response):
@@ -683,12 +753,12 @@ def issue_pipeline(monkeypatch, tmp_path):
         if state.empty_choices:
             return httpx.Response(200, json={"id": "response", "object": "chat.completion", "created": 1,
                                            "model": body["model"], "choices": []})
-        if body["model"] == "configured-coder":
+        if body["model"] == worker.os.environ["CODER_MODEL"]:
             prompt = json.loads(body["messages"][1]["content"])
             assert prompt["files"] == state.context
             content = json.dumps({"edits": state.edits})
         else:
-            assert body["model"] == "configured-judge"
+            assert body["model"] == worker.os.environ["JUDGE_MODEL"]
             assert "Return hello instead of hi" in body["messages"][1]["content"]
             content = json.dumps({"score": state.score, "review": "Scoped change accepted"})
         return httpx.Response(200, json={"id": "response", "object": "chat.completion", "created": 1,
@@ -768,6 +838,22 @@ def test_issue_to_pr_terminal_end_to_end(issue_pipeline, tmp_path):
     assert repeated == final
     assert len(state.branches) == len(state.pulls) == 1
     assert len([call for call in state.api_calls if call[:2] == ("POST", "/repos/org/repo/pulls")]) == 1
+
+
+def test_issue_to_pr_downloads_requester_selected_models_before_chat(issue_pipeline, monkeypatch):
+    state = issue_pipeline
+    coder = "owner/new-coder-GGUF:Q4_K_M"
+    judge = "owner/new-judge-GGUF:Q8_0"
+    monkeypatch.setenv("CODER_MODEL", coder)
+    monkeypatch.setenv("JUDGE_MODEL", judge)
+    monkeypatch.setenv("CODER_NATIVE_DOWNLOAD", "true")
+    monkeypatch.setenv("JUDGE_NATIVE_DOWNLOAD", "true")
+    monkeypatch.setattr(worker.asyncio, "sleep", AsyncMock())
+    final = asyncio.run(worker.main_async(acceptor_url="https://acceptor"))
+    assert final["status"] == "completed", final
+    assert [body["model"] for body in state.model_calls] == [coder, judge]
+    assert set(state.native_downloads) == {coder, judge}
+    assert state.native_calls == [("GET", "/models"), ("POST", "/models"), ("GET", "/models")] * 2
 
 
 @pytest.mark.parametrize("response, expected", [

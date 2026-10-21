@@ -20,3 +20,20 @@ spec:
       protocol: TCP
       port: 8000
       targetPort: 8000
+{{- range $idx, $cfg := .Values.inference.configMaps }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $cfg.name }}
+  namespace: {{ $.Values.namespace }}
+spec:
+  selector:
+    app: inference-server
+    gpu: {{ $idx | quote }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8000
+      targetPort: 8000
+{{- end }}

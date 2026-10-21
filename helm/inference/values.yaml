@@ -47,8 +47,9 @@ nvidia-device-plugin:
     seccompProfile: null
 
 inference:
-  # Inference server image (VERIFIED real, llama.cpp server-intel tag).
-  image: "ghcr.io/ggml-org/llama.cpp:server-cuda"
+  # Model-free native router; requesters select and download HF models via /models.
+  # Official CUDA image b11783, registry manifest verified 2026-10-21.
+  image: "ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:1bacc872b168d2d10bfd8c220336f5a2cd464c07605936ec146ee5198832ffce"
   imagePullPolicy: Always
   # Shared pull secret applied to all containers.
   imagePullSecrets:
@@ -61,11 +62,8 @@ inference:
     model:
       model-dir: /models
       model-format: gguf
-      model-name: qwen2.5-coder-7b-instruct-q4-km
       ctx-size: "32768"
       tensor-type: q4_km
-      rope-freq-base: "500000.0"
-      rope-freq-scale: "1.0"
       port: "8000"
       host: "0.0.0.0"
       keep-ctx: "0"
@@ -74,11 +72,8 @@ inference:
     model:
       model-dir: /models
       model-format: gguf
-      model-name: qwen2.5-coder-7b-instruct-q4-km
       ctx-size: "32768"
       tensor-type: q4_km
-      rope-freq-base: "500000.0"
-      rope-freq-scale: "1.0"
       port: "8000"
       host: "0.0.0.0"
       keep-ctx: "0"
@@ -87,10 +82,8 @@ inference:
   gpuDeviceIds:
     gpu0: "0"
     gpu1: "1"
-  # One replica per GPU: cap the pod count to available GPU capacity so the
-  # Deployment can never over-subscribe GPUs (prevents the pending/insufficient
-  # GPU scheduling race). Set via inference.gpuCount.
-  gpuCount: 2
+  # Replicas per deployment; fixed at one to isolate each GPU and native cache.
+  gpuCount: 1
   # Resources: full P40 (23 GiB) requested to prevent oversubscription.
   resources:
     # CPU resource budget for the llama.cpp server pods.
@@ -110,9 +103,7 @@ inference:
     entrypoints: websecure
     middlewares: default@kubernetes/tcp-security
     method: ANY
-  # Model weights storage: a static hostPath PersistentVolume bound to the NVMe
-  # device (/mnt/k8s-local-nvme). The deployment templates mount the shared model
-  # weights there via a hostPath volume; Kubernetes auto-provisions the backing PV.
+  # Native cache storage uses the existing NVMe hostPath, not a provisioned PVC.
   pvc:
     name: inference-models
     mountPath: /mnt/k8s-local-nvme

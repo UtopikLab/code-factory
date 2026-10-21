@@ -1,3 +1,4 @@
+import ast
 import base64
 import json
 import os
@@ -16,6 +17,72 @@ TOKEN = 'registry-test-sentinel-"\\-only'
 
 
 class RegistryValuesTests(unittest.TestCase):
+    def test_inference_native_router_and_cache(self):
+        values = yaml.safe_load((HELM_DIR / "inference/values.yaml").read_text())["inference"]
+        documents = self.documents("inference", {})
+        deployments = [document for document in documents if document["kind"] == "Deployment"]
+        self.assertEqual(len(deployments), 2)
+        caches = set()
+        for deployment, config in zip(deployments, values["configMaps"]):
+            pod = deployment["spec"]["template"]["spec"]
+            server = pod["containers"][0]
+            self.assertNotIn("initContainers", pod)
+            self.assertEqual(deployment["spec"]["replicas"], 1)
+            self.assertEqual(server["args"][:2], ["--models-max", "1"])
+            for flag in ("--models-dir", "--model", "--hf-repo", "--hf-file", "--alias",
+                         "--models-preset", "--no-models-autoload", "--rope-freq-base", "--rope-freq-scale"):
+                self.assertNotIn(flag, server["args"])
+            service = next(document for document in documents if document["kind"] == "Service"
+                           and document["metadata"]["name"] == config["name"])
+            self.assertEqual(service["spec"]["selector"], deployment["spec"]["selector"]["matchLabels"])
+            environment = {entry["name"]: entry["value"] for entry in server["env"]}
+            mount = server["volumeMounts"][1]
+            self.assertEqual(mount["mountPath"], config["model"]["model-dir"])
+            self.assertFalse(mount.get("readOnly", False))
+            self.assertEqual(environment["LLAMA_CACHE"], f'{mount["mountPath"]}/llama.cpp/{config["name"]}')
+            caches.add(environment["LLAMA_CACHE"])
+            volume = next(volume for volume in pod["volumes"] if volume["name"] == mount["name"])
+            self.assertEqual(volume["hostPath"]["path"], "/mnt/k8s-local-nvme/inference-models")
+            self.assertEqual(volume["hostPath"]["type"], "DirectoryOrCreate")
+            self.assertEqual(server["args"][server["args"].index("--ctx-size") + 1], "32768")
+            for probe in ("startupProbe", "readinessProbe", "livenessProbe"):
+                self.assertEqual(server[probe]["httpGet"]["path"], "/health")
+        self.assertEqual(len(caches), 2)
+
+    def test_inference_download_overrides_and_two_server_rollout(self):
+        documents = self.documents("inference", {"inference": {
+            "gpuCount": 1,
+            "pvc": {"name": "custom-models"},
+            "configMaps": [{"name": "custom-server", "model": {
+                "model-dir": "/weights", "ctx-size": "8192",
+            }}],
+        }})
+        deployment = next(document for document in documents if document["kind"] == "Deployment")
+        self.assertEqual(deployment["spec"]["replicas"], 1)
+        pod = deployment["spec"]["template"]["spec"]
+        server = pod["containers"][0]
+        self.assertNotIn("--alias", server["args"])
+        self.assertEqual(server["args"][server["args"].index("--ctx-size") + 1], "8192")
+        self.assertEqual(server["env"], [{"name": "LLAMA_CACHE", "value": "/weights/llama.cpp/custom-server"}])
+        self.assertEqual(server["volumeMounts"][1]["mountPath"], "/weights")
+        self.assertEqual(pod["volumes"][1]["hostPath"]["path"], "/mnt/k8s-local-nvme/custom-models")
+        defaults = self.documents("inference", {"inference": {"gpuCount": 1}})
+        deployments = [document for document in defaults if document["kind"] == "Deployment"]
+        self.assertEqual(sum(deployment["spec"]["replicas"] for deployment in deployments), 2)
+
+    def test_fixed_model_sources_fail_schema(self):
+        for source in ({}, {"repo": "owner/model"}, {"filename": "model.gguf"},
+                       {"localPath": "/models/checkpoints/model.gguf"}):
+            with self.subTest(source=source):
+                result = self.render("inference", {"inference": {"modelSource": source}})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("modelSource", result.stderr)
+
+    def test_inference_duplicate_cache_writers_fail_schema(self):
+        result = self.render("inference", {"inference": {"gpuCount": 2}})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("gpuCount", result.stderr)
+
     def render(self, chart, values):
         result = subprocess.run(
             ["helm", "template", "local", str(HELM_DIR / chart), "--values", "-"],
@@ -29,9 +96,10 @@ class RegistryValuesTests(unittest.TestCase):
         return [document for document in yaml.safe_load_all(result.stdout) if document]
 
     def test_model_endpoint_defaults_and_overrides(self):
-        default = "http://inference-server.inference.svc.cluster.local:8000/v1"
+        default = "http://llama-server-args-gpu1.inference.svc.cluster.local:8000/v1"
+        coder_default = "http://llama-server-args-gpu0.inference.svc.cluster.local:8000/v1"
         cases = [
-            ({}, default, default),
+            ({}, default, coder_default),
             ({"supervisor": {"config": {"judge-url": "https://judge.example.com/v1"}}},
              "https://judge.example.com/v1", "https://judge.example.com/v1"),
             ({"worker": {"coderUrl": "https://coder.example.com/v1"}},
@@ -45,7 +113,48 @@ class RegistryValuesTests(unittest.TestCase):
                 env = {entry["name"]: entry for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]}
                 self.assertEqual(config["data"]["judge-url"], judge)
                 self.assertEqual(env["CODER_URL"]["value"], coder)
+                self.assertEqual(env["CODER_NATIVE_DOWNLOAD"]["value"], str(coder == coder_default).lower())
+                self.assertEqual(env["JUDGE_NATIVE_DOWNLOAD"]["value"], str(judge == default).lower())
                 self.assertEqual(env["JUDGE_URL"]["valueFrom"]["configMapKeyRef"]["key"], "judge-url")
+
+    def test_native_download_switches_can_be_overridden(self):
+        documents = self.documents("orchestrator", {"worker": {
+            "coderUrl": "https://custom-router/v1", "coderNativeDownload": True,
+            "judgeNativeDownload": False,
+        }})
+        job = next(document for document in documents if document["kind"] == "Job")
+        env = {entry["name"]: entry for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual(env["CODER_NATIVE_DOWNLOAD"]["value"], "true")
+        self.assertEqual(env["JUDGE_NATIVE_DOWNLOAD"]["value"], "false")
+
+    def test_requester_model_defaults_use_native_hf_identifier(self):
+        model = "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M"
+        documents = self.documents("orchestrator", {})
+        config = next(document for document in documents if document["kind"] == "ConfigMap")
+        job = next(document for document in documents if document["kind"] == "Job")
+        env = {entry["name"]: entry for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual(env["CODER_MODEL"]["value"], model)
+        self.assertEqual(env["CODER_NATIVE_DOWNLOAD"]["value"], "true")
+        self.assertEqual(env["JUDGE_NATIVE_DOWNLOAD"]["value"], "true")
+        self.assertEqual(config["data"]["judge-model"], model)
+        worker_dir = HELM_DIR.parent / "orchestrator" / "worker"
+        module = ast.parse((worker_dir / "worker.py").read_text())
+        defaults = [node.value.value for node in module.body if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "DEFAULT_JUDGE_MODEL"
+                            for target in node.targets)]
+        self.assertEqual(defaults, [model])
+        self.assertIn(f'ENV JUDGE_MODEL="{model}"', (worker_dir / "Dockerfile").read_text())
+
+    def test_model_overrides_are_preserved(self):
+        documents = self.documents("orchestrator", {
+            "supervisor": {"config": {"judge-model": "custom-judge"}},
+            "worker": {"worker-model": "custom-coder"},
+        })
+        config = next(document for document in documents if document["kind"] == "ConfigMap")
+        job = next(document for document in documents if document["kind"] == "Job")
+        env = {entry["name"]: entry for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual(env["CODER_MODEL"]["value"], "custom-coder")
+        self.assertEqual(config["data"]["judge-model"], "custom-judge")
 
     def test_registry_auth_and_pod_references(self):
         for chart in ("orchestrator", "inference"):

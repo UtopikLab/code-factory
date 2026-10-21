@@ -5,7 +5,7 @@ Faithful to inference/deployment.yaml (Deployments inference-server-gpu{0,1}).
 # ---------------------------------------------------------------------------
 # Inference server Deployments: two GPU-bound llama.cpp pods, one per P40.
 # Each pod runs the OpenAI-compatible server with the per-GPU args ConfigMap
-# mounted at /etc/llama-server-args and the model weights from the shared PVC.
+# mounted at /etc/llama-server-args and native download cache on shared hostPath.
 # ---------------------------------------------------------------------------
 {{- $ns := .Values.namespace -}}
 {{- $inf := .Values.inference -}}
@@ -26,7 +26,7 @@ spec:
   # One replica per GPU: cap the pod count to available GPU capacity so the
   # Deployment can never over-subscribe GPUs (prevents the pending/insufficient
   # GPU scheduling race). Set via inference.gpuCount.
-  replicas: {{ $inf.gpuCount | default 2 }}
+  replicas: {{ $inf.gpuCount | default 1 }}
   strategy:
     type: Recreate
   selector:
@@ -55,31 +55,30 @@ spec:
                 topologyKey: kubernetes.io/hostname
       containers:
         - name: llama-server
-          image: {{ $inf.image | default "ghcr.io/ggml-org/llama.cpp:server-cuda" }}
+          image: {{ $inf.image }}
           imagePullPolicy: {{ $inf.imagePullPolicy | default "Always" }}
           args:
-            - --models-dir
-            - {{ (index $cfg.model "model-dir") | quote }}
+            - --models-max
+            - "1"
             - --ctx-size
             - {{ (index $cfg.model "ctx-size") | default "32768" | quote }}
             {{- if (index $cfg.model "flash-attn") }}
             - --flash-attn
             - "on"
             {{- end }}
-            - --rope-freq-base
-            - {{ (index $cfg.model "rope-freq-base") | default "500000.0" | quote }}
-            - --rope-freq-scale
-            - {{ (index $cfg.model "rope-freq-scale") | default "1.0" | quote }}
             - --host
             - {{ (index $cfg.model "host") | default "0.0.0.0" | quote }}
             - --port
             - {{ (index $cfg.model "port") | default "8000" | quote }}
+          env:
+            - name: LLAMA_CACHE
+              value: {{ printf "%s/llama.cpp/%s" (index $cfg.model "model-dir") $cfg.name | quote }}
           volumeMounts:
             - name: {{ $cfg.name }}-args
               mountPath: /etc/llama-server-args
               readOnly: true
             - name: {{ $cfg.name }}-models
-              mountPath: /models
+              mountPath: {{ (index $cfg.model "model-dir") | quote }}
           ports:
             - name: http
               containerPort: 8000
@@ -102,15 +101,21 @@ spec:
               cpu: {{ $inf.resources.cpuLimit | default "2" }}
               memory: {{ $inf.resources.memory }}
             {{- end }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 180
           readinessProbe:
             httpGet:
-              path: /v1/models
+              path: /health
               port: 8000
             initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /v1/models
+              path: /health
               port: 8000
             initialDelaySeconds: 20
             periodSeconds: 30

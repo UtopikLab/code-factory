@@ -26,7 +26,7 @@ RUN groupadd --gid 1001 orchestrator && \
 WORKDIR /app
 
 ENV ACCEPTOR_URL="http://orchestrator.local:8000"
-ENV JUDGE_MODEL="qwen2.5-coder-7b-instruct-q4-km@32k"
+ENV JUDGE_MODEL="Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M"
 ENV TASK_WORK_DIR="/data/task-work"
 ENV WORKER_ID="worker"
 

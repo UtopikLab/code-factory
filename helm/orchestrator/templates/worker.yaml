@@ -2,13 +2,23 @@
 Worker: ConfigMap orchestrator-config + Job coder-worker.
 Faithful to orchestrator/worker.yaml (ConfigMap + Job coder-worker).
 */}}
+{{- $judgeUrl := default "http://llama-server-args-gpu1.inference.svc.cluster.local:8000/v1" (index .Values.supervisor.config "judge-url") -}}
+{{- $coderUrl := default (default "http://llama-server-args-gpu0.inference.svc.cluster.local:8000/v1" (index .Values.supervisor.config "judge-url")) .Values.worker.coderUrl -}}
+{{- $coderNative := eq $coderUrl "http://llama-server-args-gpu0.inference.svc.cluster.local:8000/v1" -}}
+{{- $judgeNative := eq $judgeUrl "http://llama-server-args-gpu1.inference.svc.cluster.local:8000/v1" -}}
+{{- if kindIs "bool" .Values.worker.coderNativeDownload -}}
+{{- $coderNative = .Values.worker.coderNativeDownload -}}
+{{- end -}}
+{{- if kindIs "bool" .Values.worker.judgeNativeDownload -}}
+{{- $judgeNative = .Values.worker.judgeNativeDownload -}}
+{{- end -}}
 {{- $m := dict
   "max-iterations" (int (default (index .Values.supervisor.config "max-iterations") 8))
   "task-wait-seconds" (int (default (index .Values.supervisor.config "task-wait-seconds") 30))
   "loop-state-dir" (default (index .Values.supervisor.config "loop-state-dir") "/data/loop-state")
   "acceptor-url" (required "supervisor.config.acceptor-url must be a trusted HTTPS gateway origin" (index .Values.supervisor.config "acceptor-url"))
-  "judge-url" (default "http://inference-server.inference.svc.cluster.local:8000/v1" (index .Values.supervisor.config "judge-url"))
-  "judge-model" (default (index .Values.supervisor.config "judge-model") "qwen2.5-coder-7b-instruct-q4-km@32k")
+  "judge-url" $judgeUrl
+  "judge-model" (default "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M" (index .Values.supervisor.config "judge-model"))
   "worker-roles" (index .Values.worker "worker-roles")
 -}}
 ---
@@ -92,9 +102,13 @@ spec:
             - name: ALLOWED_REPOS
               value: {{ default .Values.supervisor.config.repo .Values.gateway.config.repo | quote }}
             - name: CODER_URL
-              value: {{ default (default "http://inference-server.inference.svc.cluster.local:8000/v1" (index .Values.supervisor.config "judge-url")) .Values.worker.coderUrl | quote }}
+              value: {{ $coderUrl | quote }}
             - name: CODER_MODEL
               value: {{ index .Values.worker "worker-model" | quote }}
+            - name: CODER_NATIVE_DOWNLOAD
+              value: {{ $coderNative | quote }}
+            - name: JUDGE_NATIVE_DOWNLOAD
+              value: {{ $judgeNative | quote }}
             - name: JUDGE_ACCEPT_THRESHOLD
               value: {{ .Values.worker.judgeAcceptThreshold | quote }}
             - name: TASK_REPO_POLICIES

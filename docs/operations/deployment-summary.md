@@ -2,6 +2,99 @@
 
 **Status:** Partial recovery; gateway HTTPS intake remains blocked (2026-10-21).
 
+## Requester-Selected Native Models: Prepared, Not Deployed
+
+Inference starts in llama.cpp **router mode without a model**, HF repository,
+alias, preset whitelist, or custom downloader. The pinned official CUDA image
+is unchanged: b11783, digest
+`sha256:1bacc872b168d2d10bfd8c220336f5a2cd464c07605936ec146ee5198832ffce`.
+The b11783 tag resolves to source commit
+`339f3242c761f16c27e5ffcde1d35dcc31933a55`.
+
+**Important native limitation:** a new HF ID in chat alone does NOT download
+it. `server-models.cpp` rejects missing model metadata before autoloading.
+`--models-dir` scans local files, not HF, and single-model `--hf-repo` does
+not select models dynamically. Presets can name HF sources for lazy loading,
+but require operator registration and are not arbitrary requester selection.
+
+The worker instead uses the native two-step API, for either coder or judge:
+
+1. `GET /models` discovers the requested ID (or an existing alias).
+2. If absent or incomplete, `POST /models` with
+   `{"model":"Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M"}` asks llama.cpp
+   itself to download it. The response `{"success":true}` means accepted,
+   not completed. There is no model allowlist in the chart or worker.
+3. Poll `GET /models` until the entry is `unloaded`, `loaded`, or `sleeping`;
+   `downloading` and `downloaded` are intermediate states. Failures are surfaced,
+   interrupted downloads can resume, and the preparation deadline is 30 minutes.
+4. `POST /v1/chat/completions` with the **same** model identifier, for example:
+   `{"model":"Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M","messages":[{"role":"user","content":"ping"}]}`.
+   Native autoload loads a discovered model and routes the request. Native-mode
+   chat uses a separate 30-minute HTTP timeout to allow a cold load.
+
+Other callers must perform that preparation themselves; chat-only arbitrary
+HF download is not implemented by the pinned server. The native alternative is
+`POST /models` plus `/models/sse` (`download_finished`/`download_failed`), then
+`GET /models` and chat. No custom inference proxy was added.
+
+The requester chooses `worker.worker-model` and
+`supervisor.config.judge-model`; the default for both is the HF ID above.
+`worker.coderUrl` and `supervisor.config.judge-url` still override endpoints.
+Default endpoints now use separate Services for the existing deployments:
+`llama-server-args-gpu0.inference.svc.cluster.local:8000/v1` for coder and
+`llama-server-args-gpu1.inference.svc.cluster.local:8000/v1` for judge.
+Preparation and chat MUST reach the same router. The old shared Service and
+Ingress remain, but cannot guarantee this across their independent caches.
+Custom deployment names require matching requester endpoint overrides.
+
+`worker.coderNativeDownload` and `worker.judgeNativeDownload` default to null:
+auto-enable only for their respective default router URLs. External URLs retain
+ordinary OpenAI-compatible chat without native API calls; explicitly set the
+corresponding flag to true for a custom single-router endpoint, or false to
+disable preparation. Standalone Python workers default these flags to false
+(`CODER_NATIVE_DOWNLOAD` / `JUDGE_NATIVE_DOWNLOAD`). Existing external-provider
+model strings are preserved; old local aliases only work if the router actually
+advertises them. They cannot identify an uncached HF repository.
+
+`LLAMA_CACHE` remains `/models/llama.cpp/<configMaps entry name>`, backed by
+the existing writable NVMe hostPath `/mnt/k8s-local-nvme/inference-models`.
+Native caches survive pod replacement; each GPU has its own download copy.
+The model-free router rediscovers cached models on startup. `--models-max 1`
+limits loaded models per router and permits native LRU unloading when switching;
+it is not a disk-cache quota. The chart now enforces one replica per deployment
+(`inference.gpuCount=1`) to avoid four GPU requests and duplicate cache writers.
+No storage, image, GPU allocation, or resource-limit migration was performed.
+
+Migration and limits:
+
+- Remove all `inference.modelSource` overrides, including `localPath`; schema
+  validation rejects them instead of silently fixing a model at deployment.
+  The former fixed local-file mode is intentionally removed. Existing native
+  cached models remain usable offline. Arbitrary loose GGUF files need native
+  directory/preset registration, not the removed fixed-model startup path.
+- This contract selects native HF `owner/repo:quant` identifiers, not arbitrary
+  URLs, revisions, filenames, `@32k` aliases, or non-GGUF transformers models.
+  HF downloads follow `main`; they are not immutable revision/checksum pins.
+  Native file/shard resolution is delegated entirely to llama.cpp.
+- Verify NVMe capacity and writable permissions, HF HTTPS egress, model/runtime
+  compatibility, P40 offload, VRAM and host-memory requirements before rollout.
+  The retained 2Gi host-memory budget and 32768-token context are not suitable
+  guarantees for every requested model. No automatic cache eviction is added.
+- Native management endpoints can download/delete large files. Keep these
+  single-router endpoints trusted/internal; no new management Ingress is added.
+  Gated/private HF authentication is not configured by this change.
+
+Evidence: pinned upstream [router documentation](https://github.com/ggml-org/llama.cpp/blob/339f3242c761f16c27e5ffcde1d35dcc31933a55/tools/server/README.md#using-multiple-models),
+[router implementation](https://github.com/ggml-org/llama.cpp/blob/339f3242c761f16c27e5ffcde1d35dcc31933a55/tools/server/server-models.cpp)
+(`ensure_model_ready`, request metadata lookup, `post_router_models`), and
+[native router tests](https://github.com/ggml-org/llama.cpp/blob/339f3242c761f16c27e5ffcde1d35dcc31933a55/tools/server/tests/unit/test_router.py)
+(`test_router_download_model`, download conflicts, incomplete downloads).
+Local verification covers chart/schema rendering, worker mocked HTTP contracts,
+download-before-chat ordering, external-provider compatibility, and lint.
+No deployment, cluster mutation, secrets, weight download, or GPU runtime test
+was performed. No standalone b11783 release binary or local llama-server was
+available; host containerd was intentionally not used for validation.
+
 ## Verified Recovery: 2026-10-21
 
 - Both inference Deployments were patched sequentially to `Recreate`, matching
