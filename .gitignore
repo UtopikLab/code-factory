@@ -31,3 +31,10 @@ vendored/
 secrets-values.yaml
 local.secrets-values.yaml
 local.values.yaml
+
+# Management frontend build and browser artifacts
+node_modules/
+dist/
+test-results/
+playwright-report/
+orchestrator/management/.env*

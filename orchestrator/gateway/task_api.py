@@ -6,6 +6,44 @@ class TaskAPI:
         self.handler = handler
         self.gateway = gateway
 
+    def list_tasks(self):
+        gateway, handler = self.gateway, self.handler
+        query = gateway.parse_qs(gateway.urlsplit(handler.path).query, keep_blank_values=True)
+        try:
+            if set(query) - {"repo", "status", "limit", "offset"} or any(len(values) != 1 for values in query.values()):
+                raise ValueError("invalid-query")
+            limit = int(query.get("limit", ["50"])[0])
+            offset = int(query.get("offset", ["0"])[0])
+            if not 1 <= limit <= 100 or not 0 <= offset <= 1000000:
+                raise ValueError("invalid-page")
+            clauses, parameters = [], []
+            if "repo" in query:
+                repo = query["repo"][0]
+                gateway._identity({"repo": repo})
+                clauses.append("lower(repo)=lower(?)")
+                parameters.append(repo)
+            if "status" in query:
+                status = query["status"][0]
+                if status not in ("queued", "running", "completed", "failed"):
+                    raise ValueError("invalid-status")
+                clauses.append("status=?")
+                parameters.append(status)
+        except (ValueError, TypeError):
+            handler._json(400, {"error": "invalid-task-query"})
+            return
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        db = gateway._task_db()
+        try:
+            total = db.execute("SELECT COUNT(*) FROM tasks" + where, parameters).fetchone()[0]
+            rows = db.execute(
+                "SELECT task_id, repo, issue AS issue_number, status, lifecycle, credential_cleanup, "
+                "retry_of, attempts, config_version, config_hash FROM tasks" + where +
+                " ORDER BY rowid DESC LIMIT ? OFFSET ?", [*parameters, limit, offset]).fetchall()
+            handler._json(200, {"tasks": [dict(row) for row in rows], "total": total,
+                                "limit": limit, "offset": offset})
+        finally:
+            db.close()
+
     def lookup(self, db):
         gateway = self.gateway
         parsed = gateway.urlsplit(self.handler.path)

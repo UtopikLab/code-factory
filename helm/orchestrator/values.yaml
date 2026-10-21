@@ -152,3 +152,21 @@ metrics:
 
 agentCatalog:
   version: "1"
+
+management:
+  enabled: false
+  image: ""
+  imagePullPolicy: IfNotPresent
+  publicOrigin: ""
+  gatewayUrl: ""
+  repositoriesSecret: ""
+  ingress:
+    enabled: false
+    host: ""
+    tlsTermination: internal
+    tlsSecretName: ""
+  oidc:
+    issuer: ""
+    audience: ""
+    jwksUrl: ""
+    allowedSubjects: []

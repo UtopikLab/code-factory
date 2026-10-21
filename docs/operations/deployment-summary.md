@@ -2,6 +2,41 @@
 
 **Status:** Partial recovery; gateway HTTPS intake remains blocked (2026-10-21).
 
+## Optional Management UI Ingress: Not Deployed
+
+The orchestrator chart renders a management Ingress only when both
+`management.enabled` and `management.ingress.enabled` are true. Both default
+to false; the default ingress host and TLS secret name are empty.
+The route is `/` with `pathType: Prefix` to the existing
+`orchestrator-management` Service on port 8081, covering the UI, assets, and
+same-origin `/management/api/*` endpoints without path rewriting.
+The gateway's `/api/v1` route is unchanged.
+
+Use a dedicated management host, distinct from `gateway.ingress.host`.
+The disabled example in `helm/orchestrator/example.values.yaml` uses
+`management.example.com` with external TLS termination; it does not enable
+the workload or ingress. Before enabling both settings:
+
+- Supply a registry-verified, explicitly versioned management image, the
+  repository-credentials Secret, OIDC issuer/audience/JWKS URL and allowed
+  subjects, and the existing gateway credentials. No image or credentials
+  are supplied by this ingress change.
+- Set `management.publicOrigin` to the browser-visible HTTPS origin, without
+  a path or trailing slash. Normally its hostname matches the ingress host;
+  if an external TLS proxy rewrites Host, set the ingress host to the forwarded
+  hostname while retaining the public HTTPS origin.
+- For `management.ingress.tlsTermination: internal` (the default), provide
+  `management.ingress.tlsSecretName` for a pre-provisioned certificate Secret
+  in the chart namespace. This uses Traefik `websecure`, router TLS, and
+  `spec.tls`, matching the gateway convention.
+- For `external`, terminate HTTPS at the trusted proxy and forward to Traefik
+  `web`; no ingress TLS block is rendered. Restrict direct HTTP backend access.
+  Provision DNS/proxy routing and confirm the existing Traefik entrypoints
+  before deployment. This change does not install a controller or certificates.
+
+Only local Helm rendering/tests were performed; no live management ingress,
+DNS, TLS, image availability, or cluster readiness is asserted.
+
 ## Requester-Selected Native Models: Prepared, Not Deployed
 
 Inference starts in llama.cpp **router mode without a model**, HF repository,

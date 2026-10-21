@@ -329,6 +329,13 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(generate_latest())
             return
 
+        if urlsplit(path).path == "/api/v1/tasks":
+            if not self._authorized():
+                self._json(401, {"error": "unauthorized"})
+                return
+            self._task_api().list_tasks()
+            return
+
         if path.startswith("/api/v1/tasks/"):
             if not self._authorized():
                 self._json(401, {"error": "unauthorized"})

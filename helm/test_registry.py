@@ -507,6 +507,10 @@ class RegistryValuesTests(unittest.TestCase):
         values = yaml.safe_load(contents)
         self.assertEqual(values["supervisor"]["config"]["acceptor-url"],
                          "https://gateway.example.com")
+        self.assertFalse(values["management"]["enabled"])
+        self.assertFalse(values["management"]["ingress"]["enabled"])
+        self.assertEqual(values["management"]["publicOrigin"], "https://management.example.com")
+        self.assertEqual(values["management"]["ingress"]["host"], "management.example.com")
         values["credentials"] = {
             "internal": {
                 "gatewayClientToken": "gateway-proxy-example-dummy-token-32-chars",
@@ -520,6 +524,97 @@ class RegistryValuesTests(unittest.TestCase):
         self.assertNotIn("tls", ingress["spec"])
         self.assertEqual(ingress["metadata"]["annotations"][
             "traefik.ingress.kubernetes.io/router.entrypoints"], "web")
+
+    def management_values(self, **ingress):
+        defaults = yaml.safe_load((HELM_DIR / "orchestrator/values.yaml").read_text())
+        return {"management": {
+            "enabled": True,
+            "image": defaults["gateway"]["image"],
+            "publicOrigin": "https://management.example.com",
+            "repositoriesSecret": "management-repositories",
+            "oidc": {
+                "issuer": "https://identity.example.com",
+                "audience": "management",
+                "jwksUrl": "https://identity.example.com/jwks",
+                "allowedSubjects": ["operator"],
+            },
+            "ingress": {"enabled": True, "host": "management.example.com",
+                        "tlsTermination": "internal", "tlsSecretName": "management-tls", **ingress},
+        }}
+
+    def test_management_ingress_opt_in(self):
+        disabled = self.management_values()
+        disabled["management"]["enabled"] = False
+        ingress_defaults = self.management_values()
+        del ingress_defaults["management"]["ingress"]
+        cases = ({}, disabled, {"management": {"ingress": {"enabled": True}}},
+                 ingress_defaults, self.management_values(enabled=False))
+        for values in cases:
+            with self.subTest(values=values):
+                documents = self.documents("orchestrator", values)
+                ingresses = [document for document in documents if document["kind"] == "Ingress"]
+                self.assertEqual(len(ingresses), 1)
+                self.assertEqual(ingresses[0]["metadata"]["name"],
+                                 "orchestrator-orchestrator-gateway-ingress")
+
+    def test_management_ingress_routes_and_tls(self):
+        for termination in ("internal", "external"):
+            with self.subTest(termination=termination):
+                values = self.management_values(tlsTermination=termination,
+                                                tlsSecretName="management-tls" if termination == "internal" else "")
+                documents = self.documents("orchestrator", values)
+                ingress = next(document for document in documents if document["kind"] == "Ingress"
+                               and document["metadata"]["name"] == "orchestrator-management-ingress")
+                service = next(document for document in documents if document["kind"] == "Service"
+                               and document["metadata"]["name"] == "orchestrator-management")
+                self.assertEqual(ingress["apiVersion"], "networking.k8s.io/v1")
+                self.assertEqual(ingress["metadata"]["namespace"], service["metadata"]["namespace"])
+                rule = ingress["spec"]["rules"][0]
+                self.assertEqual(rule["host"], "management.example.com")
+                self.assertEqual(rule["http"]["paths"], [{
+                    "path": "/", "pathType": "Prefix", "backend": {"service": {
+                        "name": service["metadata"]["name"], "port": {"number": 8081},
+                    }},
+                }])
+                self.assertEqual(service["spec"]["ports"][0]["port"], 8081)
+                self.assertEqual(service["spec"]["ports"][0]["targetPort"], "http")
+                self.assertEqual(service["spec"]["type"], "ClusterIP")
+                deployment = next(document for document in documents if document["kind"] == "Deployment"
+                                  and document["metadata"]["name"] == service["metadata"]["name"])
+                environment = {entry["name"]: entry.get("value") for entry in
+                               deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+                self.assertEqual(environment["MANAGEMENT_PUBLIC_ORIGIN"],
+                                 values["management"]["publicOrigin"])
+                annotations = ingress["metadata"]["annotations"]
+                if termination == "internal":
+                    self.assertEqual(annotations["traefik.ingress.kubernetes.io/router.entrypoints"], "websecure")
+                    self.assertEqual(annotations["traefik.ingress.kubernetes.io/router.tls"], "true")
+                    self.assertEqual(ingress["spec"]["tls"], [{
+                        "hosts": [rule["host"]], "secretName": "management-tls",
+                    }])
+                else:
+                    self.assertEqual(annotations["traefik.ingress.kubernetes.io/router.entrypoints"], "web")
+                    self.assertNotIn("traefik.ingress.kubernetes.io/router.tls", annotations)
+                    self.assertNotIn("tls", ingress["spec"])
+                gateway = next(document for document in documents if document["kind"] == "Ingress"
+                               and document["metadata"]["name"] == "orchestrator-orchestrator-gateway-ingress")
+                self.assertEqual(gateway["spec"]["rules"][0]["http"]["paths"][0]["path"], "/api/v1")
+
+    def test_management_ingress_invalid_settings_fail(self):
+        for override in ({"host": ""}, {"host": "https://management.example.com"},
+                         {"tlsTermination": "off"}, {"tlsSecretName": ""},
+                         {"enabled": "true"}):
+            with self.subTest(override=override):
+                result = self.render("orchestrator", self.management_values(**override))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("management", result.stderr)
+        for field, value in (("publicOrigin", "http://management.example.com"),
+                             ("oidc", {"allowedSubjects": []})):
+            values = self.management_values()
+            values["management"][field] = value
+            result = self.render("orchestrator", values)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("management", result.stderr)
 
     def test_deploy_values_path_and_failure_propagation(self):
         with tempfile.TemporaryDirectory(prefix="helm registry test-") as directory:

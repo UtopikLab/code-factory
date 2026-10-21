@@ -72,6 +72,26 @@ def issue_payload(repo="org/repo"):
     return {"name": "drain", "ref": "refs/heads/main", "payload": {"repo": repo, "issue_number": 2}}
 
 
+def test_task_list_is_bounded_filtered_and_sanitized(task_gateway):
+    first = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    second = task_request("POST", "/api/v1/tasks/spawn", issue_payload("org/other"))[1]["task_id"]
+    code, page = task_request("GET", "/api/v1/tasks?limit=1")
+    assert code == 200 and page["total"] == 2
+    assert page["tasks"][0]["task_id"] == second
+    assert task_request("GET", "/api/v1/tasks?limit=1&offset=1")[1]["tasks"][0]["task_id"] == first
+    assert task_request("GET", "/api/v1/tasks?repo=ORG/REPO&status=queued")[1]["total"] == 1
+    assert task_request("GET", "/api/v1/tasks?status=completed")[1]["tasks"] == []
+    assert not {"payload", "result", "credential_ref", "callback_hash", "job"} & page["tasks"][0].keys()
+    assert "repo-test-only" not in json.dumps(page)
+    assert task_request("GET", "/api/v1/tasks", token="wrong")[0] == 401
+
+
+@pytest.mark.parametrize("query", ["limit=101", "offset=-1", "limit=no", "status=unknown", "repo=../bad",
+                                     "limit=1&limit=2", "unknown=value"])
+def test_task_list_rejects_invalid_queries(task_gateway, query):
+    assert task_request("GET", "/api/v1/tasks?" + query)[0] == 400
+
+
 def test_gateway_auth_has_no_global_github_fallback():
     output = subprocess.check_output([
         sys.executable, "-c", "import server; print(bool(server.TOKEN))",

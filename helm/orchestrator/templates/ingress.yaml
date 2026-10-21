@@ -40,3 +40,40 @@ spec:
                 name: {{ .Chart.Name }}-orchestrator-gateway
                 port:
                   number: 8000
+{{- if and .Values.management.enabled .Values.management.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Chart.Name }}-management-ingress
+  namespace: {{ .Values.namespace }}
+  annotations:
+    {{- if eq .Values.management.ingress.tlsTermination "internal" }}
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    {{- else }}
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    {{- end }}
+    traefik.ingress.kubernetes.io/service.method: ANY
+  labels:
+    app: {{ .Chart.Name }}
+    component: management
+    app.k8s.io/managed-by: Helm
+spec:
+  {{- if eq .Values.management.ingress.tlsTermination "internal" }}
+  tls:
+    - hosts: [{{ .Values.management.ingress.host | quote }}]
+      secretName: {{ .Values.management.ingress.tlsSecretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.management.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Chart.Name }}-management
+                port:
+                  number: 8081
+{{- end }}

@@ -3,6 +3,176 @@
     "title": "orchestrator values",
     "type": "object",
     "properties": {
+        "management": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "image": {
+                    "type": "string"
+                },
+                "imagePullPolicy": {
+                    "enum": [
+                        "Always",
+                        "IfNotPresent",
+                        "Never"
+                    ]
+                },
+                "publicOrigin": {
+                    "type": "string"
+                },
+                "gatewayUrl": {
+                    "type": "string",
+                    "pattern": "^(https://[^@?#]+)?$"
+                },
+                "repositoriesSecret": {
+                    "type": "string"
+                },
+                "ingress": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean"
+                        },
+                        "host": {
+                            "type": "string",
+                            "maxLength": 253
+                        },
+                        "tlsTermination": {
+                            "enum": [
+                                "internal",
+                                "external"
+                            ]
+                        },
+                        "tlsSecretName": {
+                            "type": "string",
+                            "maxLength": 253,
+                            "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+                        }
+                    }
+                },
+                "oidc": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "issuer": {
+                            "type": "string"
+                        },
+                        "audience": {
+                            "type": "string"
+                        },
+                        "jwksUrl": {
+                            "type": "string"
+                        },
+                        "allowedSubjects": {
+                            "type": "array",
+                            "uniqueItems": true,
+                            "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "pattern": "^[^,]+$"
+                            }
+                        }
+                    }
+                }
+            },
+            "if": {
+                "properties": {
+                    "enabled": {
+                        "const": true
+                    }
+                },
+                "required": [
+                    "enabled"
+                ]
+            },
+            "then": {
+                "required": [
+                    "image",
+                    "publicOrigin",
+                    "repositoriesSecret",
+                    "oidc"
+                ],
+                "properties": {
+                    "image": {
+                        "minLength": 1
+                    },
+                    "publicOrigin": {
+                        "pattern": "^https://[^/@?#]+$"
+                    },
+                    "repositoriesSecret": {
+                        "minLength": 1,
+                        "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+                    },
+                    "ingress": {
+                        "if": {
+                            "properties": {
+                                "enabled": {
+                                    "const": true
+                                }
+                            },
+                            "required": [
+                                "enabled"
+                            ]
+                        },
+                        "then": {
+                            "required": [
+                                "host",
+                                "tlsTermination"
+                            ],
+                            "properties": {
+                                "host": {
+                                    "minLength": 1,
+                                    "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                                }
+                            },
+                            "if": {
+                                "properties": {
+                                    "tlsTermination": {
+                                        "const": "internal"
+                                    }
+                                }
+                            },
+                            "then": {
+                                "required": [
+                                    "tlsSecretName"
+                                ],
+                                "properties": {
+                                    "tlsSecretName": {
+                                        "minLength": 1
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "oidc": {
+                        "required": [
+                            "issuer",
+                            "audience",
+                            "jwksUrl",
+                            "allowedSubjects"
+                        ],
+                        "properties": {
+                            "issuer": {
+                                "pattern": "^https://[^@?#]+$"
+                            },
+                            "audience": {
+                                "minLength": 1
+                            },
+                            "jwksUrl": {
+                                "pattern": "^https://[^@#]+$"
+                            },
+                            "allowedSubjects": {
+                                "minItems": 1
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "credentials": {
             "type": "object",
             "additionalProperties": false,

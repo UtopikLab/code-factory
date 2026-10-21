@@ -17,3 +17,11 @@ worker:
   auth:
     existingSecret: orchestrator-coder-model-auth
     createSecret: false
+management:
+  enabled: false
+  publicOrigin: https://management.example.com
+  ingress:
+    enabled: false
+    host: management.example.com
+    tlsTermination: external
+    tlsSecretName: ""

@@ -1,0 +1,120 @@
+{{- if .Values.management.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}-management
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestrator
+      component: management
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+        component: management
+      annotations:
+        code-factory/config-hash: {{ include "orchestrator.agentCatalogHash" . | quote }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1001
+        runAsGroup: 1001
+        runAsNonRoot: true
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
+      containers:
+        - name: management
+          image: {{ required "management.image is required" .Values.management.image | quote }}
+          imagePullPolicy: {{ .Values.management.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: 8081
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: CODEFACTORY_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-gateway-auth" .Chart.Name) .Values.gateway.auth.existingSecret }}
+                  key: gateway-auth-token
+            - name: MANAGEMENT_GATEWAY_URL
+              value: {{ default (index .Values.supervisor.config "acceptor-url") .Values.management.gatewayUrl | quote }}
+            - name: MANAGEMENT_PUBLIC_ORIGIN
+              value: {{ .Values.management.publicOrigin | quote }}
+            - name: MANAGEMENT_OIDC_ISSUER
+              value: {{ .Values.management.oidc.issuer | quote }}
+            - name: MANAGEMENT_OIDC_AUDIENCE
+              value: {{ .Values.management.oidc.audience | quote }}
+            - name: MANAGEMENT_OIDC_JWKS_URL
+              value: {{ .Values.management.oidc.jwksUrl | quote }}
+            - name: MANAGEMENT_ALLOWED_SUBJECTS
+              value: {{ join "," .Values.management.oidc.allowedSubjects | quote }}
+            - name: MANAGEMENT_REPOSITORIES_FILE
+              value: /etc/repositories/repositories.json
+            - name: MANAGEMENT_RUNTIME_CONFIG_FILE
+              value: /etc/runtime/runtime-config.json
+            - name: MANAGEMENT_CONFIG_HASH
+              value: {{ include "orchestrator.agentCatalogHash" . | quote }}
+          volumeMounts:
+            - name: repositories
+              mountPath: /etc/repositories
+              readOnly: true
+            - name: runtime
+              mountPath: /etc/runtime
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: repositories
+          secret:
+            secretName: {{ .Values.management.repositoriesSecret }}
+            defaultMode: 0440
+            items:
+              - key: repositories.json
+                path: repositories.json
+        - name: runtime
+          configMap:
+            name: {{ .Chart.Name }}-agent-catalog-{{ include "orchestrator.agentCatalogHash" . | trunc 12 }}
+            items:
+              - key: runtime-config.json
+                path: runtime-config.json
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Chart.Name }}-management
+  namespace: {{ .Values.namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: orchestrator
+    component: management
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+{{- end }}
