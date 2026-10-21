@@ -39,7 +39,7 @@ COPY --from=build /usr/local/lib/python3.12/site-packages /usr/local/lib/python3
 COPY --from=build /usr/local/bin /usr/local/bin
 
 # Gateway source.
-COPY server.py /app/server.py
+COPY server.py security.py task_store.py task_api.py /app/
 
 # Working directory for HTTP listeners and prometheus /metrics.
 RUN mkdir -p /data/listeners /data/tasks && \

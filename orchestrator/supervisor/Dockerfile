@@ -42,7 +42,7 @@ COPY --from=build /usr/local/lib/python3.12/site-packages /usr/local/lib/python3
 COPY --from=build /usr/local/bin /usr/local/bin
 
 # Supervisor loop source (modules).
-COPY supervisor.py /app/supervisor.py
+COPY supervisor.py task_runtime.py candidate_workflow.py task_graph.py supervisor_runtime.py /app/
 
 # Persist loop state and task work directories.
 RUN mkdir -p /data/loop-state /data/task-work && \

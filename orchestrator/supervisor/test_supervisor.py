@@ -7,15 +7,22 @@ logic, which are deterministic and do not require a running inference server.
 
 
 import asyncio
+import hashlib
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
+import supervisor as supervisor_module
 from supervisor import (
     build_evaluation_prompt,
+    claim_queued_task,
     make_eval_result,
     make_worker_output,
     node_execute_workers,
     passes_acceptance,
     should_retry,
+    task_database,
 )
 
 
@@ -30,6 +37,251 @@ def test_supervisor_mock_is_explicit(monkeypatch):
     monkeypatch.setenv("SUPERVISOR_MOCK_MODE", "true")
     state = {"task_id": "task", "worker_outputs": []}
     assert asyncio.run(node_execute_workers(state))["worker_outputs"]
+
+
+def test_durable_claim_recovery_and_eight_total_attempt_cap(tmp_path):
+    db = task_database(str(tmp_path / "tasks.sqlite3"))
+    try:
+        db.execute("INSERT INTO tasks(task_id,repo,issue,status,payload) VALUES(?,?,?,?,?)",
+                   ("task", "org/repo", 1, "queued", '{"task_id":"task"}'))
+        claimed = claim_queued_task(db, "supervisor-a", now=1000)
+        assert claimed["attempts"] == 1 and claimed["claim_owner"] == "supervisor-a"
+        assert claim_queued_task(db, "supervisor-b", now=1100) is None
+        recovered = claim_queued_task(db, "supervisor-b", now=2000, lease_seconds=900)
+        assert recovered["attempts"] == 1 and recovered["claim_owner"] == "supervisor-b"
+        db.execute("UPDATE tasks SET status='queued', attempts=8, claimed_at=0 WHERE task_id='task'")
+        exhausted = claim_queued_task(db, "supervisor-c", now=4000, lease_seconds=900)
+        assert exhausted["status"] == "running" and exhausted["attempts"] == 8
+    finally:
+        db.close()
+
+
+def test_pinned_catalog_is_schema_validated_and_role_tools_are_bounded(monkeypatch):
+    chart = Path(__file__).resolve().parents[2] / "helm/orchestrator/files"
+    content = (chart / "agent-catalog.yaml").read_text()
+    schema = (chart / "agent-catalog.schema.json").read_text()
+    runtime = json.dumps({"acceptor_url": "https://gateway", "coder_url": "http://p40-0/v1",
+                          "coder_model": "coder-model", "coder_native_download": False,
+                          "judge_url": "http://p40-1/v1", "judge_model": "judge-model",
+                          "threshold": 0.8, "max_total_attempts": 8,
+                          "allowed_base_branches": "main", "reviewers": "reviewer",
+                          "allowed_repos": "org/repo", "repo_policies": {},
+                          "worker_parallelism": 1}, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256((content + schema + runtime).encode()).hexdigest()
+    monkeypatch.setattr(supervisor_module, "_k8s_request", lambda *_args: {
+        "data": {"agent-roles.yaml": content, "agent-roles.schema.json": schema,
+                 "runtime-config.json": runtime}})
+    task = {"config_hash": digest, "config_version": "1"}
+    assert supervisor_module._load_pinned_catalog(task)[0]["roles"]["coder"]["endpoint_alias"] == "coder"
+
+    invalid = content.replace("spec_version: 1", "spec_version: 2")
+    monkeypatch.setattr(supervisor_module, "_k8s_request", lambda *_args: {
+        "data": {"agent-roles.yaml": invalid, "agent-roles.schema.json": schema,
+                 "runtime-config.json": runtime}})
+    task["config_hash"] = hashlib.sha256((invalid + schema + runtime).encode()).hexdigest()
+    with pytest.raises(RuntimeError, match="task-catalog-schema-invalid"):
+        supervisor_module._load_pinned_catalog(task)
+
+
+def test_judge_calls_configured_p40_1_endpoint(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"score":0.9,"review":"valid"}'}}]}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            assert timeout == 90
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(supervisor_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setenv("JUDGE_URL", "http://p40-1.inference.svc:8000/v1")
+    monkeypatch.setenv("JUDGE_MODEL", "qwen-judge-32k")
+    monkeypatch.setenv("OPENAI_API_KEY", "judge-key")
+    task = {"payload": '{"task_id":"task"}'}
+    candidate = {"status": "candidate", "validation": {"status": "passed"}, "patch": "diff"}
+    score, review = asyncio.run(supervisor_module._judge_candidate(task, candidate))
+    assert score == 0.9 and review == "valid"
+    assert calls[0][0] == "http://p40-1.inference.svc:8000/v1/chat/completions"
+    assert calls[0][1]["json"]["model"] == "qwen-judge-32k"
+
+
+@pytest.mark.parametrize("operation", ["judge", "plan"])
+@pytest.mark.parametrize("initial", [None, "incomplete", "downloading", "unloaded", "loaded", "disabled"])
+def test_supervisor_native_model_preparation(monkeypatch, operation, initial):
+    httpx = supervisor_module.httpx
+    calls = []
+    model = "owner/judge-GGUF:Q4_K_M"
+    statuses = iter([initial, "unloaded"])
+    monkeypatch.setenv("OPENAI_API_KEY", "judge-key")
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    def transport(request):
+        calls.append(request)
+        assert request.headers["Authorization"] == "Bearer judge-key"
+        if request.url.path == "/models":
+            assert initial != "disabled"
+            if request.method == "POST":
+                assert json.loads(request.content) == {"model": model}
+                return httpx.Response(200, json={"success": True})
+            status = next(statuses)
+            return httpx.Response(200, json={"data": [] if status is None else [
+                {"id": model, "status": {"value": status}},
+            ]})
+        assert request.url.path == "/v1/chat/completions"
+        assert json.loads(request.content)["model"] == model
+        return httpx.Response(200, json={"choices": [{"message": {
+            "content": '{"score":0.9,"review":"valid","plan":"implement fix"}',
+        }}]})
+
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client_class(
+        transport=httpx.MockTransport(transport), **kwargs))
+    runtime = {"judge_url": "http://judge/v1", "judge_model": model,
+               "judge_native_download": initial != "disabled"}
+    task = {"payload": '{"task_id":"task"}'}
+    if operation == "judge":
+        candidate = {"validation": {"status": "passed"}, "patch": "diff"}
+        assert asyncio.run(supervisor_module._judge_candidate(task, candidate, runtime)) == (0.9, "valid")
+    else:
+        assert asyncio.run(supervisor_module._plan_task(task, {"roles": {"coder": {}}}, runtime)) == "implement fix"
+    assert sum(request.method == "POST" and request.url.path == "/models" for request in calls) == (initial in (None, "incomplete"))
+    assert calls[-1].url.path == "/v1/chat/completions"
+
+
+@pytest.mark.parametrize("operation", ["judge", "plan"])
+@pytest.mark.parametrize("failure", ["download", "status", "timeout", "concurrent"])
+def test_supervisor_native_model_failures(monkeypatch, operation, failure):
+    httpx = supervisor_module.httpx
+    monkeypatch.setenv("OPENAI_API_KEY", "judge-key")
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(side_effect=TimeoutError if failure == "timeout" else None))
+    responses = iter([
+        httpx.Response(200, json={"data": []}),
+        httpx.Response(400, json={"error": {"message": "is already downloading" if failure == "concurrent" else "bad HF repo"}}),
+        httpx.Response(200, json={"data": [{"id": "judge-model", "status": {"value": "unloaded"}}]}),
+        httpx.Response(200, json={"choices": [{"message": {"content": '{"score":0.9,"plan":"implement fix"}'}}]}),
+    ] if failure in ("download", "concurrent") else [
+        httpx.Response(200, json={"data": [{"id": "judge-model", "status": {
+            "value": "downloading", "failed": failure == "status",
+        }}]}),
+    ])
+    client_class = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client_class(
+        transport=httpx.MockTransport(lambda request: next(responses)), **kwargs))
+    runtime = {"judge_url": "http://judge/v1", "judge_model": "judge-model", "judge_native_download": True}
+    task = {"payload": '{"task_id":"task"}'}
+    if operation == "judge":
+        pending = supervisor_module._judge_candidate(task, {"validation": {"status": "passed"}}, runtime)
+    else:
+        pending = supervisor_module._plan_task(task, {"roles": {"coder": {}}}, runtime)
+    if failure == "concurrent":
+        asyncio.run(pending)
+    else:
+        with pytest.raises({"download": httpx.HTTPStatusError, "status": RuntimeError, "timeout": TimeoutError}[failure]):
+            asyncio.run(pending)
+
+
+def test_pr_policy_fails_closed_and_publication_never_merges(monkeypatch):
+    task = {"repo": "org/repo", "task_id": "task-123", "issue": 7}
+    candidate = {"base_branch": "main", "base_sha": "base-sha", "edits": [
+        {"path": "src/fix.py", "content": "fixed = True\n"}]}
+    request_paths = []
+    def github(method, repo, path, body=None):
+        request_paths.append((method, path))
+        if method == "GET" and path == "/git/ref/heads/main":
+            return {"object": {"sha": "base-sha"}}
+        if method == "GET" and path == "/git/commits/base-sha":
+            return {"tree": {"sha": "base-tree"}}
+        if method == "POST" and path == "/git/trees":
+            return {"sha": "new-tree"}
+        if method == "GET" and path.startswith("/git/ref/heads/"):
+            return None
+        if method == "POST" and path == "/git/commits":
+            return {"sha": "new-commit"}
+        if method == "GET" and path.startswith("/pulls?"):
+            return []
+        if method == "POST" and path == "/pulls":
+            return {"number": 10, "html_url": "https://github.com/org/repo/pull/10",
+                    "state": "open", "base": {"ref": "main"}}
+        return {}
+
+    monkeypatch.setattr(supervisor_module, "_github_request", github)
+    monkeypatch.setenv("PR_GITHUB_TOKEN", "supervisor-only-token")
+    monkeypatch.delenv("PR_ALLOWED_BASE_BRANCHES", raising=False)
+    monkeypatch.delenv("PR_REVIEWERS", raising=False)
+    with pytest.raises(RuntimeError, match="pr-policy-required"):
+        supervisor_module._publish_candidate(task, candidate)
+    assert request_paths == []
+
+    monkeypatch.setenv("PR_ALLOWED_BASE_BRANCHES", "main")
+    monkeypatch.setenv("PR_REVIEWERS", "reviewer")
+    assert supervisor_module._publish_candidate(task, candidate) == "https://github.com/org/repo/pull/10"
+    assert ("POST", "/pulls/10/requested_reviewers") in request_paths
+    assert not any("/merge" in path for _method, path in request_paths)
+
+
+def test_dispatch_injects_only_task_scoped_credentials_and_pinned_catalog(monkeypatch):
+    catalog_hash = "a" * 64
+    seed = {"spec": {"suspend": True, "template": {"spec": {
+        "containers": [{"name": "coder", "env": [
+            {"name": "CODEFACTORY_AUTH_TOKEN", "value": "global"},
+            {"name": "JUDGE_URL", "value": "judge"},
+        ]}], "volumes": [{"name": "agent-catalog", "configMap": {"name": "old"}}]}}}}
+    requests = []
+
+    def api(method, path, body=None):
+        requests.append((method, path, body))
+        if method == "GET" and path.endswith("/code-factory-worker"):
+            return seed
+        if method == "POST":
+            return {"metadata": {"name": body["metadata"]["name"]}}
+        return {"data": {}}
+
+    monkeypatch.setattr(supervisor_module, "_k8s_request", api)
+    monkeypatch.setenv("AGENT_CATALOG_NAME_PREFIX", "code-factory-agent-catalog-")
+    task = {"task_id": "issue-123", "attempts": 1, "config_hash": catalog_hash,
+            "config_version": "1", "payload": '{"repo":"org/repo"}', "plan": "test plan",
+            "repo": "org/repo", "credential_ref": "task-credential-issue-123"}
+    runtime = {"coder_url": "http://coder", "coder_model": "coder-model", "coder_native_download": False,
+               "acceptor_url": "https://gateway", "allowed_repos": "org/repo", "repo_policies": {}}
+    name = supervisor_module._dispatch_task(task, runtime)
+    assert name == "code-factory-worker-issue-123-1"
+    job = requests[-1][2]
+    env = {entry["name"]: entry for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert "CODEFACTORY_AUTH_TOKEN" not in env and "JUDGE_URL" not in env
+    assert env["TASK_CALLBACK_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == task["credential_ref"]
+    assert json.loads(env["ASSIGNED_TASK_PAYLOAD"]["value"])["supervisor_plan"] == "test plan"
+    assert job["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"].endswith(catalog_hash[:12])
+
+
+def test_supervisor_reconstructs_candidate_diff_and_rejects_patch_mismatch(monkeypatch):
+    def github(method, _repo, path, _body=None):
+        if path == "/git/commits/" + "a" * 40:
+            return {"tree": {"sha": "tree-sha"}}
+        if path == "/git/trees/tree-sha?recursive=1":
+            return {"truncated": False, "tree": []}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(supervisor_module, "_github_request", github)
+    task = {"task_id": "task", "repo": "org/repo", "issue": 1}
+    candidate = {"base_sha": "a" * 40, "changed_files": ["src/fix.py"],
+                 "edits": [{"path": "src/fix.py", "content": "value = 1\n"}],
+                 "patch": "untrusted worker patch"}
+    with pytest.raises(RuntimeError, match="candidate-patch-edits-mismatch"):
+        supervisor_module._verified_candidate_patch(task, candidate)
 
 # --------------------------------------------------------------------------- #
 # Evaluation helpers

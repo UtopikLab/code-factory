@@ -25,7 +25,20 @@ spec:
         app: orchestrator
         component: supervisor
     spec:
-      automountServiceAccountToken: false
+      serviceAccountName: {{ .Chart.Name }}-supervisor
+      automountServiceAccountToken: true
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: orchestrator
+                  component: gateway
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsUser: 1001
+        runAsNonRoot: true
+        fsGroup: 1001
       containers:
         - name: supervisor
           image: {{ .Values.supervisor.image | default "ghcr.io/utopiklab/code-factory-supervisor:latest" }}
@@ -33,6 +46,12 @@ spec:
           ports:
             - name: metrics
               containerPort: 9000
+          volumeMounts:
+            - name: task-state
+              mountPath: /data/tasks
+            - name: agent-catalog
+              mountPath: /etc/code-factory/agent-catalog
+              readOnly: true
           resources:
             requests:
               cpu: {{ .Values.supervisor.config.cpuRequest | default "500m" }}
@@ -61,6 +80,48 @@ spec:
                 configMapKeyRef:
                   name: {{ .Chart.Name }}-config
                   key: judge-model
+            - name: CODER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Chart.Name }}-config
+                  key: coder-url
+            - name: CODER_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Chart.Name }}-config
+                  key: coder-model
+            - name: ACCEPTANCE_THRESHOLD
+              value: {{ index .Values.supervisor.config "acceptance-threshold" | default 0.8 | quote }}
+            - name: PR_ALLOWED_BASE_BRANCHES
+              value: {{ index .Values.supervisor.config "allowed-base-branches" | quote }}
+            - name: PR_REVIEWERS
+              value: {{ .Values.supervisor.config.reviewers | quote }}
+            - name: TASK_DB_PATH
+              value: /data/tasks/tasks.sqlite3
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: AGENT_CONFIG_VERSION
+              value: {{ .Values.agentCatalog.version | default "1" | quote }}
+            - name: AGENT_CONFIG_HASH
+              value: {{ include "orchestrator.agentCatalogHash" . | quote }}
+            - name: AGENT_CATALOG_NAME_PREFIX
+              value: {{ printf "%s-agent-catalog-" .Chart.Name | quote }}
+            - name: SUPERVISOR_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.supervisor.auth.existingSecret }}
+                  key: supervisor-auth-token
+            - name: PR_GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.supervisor.auth.existingSecret }}
+                  key: pr-github-token
+            - name: WORKER_JOB_TEMPLATE
+              value: {{ printf "%s-worker" .Chart.Name | quote }}
+            - name: TASK_JOB_TTL_SECONDS_AFTER_FINISHED
+              value: {{ .Values.gateway.taskJobTtlSecondsAfterFinished | quote }}
           readinessProbe:
             httpGet:
               path: /healthz
@@ -73,3 +134,40 @@ spec:
             periodSeconds: 15
       imagePullSecrets:
         {{- toYaml .Values.imagePullSecrets | nindent 8 }}
+      volumes:
+        - name: task-state
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-task-state" .Chart.Name) .Values.gateway.persistence.existingClaim }}
+        - name: agent-catalog
+          configMap:
+            name: {{ .Chart.Name }}-agent-catalog-{{ include "orchestrator.agentCatalogHash" . | trunc 12 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Chart.Name }}-supervisor
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Chart.Name }}-supervisor
+  namespace: {{ .Values.namespace }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Chart.Name }}-supervisor
+  namespace: {{ .Values.namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Chart.Name }}-supervisor
+    namespace: {{ .Values.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Chart.Name }}-supervisor

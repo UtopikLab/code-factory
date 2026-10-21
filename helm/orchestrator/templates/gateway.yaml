@@ -52,16 +52,23 @@ spec:
                 secretKeyRef:
                   name: {{ default (printf "%s-gateway-auth" .Chart.Name) .Values.gateway.auth.existingSecret }}
                   key: gateway-auth-token
+            - name: SUPERVISOR_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.supervisor.auth.existingSecret }}
+                  key: supervisor-auth-token
             - name: GATEWAY_TRANSPORT_MODE
               value: {{ .Values.gateway.transportMode | quote }}
             - name: TASK_CREDENTIAL_TTL_SECONDS
               value: {{ .Values.gateway.taskCredentialTtlSeconds | quote }}
-            - name: TASK_JOB_TTL_SECONDS_AFTER_FINISHED
-              value: {{ .Values.gateway.taskJobTtlSecondsAfterFinished | quote }}
             - name: ALLOWED_REPOS
               value: {{ default .Values.supervisor.config.repo .Values.gateway.config.repo | quote }}
             - name: TASK_DB_PATH
               value: /data/tasks/tasks.sqlite3
+            - name: AGENT_CONFIG_VERSION
+              value: {{ .Values.agentCatalog.version | default "1" | quote }}
+            - name: AGENT_CONFIG_HASH
+              value: {{ include "orchestrator.agentCatalogHash" . | quote }}
           resources:
             requests:
               cpu: {{ .Values.gateway.config.cpuRequest | default "100m" }}
@@ -91,7 +98,7 @@ metadata:
   name: {{ .Chart.Name }}-task-state
   namespace: {{ .Values.namespace }}
 spec:
-  accessModes: [ReadWriteOnce]
+  accessModes: [{{ .Values.gateway.persistence.accessMode | default "ReadWriteMany" }}]
   {{- if .Values.gateway.persistence.storageClassName }}
   storageClassName: {{ .Values.gateway.persistence.storageClassName | quote }}
   {{- end }}
@@ -132,16 +139,9 @@ metadata:
   name: {{ .Chart.Name }}-gateway
   namespace: {{ .Values.namespace }}
 rules:
-  - apiGroups: ["batch"]
-    resources: ["jobs"]
-    resourceNames: [{{ printf "%s-worker" .Chart.Name | quote }}]
-    verbs: ["get"]
-  - apiGroups: ["batch"]
-    resources: ["jobs"]
-    verbs: ["create"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "create", "delete"]
+    verbs: ["create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

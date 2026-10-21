@@ -5,7 +5,11 @@ Orchestrator image for the autonomous LangGraph supervisor loop.
 ## Files
 - `Dockerfile` — supervisor image build definition
 - `requirements.txt` — Python dependencies
-- `supervisor.py` — resident supervisor loop implementation
+- `supervisor.py` — resident supervisor loop entry point
+- `task_runtime.py` — durable task claiming, catalog validation, and worker-job dispatch
+- `candidate_workflow.py` — candidate verification, judge/planner calls, PR publication, and gateway completion
+- `task_graph.py` — LangGraph state and planning/evaluation transitions
+- `supervisor_runtime.py` — resident polling loop and workflow coordination
 
 ## Build
 ```bash

@@ -3,7 +3,7 @@ Worker: ConfigMap orchestrator-config + Job coder-worker.
 Faithful to orchestrator/worker.yaml (ConfigMap + Job coder-worker).
 */}}
 {{- $judgeUrl := default "http://llama-server-args-gpu1.inference.svc.cluster.local:8000/v1" (index .Values.supervisor.config "judge-url") -}}
-{{- $coderUrl := default (default "http://llama-server-args-gpu0.inference.svc.cluster.local:8000/v1" (index .Values.supervisor.config "judge-url")) .Values.worker.coderUrl -}}
+{{- $coderUrl := default (index .Values.supervisor.config "coder-url") .Values.worker.coderUrl -}}
 {{- $coderNative := eq $coderUrl "http://llama-server-args-gpu0.inference.svc.cluster.local:8000/v1" -}}
 {{- $judgeNative := eq $judgeUrl "http://llama-server-args-gpu1.inference.svc.cluster.local:8000/v1" -}}
 {{- if kindIs "bool" .Values.worker.coderNativeDownload -}}
@@ -19,6 +19,8 @@ Faithful to orchestrator/worker.yaml (ConfigMap + Job coder-worker).
   "acceptor-url" (required "supervisor.config.acceptor-url must be a trusted HTTPS gateway origin" (index .Values.supervisor.config "acceptor-url"))
   "judge-url" $judgeUrl
   "judge-model" (default "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M" (index .Values.supervisor.config "judge-model"))
+  "coder-url" $coderUrl
+  "coder-model" (default "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M" (index .Values.supervisor.config "coder-model"))
   "worker-roles" (index .Values.worker "worker-roles")
 -}}
 ---
@@ -73,32 +75,20 @@ spec:
               mountPath: /data/task-work
             - name: loop-state
               mountPath: /data/loop-state
+            - name: agent-catalog
+              mountPath: /etc/code-factory/agent-catalog
+              readOnly: true
           env:
-            - name: CODEFACTORY_AUTH_TOKEN
+            - name: CODER_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ default (printf "%s-gateway-auth" .Chart.Name) .Values.gateway.auth.existingSecret }}
-                  key: gateway-auth-token
-            - name: OPENAI_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Chart.Name }}-secrets
-                  key: openai-api-key
+                  name: {{ .Values.worker.auth.existingSecret }}
+                  key: coder-api-key
             - name: ACCEPTOR_URL
               valueFrom:
                 configMapKeyRef:
                   name: {{ .Chart.Name }}-config
                   key: acceptor-url
-            - name: JUDGE_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Chart.Name }}-config
-                  key: judge-url
-            - name: JUDGE_MODEL
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Chart.Name }}-config
-                  key: judge-model
             - name: ALLOWED_REPOS
               value: {{ default .Values.supervisor.config.repo .Values.gateway.config.repo | quote }}
             - name: CODER_URL
@@ -107,10 +97,12 @@ spec:
               value: {{ index .Values.worker "worker-model" | quote }}
             - name: CODER_NATIVE_DOWNLOAD
               value: {{ $coderNative | quote }}
-            - name: JUDGE_NATIVE_DOWNLOAD
-              value: {{ $judgeNative | quote }}
-            - name: JUDGE_ACCEPT_THRESHOLD
-              value: {{ .Values.worker.judgeAcceptThreshold | quote }}
+            - name: WORKER_ROLE
+              value: coder
+            - name: AGENT_CONFIG_VERSION
+              value: {{ .Values.agentCatalog.version | default "1" | quote }}
+            - name: AGENT_CONFIG_HASH
+              value: {{ include "orchestrator.agentCatalogHash" . | quote }}
             - name: TASK_REPO_POLICIES
               value: {{ .Values.worker.repoPolicies | toJson | quote }}
           resources:
@@ -129,5 +121,8 @@ spec:
             sizeLimit: 512Mi
         - name: loop-state
           emptyDir: {}
+        - name: agent-catalog
+          configMap:
+            name: {{ .Chart.Name }}-agent-catalog-{{ include "orchestrator.agentCatalogHash" . | trunc 12 }}
       imagePullSecrets:
         {{- toYaml .Values.imagePullSecrets | nindent 8 }}

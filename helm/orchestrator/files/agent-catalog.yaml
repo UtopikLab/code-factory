@@ -1,0 +1,19 @@
+spec_version: 1
+config_version: "1"
+roles:
+  coder:
+    id: coder
+    instructions: "Produce a focused code patch and validation evidence; do not judge or publish."
+    tools: [ repository_read, candidate_edit, sandbox_validation ]
+    input_contract: [ task_id, repo, issue_number, issue_title ]
+    output_contract: [ task_id, role, patch, edits, validation, base_branch, base_sha ]
+    endpoint_alias: coder
+    max_files: 8
+  judge:
+    id: judge
+    instructions: "Evaluate candidate patch and validation evidence; do not edit files or publish."
+    tools: [ candidate_review ]
+    input_contract: [ task_id, patch, validation ]
+    output_contract: [ score, review ]
+    endpoint_alias: judge
+    max_files: 0

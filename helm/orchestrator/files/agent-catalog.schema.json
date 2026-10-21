@@ -1,0 +1,97 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": [
+        "spec_version",
+        "config_version",
+        "roles"
+    ],
+    "additionalProperties": false,
+    "properties": {
+        "spec_version": {
+            "const": 1
+        },
+        "config_version": {
+            "type": "string",
+            "minLength": 1
+        },
+        "roles": {
+            "type": "object",
+            "required": [
+                "coder",
+                "judge"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "coder": {
+                    "$ref": "#/$defs/role"
+                },
+                "judge": {
+                    "$ref": "#/$defs/role"
+                }
+            }
+        }
+    },
+    "$defs": {
+        "role": {
+            "type": "object",
+            "required": [
+                "id",
+                "instructions",
+                "tools",
+                "input_contract",
+                "output_contract",
+                "endpoint_alias",
+                "max_files"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "instructions": {
+                    "type": "string",
+                    "minLength": 1
+                },
+                "tools": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                        "enum": [
+                            "repository_read",
+                            "candidate_edit",
+                            "sandbox_validation",
+                            "candidate_review"
+                        ]
+                    }
+                },
+                "input_contract": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "output_contract": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "endpoint_alias": {
+                    "enum": [
+                        "coder",
+                        "judge"
+                    ]
+                },
+                "max_files": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8
+                }
+            }
+        }
+    }
+}

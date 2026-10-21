@@ -19,6 +19,8 @@ supervisor:
   image: "ghcr.io/utopiklab/code-factory-supervisor:latest"
   imagePullPolicy: Always
   replicas: 1
+  auth:
+    existingSecret: "orchestrator-supervisor-auth"
   labels:
     app: orchestrator
   # resource defaults (overridable via values)
@@ -27,9 +29,9 @@ supervisor:
   memory: "2Gi"
   memoryLimit: "5Gi"
   # Config consumed by supervisor loop + coder-worker (single source of truth).
-  # config.repo seeds the gateway's ALLOWED_REPO env. "*" means any repo is allowed.
+  # config.repo seeds the gateway allowlist; empty or wildcard values deny all.
   config:
-    repo: "*"
+    repo: ""
     # Reachable HTTPS origin for the coder-worker's ACCEPTOR_URL, independent of
     # gateway.ingress.host when an external TLS proxy rewrites Host.
     acceptor-url: "https://orchestrator.local"
@@ -37,6 +39,17 @@ supervisor:
     # local.secrets-values.yaml file (passed via `--values`), so it is empty here by
     # default and overridden at deploy time.
     openai-api-key: ""
+    pr-github-token: ""
+    supervisor-auth-token: ""
+    allowed-base-branches: ""
+    reviewers: ""
+    judge-url: "http://llama-server-args-gpu1.inference.svc.cluster.local:8000/v1"
+    coder-url: "http://llama-server-args-gpu0.inference.svc.cluster.local:8000/v1"
+    judge-model: "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M"
+    coder-model: "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M"
+    acceptance-threshold: 0.8
+    max-total-attempts: 8
+    worker-parallelism: 1
 
 # Coder-worker (orchestrator-worker Job) image. Kept separate from the
 # supervisor image so the worker Job runs code-factory-worker — never
@@ -51,6 +64,8 @@ supervisor:
 # (the worker Job image + resource config).
 worker:
   name: worker
+  auth:
+    existingSecret: "orchestrator-coder-inference-auth"
   image: "ghcr.io/utopiklab/code-factory-worker:latest"
   imagePullPolicy: Always
   labels:
@@ -91,6 +106,7 @@ gateway:
     size: "1Gi"
     storageClassName: ""
     existingClaim: ""
+    accessMode: ReadWriteOnce
   labels:
     app: orchestrator
     component: gateway
@@ -125,3 +141,6 @@ metrics:
     gatewayNodePort: 30900
     supervisorNodePort: 30901
     workerNodePort: 30902
+
+agentCatalog:
+  version: "1"

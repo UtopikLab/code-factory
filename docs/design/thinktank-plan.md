@@ -4,15 +4,15 @@
 
 > This document started life as a WIP design that needed your sign-off. It has now
 > been **approved** (content sign-off, 2026-10-10) but **is not being built**. The
-> remaining `STILL-OPEN` items are tracked in §8 and are **parameterized** in the
-> manifests (env / ConfigMap) so policy can change without editing the specs.
+> remaining `STILL-OPEN` item is tracked in §8 for validation. Approval records
+> the target architecture; it does not authorize implementation.
 
 **One-line summary:** Turn `k8s-node01` into an always-on, autonomous AI software
-factory — a Qwen2.5 **supervisor/judge** on P40-1 orchestrates Qwen2.5 **coder
-workers** on P40-0 via a LangGraph state machine, evaluates and picks the best
+factory — a Qwen2.5 **supervisor/judge** on P40-1 orchestrates CPU **worker
+Jobs** using the Qwen2.5 coder endpoint on P40-0 via a LangGraph state machine, evaluates and picks the best
 output, retries on failure, and opens a PR through a human-review gate. Runs
 continuously 24/7 as a resident service, independent of VS Code, monitored
-through the existing central Prometheus + new iDRAC telemetry.
+through the selected central Prometheus + Grafana on TrueNAS and iDRAC telemetry.
 
 ---
 
@@ -34,27 +34,16 @@ All facts in this section are **verified on the actual hardware** of
 | **MGMT** | iDRAC (iDRAC9 Enterprise BMC controller) |
 | **DRIVER** | nvidia 580.178.04 (CUDA 13.0 runtime) · nvcc toolchain 12.4 | |
 
-### 1.2 Existing stack (the baseline we build on)
+### 1.2 Target platform constraints and required integrations
 
-| Namespace | Component | Detail |
-| :--- | :--- | :--- |
-yes| `inference` | 2x inference OpenAI-compatible server pods | · P40-0: Qwen2.5-Coder-7B-Instruct-GGUF (coder brain) | · P40-1: Qwen2.5-Coder-7B-Instruct-GGUF (judge brain) |
-| `gpu` | NVIDIA device-plugin DaemonSet | GPU discovery; exposes `nvidia.com/gpu` |
-|  | Traefik Ingress | → `https://inference.local/v1/*` (OpenAI-compatible) |
-|  | Model weights | on PVC `/models/checkpoints/` (PVC `/mnt/k8s-data-ssd`) |
-|  | Current args | `--ctx-size 4096` · AWQ · f8_e4m3 |
-
-- **Central monitoring already exists:** Prometheus + Grafana on a **TrueNAS**
-  server at `http://truenas.utopiklab.lan:30104/` (Prometheus endpoint). We
-  attach to this rather than installing a second stack on the box.
-- **User chats with the LLM via VS Code Copilot Chat (cloud).** Local models in
-  that setup are served by Ollama. The overnight agent is a **separate path** and
-  does not depend on Copilot Chat.
-
-> **Important distinction (verified):** in the user's current Copilot Chat
-> setup, Qwen does **not** work with the VS Code tools. This does **not** affect
-> the overnight agent — it is a different runtime (the `orchestrator`
-> Deployment) with its own tool-calling, and it does not use the VS Code tools.
+| Area | Target constraint or integration |
+| :--- | :--- |
+| Kubernetes | Deploy on the K3s cluster using containerd and the NVIDIA device plugin; GPU scheduling must expose `nvidia.com/gpu`. |
+| Inference | Provide separate OpenAI-compatible coder and judge endpoints, each bound to its assigned P40 and serving Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M with a 32K (32768) context. |
+| Inference routing | Expose the required OpenAI-compatible API through the cluster ingress; keep the judge endpoint available to the supervisor and coder endpoint available to worker Jobs. |
+| Model storage | Keep model weights on persistent storage backed by the node's SSD/NVMe capacity. |
+| Agent runtime | Run the gateway and always-on supervisor as independent services with their own tool execution; the target runtime must not depend on VS Code or a VS Code extension. |
+| Monitoring | Integrate node and iDRAC telemetry with the selected central Prometheus + Grafana backend on TrueNAS. Do not add a second Prometheus/Grafana stack to the node. |
 
 ---
 
@@ -66,81 +55,81 @@ The core idea is a **split-brain** on the two physical GPUs: one brain **writes
 code** (coder), the other **judges** it (supervisor). They are the same model
 family (Qwen2.5), which keeps the judge's evaluations meaningful.
 
-| GPU | Component | Model | Role | Interface | Notes |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| P40-0 | `inference` server (namespace: `inference`) | Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M | Writes code (interactive chat) | Serves `https://inference.local/v1/*` | Left as-is; we do **not** change its model/args. |
-| P40-1 | `llama.cpp` server (namespace: `orchestrator`) | Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M | Judge/supervisor: plan, evaluate, gate, orchestrate the loop | — | Language: LangGraph state machine (`orchestrator` Deployment). |
+| GPU | Target inference role | Model and context | Role | Interface |
+| :--- | :--- | :--- | :--- | :--- |
+| P40-0 | Coder inference endpoint | Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M · 32K (32768) | Supplies code generation to bounded worker Jobs | Role-specific OpenAI-compatible API endpoint |
+| P40-1 | Judge inference endpoint | Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M · 32K (32768) | Supports supervisor planning, evaluation, selection, and retry decisions | Role-specific OpenAI-compatible API endpoint, accessible to the supervisor |
 
-- **Coder brain (P40-0):** a `llama.cpp` inference server running a Qwen2.5
-  coder model. Powers the autonomous workers *and* keeps serving interactive
-  chat. Left as-is; we do **not** change its model/args here.
-- **Judge/supervisor brain (P40-1):** a `llama.cpp` server running a Qwen2.5
-  judge/supervisor model. Plans the work, evaluates every worker output, picks
-  the best, and acts as the pre-action gate before anything is committed.
-- **Task-acceptor gateway Deployment (port 8000):** the task-acceptor is now
-  its own always-on Deployment (`{{ .Chart.Name }}-orchestrator-gateway:latest`),
-  independent of the supervisor loop. The acceptor source (`orchestrator/gateway/server.py`)
-  is baked into a dedicated Docker image (pure stdlib `http.server`, no pip installs)
-  rather than stored in a ConfigMap. The gateway Service routes `:8000` to it and
-  it exposes a single **`POST /api/v1/tasks/spawn`** (auth: `Authorization: token <github-token>`,
-  the workflow PAT from `orchestrator-secrets`), validates the payload, renders
-  `agent-job-template.yaml`, creates the `Job`, and `kubectl waits` for
-  completion before deleting it. The GitHub Actions runner is **not** used — the
-  always-on gateway IS the task-acceptor, so no runner manifest or
-  `RUNNER_TOKEN` secret is needed.
+- **Coder brain (P40-0):** a `llama.cpp` inference server running the approved
+  Qwen2.5 coder model at the approved 32K context. It supplies inference to
+  specialized worker Jobs.
+- **Judge brain (P40-1):** a `llama.cpp` inference server running the same
+  approved model family and context. The supervisor uses it to plan and decompose
+  work, select worker roles, evaluate candidate outputs and validation
+  evidence, decide whether to retry, and control publication through the human
+  review gate.
+- **Always-on task gateway (port 8000):** accepts submissions from an external
+  GitHub workflow, authenticates and validates them, registers each task, and
+  hands accepted tasks to the supervisor. It is the task intake and status
+  boundary; it does **not** create worker Jobs or judge worker results.
 
 ```mermaid
 sequenceDiagram
     participant GH as GitHub Actions
-    participant WF as drain.yaml
-    participant GW as gateway :8000 (task-acceptor)
+    participant GW as gateway :8000
+    participant S as CPU supervisor (uses P40-1 judge endpoint)
     participant K8 as Kubernetes
-    GH->>WF: trigger on issue (opened / assigned)
-    WF->>GW: POST /api/v1/tasks/spawn (auth: token)
-    GW->>GW: validate payload + repo
-    GW->>K8: render agent-job-template.yaml → create Job
-    K8->>K8: run coder Job (kubectl wait --for=jobcomplete)
-    K8->>K8: delete Job
-    K8->>K8: run judge Job (kubectl wait --for=jobcomplete)
-    K8->>K8: delete Job
-    K8-->>GW: {uid, task_id, issue_number, status}
-    GW-->>WF: 202 Accepted
-    note over GW,K8: no RUNNER_TOKEN — the always-on gateway IS the acceptor
+    participant W as specialized workers
+    participant PR as GitHub PR / human reviewer
+    GH->>GW: POST /api/v1/tasks/spawn
+    GW->>GW: authenticate, validate, register task
+    GW->>S: hand off accepted task
+    GW-->>GH: 202 Accepted (task accepted, not completed)
+    S->>S: plan, decompose, select worker roles
+    S->>K8: create bounded worker Jobs
+    K8->>W: run assigned subtasks
+    W-->>S: candidate outputs + validation evidence
+    S->>S: judge/select: retry within limit if needed
+    S->>PR: publish selected result as a PR
+    PR-->>S: human review decision
+    S->>GW: update task status/result
+    GH->>GW: GET /api/v1/tasks/{task_id}
+    GW-->>GH: current task status/result
 ```
 
 #### 2.1.1 Task-acceptor API reference
 
-The task-acceptor is exposed by a dedicated always-on gateway Deployment over
-HTTP on port **8000** (`:8000`). This is a **persistent HTTP surface** for
-acceptor traffic: the drain layer opens the connection, the gateway validates
-and accepts, and then creates the Kubernetes Job.
+The task gateway is an always-on HTTP service on port **8000**. It is the
+external workflow's persistent intake and status boundary. The gateway
+authenticates and validates submissions, registers accepted tasks, and hands
+them to the supervisor. The supervisor owns planning, worker selection, bounded
+Job dispatch, collection and judgment of candidate results, retries, and the PR
+human gate. A `202 Accepted` response means only that the task was accepted for
+processing; it does not mean the task is complete.
 
 ##### Endpoints
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/v1/tasks/spawn` | Register / spawn a task or worker. |
-| `GET` | `/api/v1/tasks/{task_id}` | Poll task status; returns the final result. |
-| `POST` | `/api/v1/tasks/{task_id}` | Report a worker's final evaluation payload. |
+| `POST` | `/api/v1/tasks/spawn` | Authenticate, validate, register, and hand a task to the supervisor. Does not spawn a worker. |
+| `GET` | `/api/v1/tasks/{task_id}` | Read the task's current status and, when available, its selected result and PR details. |
 
 ##### Authentication
 
-All requests to `/api/v1/tasks/spawn` (and any other acceptor endpoint) must carry
-a GitHub token as a Bearer-style token header:
+Task API requests must carry the workflow's GitHub token:
 
 ```
 Authorization: token <github-token>
 ```
 
-The `<github-token>` is the workflow Personal Access Token (PAT) supplied via the
-`orchestrator-secrets` secret. It authenticates the request against the
-acceptor; it is **not** a runner credential — the gateway itself is the
-acceptor, so no `RUNNER_TOKEN` is involved.
+The `<github-token>` authenticates the external workflow to the gateway. The
+gateway validates the repository against its allow-list before registering and
+handing off a task.
 
 ##### Request payload — task registration
 
 The task-registration payload (`POST /api/v1/tasks/spawn`) carries the issue/PR
-trigger payload:
+context needed by the supervisor:
 
 | Field | Meaning |
 | --- | --- |
@@ -149,27 +138,6 @@ trigger payload:
 | `issue_number` | Issue / PR number. |
 | `issue_title` | Issue / PR title. |
 | `issue_url` | Issue / PR URL. |
-
-##### Request payload — worker spawn
-
-When spawning a worker, the payload additionally carries:
-
-| Field | Meaning |
-| --- | --- |
-| `worker_id` | Identifier for the worker. |
-| `payload` | The worker spawn payload (see below). |
-
-The nested `payload` (referred to as `spawn_payload`) carries:
-
-| Field | Meaning |
-| --- | --- |
-| `edits` | Task edits, extracted by `_extract_edits`. |
-| `task_id` | The associated task identifier. |
-| `worker_id` | The spawning worker identifier. |
-| `output` | Worker output. |
-| `changed` | Whether files changed. |
-| `contents` | File contents. |
-| `patch` | The diff patch. |
 
 ##### `task_id` derivation
 
@@ -183,7 +151,7 @@ The `task_id` value is derived in this order of precedence:
 
 | Status | When | Body |
 | --- | --- | --- |
-| `202` | Success — task/worker accepted. | `{status: "accepted", task_id, repo, endpoint: "/api/v1/tasks/spawn"}` |
+| `202` | Task registered and handed to the supervisor for processing; completion is not implied. | `{status: "accepted", task_id, repo, endpoint: "/api/v1/tasks/spawn"}` |
 | `400` | Malformed JSON body. | `{"error": "invalid-json"}` |
 | `403` | Repository not in the allow-list (`repo != ALLOWED_REPO`). | `{"error": "repo-not-allowed"}` |
 
@@ -191,35 +159,52 @@ When `repo` is omitted it defaults to `ALLOWED_REPO` (sourced from the environme
 
 ##### Related endpoints
 
-- **`GET /api/v1/tasks/{task_id}`** — poll task status. On completion it returns
-  `200` carrying the result payload:
+- **`GET /api/v1/tasks/{task_id}`** — poll the supervisor-owned task status.
+  The gateway returns the current lifecycle state; when available, it includes
+  the selected result and PR details. Candidate evaluation and status updates
+  are owned by the supervisor, not submitted as a worker final-evaluation call.
 
   ```
-  {task_id, output, patch, score, review}
+  {task_id, status, result, pull_request_url}
   ```
 
-- **`POST /api/v1/tasks/{task_id}`** — report the final evaluation payload from a
-  worker. The payload is `{task_id, output, patch, score, review}`.
+  Lifecycle status may include `accepted`, `planning`, `running`, `validating`,
+  `retrying`, `awaiting_review`, `completed`, or `failed`. `completed` follows
+  the supervisor's bounded workflow and human-gate outcome; `awaiting_review`
+  indicates that the selected result has been published for human review.
 
 ##### Task lifecycle
 
 ```mermaid
 sequenceDiagram
-    participant W as worker
-  participant SVC as gateway :8000 (task-acceptor)
-    W->>SVC: POST /api/v1/tasks/spawn (worker_id, payload)
-    SVC->>SVC: derive task_id, validate + accept
-    SVC-->>W: 202 {"status":"accepted", ...}
-    W->>SVC: GET /api/v1/tasks/{task_id} (poll)
-    W->>SVC: POST /api/v1/tasks/{task_id} (final evaluation)
-    SVC-->>W: 200 {task_id, output, patch, score, review}
+    participant GH as GitHub workflow
+    participant GW as task gateway
+    participant S as supervisor
+    participant K8 as Kubernetes
+    participant W as specialized workers
+    participant PR as GitHub PR / human reviewer
+    GH->>GW: POST /api/v1/tasks/spawn (task context, auth)
+    GW->>GW: authenticate, validate, register
+    GW->>S: hand off task
+    GW-->>GH: 202 {status: "accepted", task_id}
+    S->>S: plan and decompose: select worker roles
+    S->>K8: create bounded Jobs
+    K8->>W: execute assigned subtasks
+    W-->>S: candidate outputs and validation evidence
+    S->>S: judge/select: retry within configured limit
+    S->>PR: publish selected result as a PR
+    PR-->>S: human review outcome
+    S->>GW: update lifecycle status/result
+    GH->>GW: GET /api/v1/tasks/{task_id}
+    GW-->>GH: current status/result
 ```
 
 ##### Deployment
 
-In the multi-repo deployment, GitHub Actions posts the spawn to
-`/api/v1/tasks/spawn` on the Traefik `web` entrypoint (port **80**). The `TASK_ID`
-is derived from `github.event.issue.number || github.event.pull_request.number`.
+The external GitHub workflow submits issue/PR context to
+`POST /api/v1/tasks/spawn` and may poll `GET /api/v1/tasks/{task_id}`. The
+gateway remains the intake/status boundary; the supervisor is the sole owner of
+worker Job creation and task orchestration.
 
 ### 2.2 The LangGraph loop
 
@@ -230,23 +215,30 @@ the design:
 flowchart TB
     subgraph judge["Judge / Supervisor — P40-1 (llama.cpp + LangGraph state machine)"]
         plan["Plan"]
-        eval["Evaluate each"]
-        pick["Pick BEST"]
+        dispatch["Select roles + dispatch bounded Jobs"]
+        eval["Judge outputs + validation evidence"]
+        pick["Select BEST / retry"]
         gate["Human review gate"]
     end
-    subgraph workers["Workers — P40-0 (coder, llama.cpp)"]
-        w["Spawn N workers in parallel"]
+    subgraph workers["Specialized CPU worker Jobs (use P40-0 coder endpoint)"]
+        w["Execute assigned subtasks"]
     end
-    plan --> w
-    w --> eval
+    plan --> dispatch
+    dispatch --> w
+    w -->|candidate outputs + validation evidence| eval
     eval --> pick
     pick -->|best passes acceptance| gate
-    pick -->|best FAILS| plan
-    gate -->|approved| PR["Open PR"]
-    gate -->|rejected| plan
+    pick -->|best FAILS; within retry limit| plan
+    gate -->|publish selected result| PR["Open PR"]
 ```
 
-**Loop semantics (design intent):** `plan → spawn N workers → evaluate each → pick BEST → (on failure, loop: new plan + fresh workers, bounded by a max iteration count) → on success, open a PR through a human review gate (approve/reject). See §8 for the confirmed iteration count and the worker count `N`.`
+**Loop semantics (design intent):** the supervisor plans and decomposes the
+task, selects specialized roles, and dispatches bounded worker Jobs. Workers
+return candidate outputs and validation evidence. The supervisor judges and
+selects the best candidate, or creates a fresh plan and retries within the
+configured maximum. For a passing candidate, the supervisor publishes a PR and
+waits at the human review gate. See §8 for the confirmed iteration limit and
+worker-count policy `N`.
 
 ### 2.3 Specialized-agent architecture
 
@@ -256,26 +248,29 @@ loop** in which each role gets the model best suited to that task:
 
 | Role | Purpose | Preferred model profile | Why |
 | :--- | :--- | :--- | :--- |
-| **Supervisor / planner** | Reads the issue, decomposes the task, chooses the strategy, sets iteration budget, and decides when to delegate | strongest reasoning model available within the budget | good at planning, judgment, and tool selection |
-| **Coder workers** | Make the actual repo edits, run targeted validation, and produce patch candidates | code-specialized model, smaller context but strong patch quality | good at direct code generation and narrow test-driven edits |
-| **Judge / reviewer** | Scores each worker output against acceptance criteria, checks for regressions, and chooses the best patch | same family as the coder or a stronger review model, but focused on rubric-based evaluation | better at comparing competing outputs than generating them |
-| **Verifier / test runner** | Executes focused build/test commands, interprets failures, and determines if a patch is actually green | compact model with strong tool use, or even deterministic shell/tooling | this role is about validation and signal collection, not creative synthesis |
-| **PR / summary writer** | Prepares the final PR body, changelog summary, and review notes | concise synthesis model | keeps the final artifact human-readable and review-ready |
+| **Supervisor / planner** | Reads the issue, decomposes the task, chooses the strategy, sets iteration budget, selects worker roles, dispatches Jobs, and owns final selection and publication | approved Qwen2.5-Coder-7B model, used for planning and tool selection | good at planning, judgment, and tool selection |
+| **Coder workers** | Make the actual repo edits, run targeted validation, and produce patch candidates | approved Qwen2.5-Coder-7B coder endpoint | good at direct code generation and narrow test-driven edits |
+| **Judge / reviewer** | Provides rubric-based candidate assessments and regression findings to the supervisor; the supervisor makes the final selection | approved Qwen2.5-Coder-7B model, focused on rubric-based evaluation | better at comparing competing outputs than generating them |
+| **Verifier / test runner** | Executes focused build/test commands and returns validation evidence for supervisor review | deterministic shell/tooling | this role is about validation and signal collection, not creative synthesis |
+| **PR / summary writer** | Drafts the PR body, changelog summary, and review notes for supervisor-controlled publication | supervisor using the approved Qwen2.5-Coder-7B 32K endpoint | keeps the final artifact human-readable and review-ready |
 
-**Key architectural rule:** the orchestrator is the coordinator, not a second
-full coder. It should keep the high-level policy and choose the correct agent for
-each subtask, while the specialized agents handle the work in their own lane.
-This gives a better separation of concerns than a one-model loop and allows each
-agent to use the model that fits its job best.
+**Key architectural rule:** the supervisor is the end-to-end task orchestrator
+and final decision maker, not a second full coder. It chooses the specialized
+worker roles and bounded subtasks; workers return candidate outputs and
+validation evidence. Workers do not own task orchestration, final judging, or
+publication. The supervisor selects or retries candidates and controls PR
+publication and the human gate.
 
 **Delegation pattern:**
 
-1. the **supervisor** defines the task and success criteria;
-2. the **coder workers** generate candidate patches;
-3. the **judge** compares those outputs against the acceptance rubric;
-4. the **verifier** confirms the winning patch actually passes the relevant
-   command path;
-5. the **PR writer** turns the accepted patch into a review-ready pull request.
+1. the **supervisor** defines success criteria, decomposes the task, and selects
+  specialized worker roles;
+2. bounded **worker Jobs** produce candidate patches and report validation
+  evidence;
+3. the **supervisor** judges candidates against the acceptance rubric, selects
+  the result, and retries within the configured limit when needed;
+4. specialized validation or summary roles may provide evidence or draft
+  material, but the **supervisor** controls PR publication and the human gate.
 
 This pattern is intentionally **role-based**, not just “one supervisor + N workers.”
 The strongest system-level optimization is not raw model size, but **matching the
@@ -283,30 +278,31 @@ model to the problem type** while preserving a single, bounded human review gate
 
 ### 2.4 Agent model matrix
 
-For a single-node `k8s-node01` cluster with two P40 cards, the model strategy
-should be **role-specific** rather than “one model handles everything.” The best
-fit is to keep the heavier reasoning load on the supervisor/planner, leave the
-bulk of code-generation to smaller, faster worker models, and reserve the human
-review gate for the final pass.
+For a single-node `k8s-node01` cluster with two P40 cards, the target uses the
+approved Qwen2.5-Coder-7B model for both inference endpoints. The roles remain
+specialized through their prompts and orchestration: the supervisor plans and
+judges, while CPU worker Jobs use the coder endpoint for patch generation. The
+human review gate remains the final publication boundary.
 
 | Agent role | Recommended model | Context size | Why this fits | Runtime posture |
 | :--- | :--- | :---: | :--- | :--- |
-| **Supervisor / planner** | **Qwen2.5-Coder-7B-Instruct-GGUF** @ Q4_K_M | **32K** | sufficient for decomposing the issue, choosing the strategy, and routing work within the single-P40 budget; 14B was the earlier proposal, superseded by the 7B resolution (O1/O2) | resident, always-on |
+| **Supervisor / planner** | **Qwen2.5-Coder-7B-Instruct-GGUF** @ Q4_K_M | **32K** | approved target model for decomposing the issue, choosing the strategy, and routing work within the single-P40 budget | resident, always-on |
 | **Coder worker** | **Qwen2.5-Coder-7B-Instruct** (GGUF Q4_K_M) | **32K** | best quality/latency tradeoff for patch generation; low VRAM footprint fits a P40 cleanly | short-lived worker Job |
 | **Judge / reviewer** | **Qwen2.5-Coder-7B-Instruct** (GGUF Q4_K_M) | **32K** | same family as the workers keeps evaluation meaningful without making the judge too expensive | resident, always-on |
-| **Verifier / test runner** | **Qwen2.5-Coder-7B-Instruct** | **16K–32K** | tool-heavy validation needs strong failure interpretation, but usually not full long-context reasoning | short-lived helper |
-| **PR / summary writer** | **Qwen2.5-Coder-7B-Instruct** | **8K–16K** | only needs to synthesize the final change summary and review notes | short-lived helper |
+| **Verifier / test runner** | Deterministic shell/tooling | N/A | executes focused validation and returns evidence; no separate model endpoint is required | short-lived helper |
+| **PR / summary writer** | **Qwen2.5-Coder-7B-Instruct-GGUF** @ Q4_K_M | **32K** | the supervisor uses its approved endpoint to produce the final summary and review notes | supervisor runtime |
 
 **Practical default:**
 
 - **Planner:** 7B, 32K
 - **Coder workers:** 7B, 32K
 - **Judge:** 7B, 32K
-- **Verifier / PR summary:** 7B, 16K or lower
+- **Verifier:** deterministic validation tools
+- **PR summary:** supervisor, 7B at 32K
 
-This preserves a **strong reasoning/planning model** without spending the full
-GPU budget on every role. The heavy model is used only where it adds value;
-cheap specialized models handle the repetitive or narrow tasks.
+This preserves the approved **32K Qwen2.5-Coder-7B** configuration on each
+inference role while assigning planning, code generation, and evaluation to
+distinct agent roles.
 
 ### 2.5 Deployment posture
 
@@ -322,49 +318,27 @@ cheap specialized models handle the repetitive or narrow tasks.
 
 ## 3. Decisions table
 
-Every decision is tagged. `CONFIRMED` = approved to build. `STILL-OPEN` = needs
-your sign-off or a data point before we build.
+Every decision is tagged. `CONFIRMED` = approved target-design choice.
+`STILL-OPEN` = requires validation before implementation is considered.
 
 | # | Decision | Tag | Choice | Key reasoning / open question |
 | :--- | :--- | :--- | :--- | :--- |
 | 1 | **Two-brain split** | ✅ CONFIRMED | P40-0 = Qwen2.5 **coder** (llama.cpp); P40-1 = Qwen2.5 **judge/supervisor** (llama.cpp). Same model family so the judge is meaningful. | VRAM fit: 2× 7B Q4_K_M (~4.68 GB each) fit on **separate** P40s, ~18 GB spare per card. |
-| 2 | **Orchestration framework** | ✅ CONFIRMED | **LangGraph** state machine for the loop. | Supervisor.plan → spawn N workers → each edits/runs → supervisor evaluates each → picks BEST → iterate on failure → open PR (human gate). |
+| 2 | **Orchestration framework** | ✅ CONFIRMED | **LangGraph** state machine for the loop. | Supervisor plans/decomposes → selects roles and dispatches bounded Jobs → workers return candidate patches and validation evidence → supervisor judges/selects, retries within limit, and controls PR publication (human gate). |
 | 3 | **Always-on vs scheduled** | ✅ CONFIRMED | **Always-on `Deployment`** (not CronJob). | Must be ready the instant a task arrives; survives restarts with persistent state. |
-| 4 | **Overnight agent & VS Code** | ✅ CONFIRMED | Overnight agent runs in `orchestrator` Deployment with its own tool-calling; **independent of VS Code / Copilot Chat**. | Copilot Chat is the interactive cloud design/chat path — separate and left untouched. Qwen doesn't drive VS Code tools in that setup, but that does **not** constrain the overnight agent. |
-| 5 | **Interactive chat model** | ✅ CONFIRMED | Keep the **desktop RTX 3080 10 GB** for interactive chat: **Ornith-1.5-9B-GGUF, 64K context**. | 3080 is faster (~20–40 tok/s for a 9B) than CPU and is the interactive path. 7–9B is the sweet spot for a 10 GB card — don't reach for 14B/16B. **Its 64K context is a desktop-interactive concern, unrelated to the overnight agent's context size.** |
-| 6 | **Monitoring** | ✅ CONFIRMED | Reuse **existing central Prometheus + Grafana** on TrueNAS. Add **node-exporter** (whole box) and **iDRAC telemetry** (IPMI — iDRAC9 Enterprise 7.00.00.184, IPMI Version 2.0). | Do **not** add a second Prometheus/Grafana on the box. iDRAC9 Enterprise (IPMI 2.0) → IPMI path chosen; Redfish not used. |
+| 4 | **Agent runtime independence** | ✅ CONFIRMED | The always-on agent runtime has its own tool-calling and is **independent of VS Code and VS Code extensions**. | The agent must operate as a resident service without an editor session or editor-specific tools. |
+| 5 | **Separate desktop interactive-chat workload** | ✅ CONFIRMED | RTX 3080 10 GB with **Ornith-1.5-9B-GGUF, 64K context**. | This separate workload is outside the target agent architecture and does not constrain either P40 endpoint. |
+| 6 | **Monitoring** | ✅ CONFIRMED | Integrate with the selected central Prometheus + Grafana backend on TrueNAS. Add **node-exporter** (whole box) and **iDRAC telemetry** (IPMI — iDRAC9 Enterprise 7.00.00.184, IPMI Version 2.0). | Do **not** add a second Prometheus/Grafana on the box. iDRAC9 Enterprise (IPMI 2.0) → IPMI path chosen; Redfish not used. |
 | 7 | **Resource budget** | ✅ CONFIRMED | Ample headroom; agents CPU/Ram limited by `limits` so they never steal from inference. GPU is the only hard constraint. | CPU 80 cores (orchestrator+workers ~10), RAM 91 GiB (inference holds ~9.4 GiB), 1.9 TB SSD. GPU P40s dedicated to inference/judge. |
 
-### 3.1 The context-window question — re-evaluated
+### 3.1 Approved model and context
 
-**What the agent actually needs.** The overnight LangGraph coder/judge agent is a
-single-threaded reasoning loop: read the issue + repo history, propose a plan,
-run edits/tests, and emit a PR. In practice the state it carries is a handful of
-messages, not a giant document. A typical coding agent (Claude Code-style) works
-comfortably at **8K–32K** tokens; 64K is rarely needed to solve a single issue.
-
-This is the key correction to the earlier design: **64K context was never an
-independent requirement** — it was inherited from the VS Code interactive-chat
-model (Ornith-1.5-9B-GGUF on the desktop RTX 3080, §3.3). The RTX 3080 is a
-*desktop* GPU and the interactive path is a separate concern from the overnight
-agent. **For the overnight P40 agent, the context window should be re-evaluated
-based on the agent's actual needs, not held at 64K as a default.** A smaller
-context window lets us run a *smaller* model at the same VRAM budget — which may
-relax the tight VRAM fit.
-
-So the question reframes from "what big model fits at 64K?" to "what model +
-context window does the agent need for quality?" We can now explore **smaller
-models (7B–14B) at a modest context (8K–16K)** comfortably on a single P40, and
-free the VRAM that 64K + a large model would have consumed.
-
-> **RESOLVED (model + context):** the model is **Qwen2.5-Coder-7B-Instruct-GGUF at
-> Q4_K_M** (~4.68 GB, per O1/O2), and the **context window is locked at 32K
-> (32768)** for **both** the coder and judge brains. VRAM fit is **not** the
-> gating constraint — both 7B models fit comfortably on a single 23 GB P40 with ~18
-> GB spare, so 32K context is a free choice, not a candidate to be validated on
-> device. The judge stays in the Qwen2.5-Coder family (judge = Qwen2.5-Coder-7B).
-> The manifests ship `${IMAGE}` as a placeholder, so worker/supervisor development
-> is not gated on any particular context fit.
+The target coder and judge inference endpoints both use
+**Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M** (~4.68 GB) with a **32K (32768)
+context window**. The model family and context are approved choices, not open
+alternatives. Each 7B model fits comfortably on its assigned 23 GB P40, with
+approximately 18 GB of VRAM headroom. The desktop RTX 3080 interactive-chat
+profile is a separate workload and does not define the agent's context size.
 
 ### 3.2 Model preferences (design constraints)
 
@@ -373,10 +347,10 @@ free the VRAM that 64K + a large model would have consumed.
 - Qwen-compatible (so the judge stays in the same family as the coder).
 - Preference for HF-preferring quantizations.
 - Quality floor: "35B and less gives satisfying quality."
-- **Candidate pinned to Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M** (~4.68 GB, one
-  P40). **RESOLVED** — 7B is the chosen model; it is the largest Qwen2.5-Coder that
-  fits a single P40 at Q4_K_M (14B also fits; 32B does not). On-device validation of
-  7B remains a post-signoff step (see §9 step 2).
+- **Chosen model: Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M** (~4.68 GB, one
+  P40). **RESOLVED** — 7B is the selected model; it fits a single P40 at Q4_K_M.
+  Validation of the selected configuration remains a design-validation activity
+  (see §9).
 
 > **Note on VRAM headroom (independent of this):** the P40 VRAM (23 GB/card, 46
 > GB combined) is the real constraint. The *chosen* models (Qwen2.5-Coder-7B at
@@ -384,8 +358,8 @@ free the VRAM that 64K + a large model would have consumed.
 > with ~18 GB of spare VRAM. The only model that does **not** fit a single P40 is
 > a 32B one, which is why we deliberately avoid it; a 32B Q4_K_M (~26–28 GB)
 > would need *both* P40s stacked (46 GB combined) and would be uncomfortably
-> tight. A 7B–14B model at a smaller context therefore fits one P40 with room to
-> spare.
+> tight. The selected 7B model at the approved 32K context fits one P40 with room
+> to spare.
 
 ---
 
@@ -433,11 +407,11 @@ most of the time is idle.
 | Agent | Always-on? | Active % | Notes |
 | :--- | :--- | :--- | :--- |
 | **Judge** (P40-1, 7B) | Yes, resident | ~5–10% | Bursts: plan → eval → gate, then idle |
-| **Coder** (P40-0, 7B) | Yes, resident | ~5–10% | Bursts: N workers in parallel, then idle |
+| **Coder inference endpoint** (P40-0, 7B) | Yes, resident | ~5–10% | Supplies inference during parallel worker bursts, then idle |
 | **Orchestrator** (CPU, tiny) | Yes, resident | ~5–10% | Tiny LangGraph runtime, always listening |
 | **Workers** (spawned) | No | Short bursts | Minutes long, spawned on demand, then gone |
 
-> **Naming correction:** this is not best described as an “overnight agent” if it is truly resident 24/7. The architecture is a continuous, always-on coding runtime.
+The target is a continuous, always-on coding runtime.
 
 > **Idle judge is not wasted:** a small model resident on an otherwise-idle
 > 23 GB card costs almost nothing, and keeps planning instant the moment a task
@@ -497,26 +471,23 @@ IDLE ───────────────┐   ┌─┐   ────
 
 ---
 
-## 5. Component inventory
+## 5. Desired-system inventory
 
-Namespace-by-namespace inventory of what each piece is. New components are marked
-`[NEW]`; existing components are marked `[EXISTING]`.
+The inventory describes required target components and their responsibilities;
+it is not a deployment-status report.
 
-| Namespace | Component | Role | GPU | State |
-| :--- | :--- | :--- | :--- | :--- |
-| `gpu` | NVIDIA device-plugin DaemonSet | exposes `nvidia.com/gpu` to the scheduler | (host) | `[EXISTING]` |
-| `inference` | `inference-server-gpu0` — inference server (**Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M**) | powers workers + interactive chat | P40-0 | `[EXISTING]` |
-| `inference` | `inference-server-gpu1` — inference judge/supervisor server (**Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M**) | the judge brain | P40-1 | `[NEW]` (same server image, new model) |
-| `orchestrator` | `orchestrator` Deployment | the LangGraph supervisor/judge runtime + tool-calling agent | CPU (0 GPU) | `[NEW]` |
-| `orchestrator` | worker pod(s) | coder agents driven by the supervisor (spawns on demand) | CPU (0 GPU) | `[NEW]` |
-| `monitoring` | `node-exporter` DaemonSet | whole-box CPU/RAM/GPU/disk metrics → central Prometheus | (host) | `[NEW]` |
-| `monitoring` | iDRAC IPMI exporter / Grafana IPMI plugin (iDRAC9 Enterprise, IPMI v2.0) | PERC array, cache battery, SMART, temps, fans, power, events | (host mgmt) | `[NEW]` |
-| `trueNAS` | Prometheus + Grafana | central monitoring (existing) | — | `[EXISTING]` |
-
-> The judge brain (§5, `inference-server-gpu1`) is the **same inference server image**
-> as the coder — it only loads a different model and takes on planning/eval/gate
-> prompts. Its args ConfigMap is the same shape as the coder's but with a
-> re-evaluated context window (O1/O2), not a fixed 64K default.
+| Target namespace / boundary | Component | Role | GPU / placement |
+| :--- | :--- | :--- | :--- |
+| External | GitHub workflow | Authenticated task submission and status polling through the gateway | GitHub Actions |
+| `gpu` | NVIDIA device-plugin DaemonSet | Exposes `nvidia.com/gpu` for scheduling the two inference endpoints | Node-level |
+| `inference` | Coder inference endpoint — Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M, 32K | Provides code-generation inference to worker Jobs | P40-0 |
+| `inference` | Judge inference endpoint — Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M, 32K | Provides judge inference to the supervisor | P40-1 |
+| `orchestrator` | Task gateway | Authenticates, validates, registers, and hands off tasks; reports lifecycle status; does not create Jobs | CPU service |
+| `orchestrator` | LangGraph supervisor runtime | Plans/decomposes tasks, chooses roles, dispatches bounded Jobs, judges/selects candidates, retries within limits, and controls PR/human gate | Always-on CPU Deployment; uses judge endpoint |
+| `orchestrator` | Bounded worker Jobs | Execute assigned coding roles; return candidate patches and validation evidence | On-demand CPU Jobs; use coder endpoint |
+| `monitoring` | `node-exporter` | Exposes host CPU, memory, GPU, disk, and I/O telemetry to central Prometheus | Node-level |
+| `monitoring` | iDRAC IPMI telemetry integration (`ipmi_exporter` or Grafana IPMI plugin) | Exposes PERC array, cache battery, drive/SMART, temperature, fan, power, and event telemetry | iDRAC management network |
+| TrueNAS | Central Prometheus + Grafana | Selected monitoring backend for scraped telemetry and dashboards | External monitoring platform |
 
 ---
 
@@ -526,11 +497,11 @@ Namespace-by-namespace inventory of what each piece is. New components are marke
 
 | Phase | Actor | On success | On failure |
 | :--- | :--- | :--- | :--- |
-| **1. Plan** | supervisor (P40-1) | → emit plan, spawn workers | regenerate plan, retry (bounded) |
-| **2. Execute** | workers (P40-0) | → emit output | mark worker failed, continue others |
-| **3. Evaluate** | supervisor (P40-1) | → score each output | re-score; may re-run evaluation |
-| **4. Pick BEST** | supervisor (P40-1) | → choose best, check acceptance | if best fails → iterate loop |
-| **5. Gate** | supervisor (P40-1) | → open PR, wait for human | do not merge; escalate to human |
+| **1. Plan** | CPU supervisor (uses P40-1 judge endpoint) | → emit plan, spawn workers | regenerate plan, retry (bounded) |
+| **2. Execute** | CPU worker Jobs (use coder endpoint on P40-0) | → emit output | mark worker failed, continue others |
+| **3. Evaluate** | CPU supervisor (uses P40-1 judge endpoint) | → score each output | re-score; may re-run evaluation |
+| **4. Pick BEST** | CPU supervisor (uses P40-1 judge endpoint) | → choose best, check acceptance | if best fails → iterate loop |
+| **5. Gate** | CPU supervisor (uses P40-1 judge endpoint) | → open PR, wait for human | do not merge; escalate to human |
 
 
 ```mermaid
@@ -556,6 +527,10 @@ stateDiagram-v2
 - **Persistent state:** if the node restarts mid-loop, the supervisor resumes the
   current task from its saved state (last plan / partial outputs) rather than
   re-planning from zero.
+ 
+  This preserves the approved **32K Qwen2.5-Coder-7B** configuration on each
+  inference role while assigning planning, code generation, and evaluation to
+  distinct agent roles.
 
 ### 6.3 The human review gate
 
@@ -577,8 +552,9 @@ stateDiagram-v2
 
 ## 7. Monitoring plan
 
-**Principle (CONFIRMED):** attach to the **existing central Prometheus + Grafana**
-on TrueNAS. **Do not** install a second Prometheus/Grafana stack on `k8s-node01`.
+**Principle (CONFIRMED):** integrate with the selected central Prometheus +
+Grafana backend on TrueNAS. **Do not** install a second Prometheus/Grafana stack
+on `k8s-node01`.
 
 ```
    k8s-node01  ──node-exporter──▶  central Prometheus (TrueNAS)
@@ -598,14 +574,13 @@ One DaemonSet exporting whole-box metrics to the central Prometheus:
 - **GPU:** per-P40 utilization, VRAM used, power, temperature (if exposed).
 - **Disk:** `/mnt/k8s-data-ssd` + `/mnt/k8s-local-nvme` usage + I/O.
 
-### 7.2 Hardware-controller telemetry (IPMI / Redfish)
+### 7.2 iDRAC hardware telemetry (IPMI)
 
 Target controller: **BMC-managed storage/thermal/power telemetry**.
 
-| Controller capability | Transport | What it exposes |
+| Target controller | Transport | What it exposes |
 | :--- | :--- | :--- |
-| IPMI-capable controller | **IPMI** (`ipmi_exporter` or Grafana IPMI plugin) | Array state, cache battery health, drive faults, SMART, temps, fans, power, voltages, system events |
-| Redfish-capable controller | Redfish Remote Write | Same fields via Redfish |
+| iDRAC9 Enterprise (IPMI v2.0) | **IPMI** (`ipmi_exporter` or Grafana IPMI plugin) | Array state, cache battery health, drive faults, SMART, temps, fans, power, voltages, system events |
 
 **Grafana panels (design intent):**
 
@@ -618,47 +593,43 @@ Target controller: **BMC-managed storage/thermal/power telemetry**.
 
 ### 7.3 Open questions on monitoring
 
-- **Controller transport check — RESOLVED:** target controller supports IPMI telemetry, so the IPMI path is valid (see §8 O3).
-- Which transport the central Prometheus can receive (Remote Write vs IPMI).
-- Whether the existing Grafana has a suitable dashboard, or a new one is built.
+- **Controller transport — RESOLVED:** the target controller supports IPMI telemetry, so the IPMI path is selected (see §8 O3).
+- Validate the scrape/exporter network path from the target node to central Prometheus.
+- Determine whether to adapt a Grafana dashboard or provide a target-specific dashboard.
 
 ---
 
-## 8. Open questions / still-WIP
+## 8. Open validation item
 
-| # | Question | Why it gates building | Status |
+| # | Question | Validation purpose | Status |
 | :--- | :--- | :--- | :--- |
-| O1 | **Coder model + context window** | Pick the coder model and its context window based on the agent's actual needs. **64K was never a requirement** (it came from the desktop RTX 3080 interactive-chat model). | **RESOLVED — model Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M (~4.68 GB, fits one P40); context window locked at 32K (32768) for both brains. VRAM fit is not the gate — both 7B models fit a 23 GB P40 with ~18 GB spare. 32K is chosen, not a candidate to be validated on-device.** |
-| O2 | **Judge/supervisor model + context window** | Same family as O1 for the judge (P40-1). Re-evaluated per the agent's needs, not held at 64K. | **RESOLVED — same Qwen2.5-Coder family (judge = Qwen2.5-Coder-7B), same VRAM fit (@ Q4_K_M on the P40). Context window locked at 32K (32768), matching the coder.** |
-| O3 | **Controller telemetry transport** | Redfish vs IPMI changes the whole monitoring ingest path. | **RESOLVED — use the IPMI telemetry path where available; monitoring ingest is IPMI-based via `ipmi_exporter` / Grafana IPMI plugin.** |
+| O1 | **Coder model + context window** | Validate the selected model and context configuration against the agent workload. | **RESOLVED — model Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M (~4.68 GB, fits one P40); context window locked at 32K (32768) for both brains. VRAM fit is not the gate — both 7B models fit a 23 GB P40 with ~18 GB spare.** |
+| O2 | **Judge/supervisor model + context window** | Validate that the judge endpoint uses the approved model and context on P40-1. | **RESOLVED — same Qwen2.5-Coder family (judge = Qwen2.5-Coder-7B), same VRAM fit (@ Q4_K_M on the P40). Context window locked at 32K (32768), matching the coder.** |
+| O3 | **Controller telemetry transport** | Validate the selected IPMI telemetry connectivity and monitoring integration. | **RESOLVED — use the IPMI telemetry path where available; monitoring ingest is IPMI-based via `ipmi_exporter` / Grafana IPMI plugin.** |
 | O4 | **Human gate policy** | Which PR trigger, reviewer, allowed branches, how the gate is enforced. | **CONFIRMED — human gate via Pull Request (open the agent's work as a PR for human review). Agents may use a **git worktree** if that is more efficient.** |
-| O5 | **Max loop iterations** | Bounds the retry budget / overnight runtime. | **CONFIRMED — 8 loop iterations (auto-tune if possible).** |
+| O5 | **Max loop iterations** | Bounds the retry budget and autonomous runtime. | **CONFIRMED — 8 loop iterations (auto-tune if possible).** |
 | O6 | **Worker count N** | Parallelism budget vs CPU `limits`. | **CONFIRMED — auto-tune if possible (worker count N to be tuned vs the ~10-core CPU budget / CPU `limits`).** |
-| O7 | **Tool set for the overnight agent** | Which tools the autonomous agent may call (file ops, git, shell, kubectl, PR). | **RESOLVED — **minimal tools as possible**, with **specialized / role-based agents** as possible.** |
-| O8 | **LangGraph runtime image / deps** | Confirm the runtime that hosts the supervisor + coder tool-calling. | **STILL-OPEN (research needed) — the LangGraph runtime image + deps still need research (runtime image + deps to be pinned; manifests keep `${IMAGE}` as a placeholder).** |
+| O7 | **Tool set for the always-on agent** | Limit capabilities to the tools needed for each role (file operations, git, validation, and controlled PR operations). | **RESOLVED — use the minimum necessary tools with specialized, role-based agents where useful.** |
+| O8 | **LangGraph runtime image / deps** | Select and validate the runtime that hosts the supervisor and its tool-calling. | **STILL-OPEN (research needed) — identify and pin the LangGraph runtime image and dependencies during design validation.** |
 
-**Summary:** O1/O2 **resolved** — model is **Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M (~4.68 GB, fits comfortably on one 23 GB P40)** and the context window is **locked at 32K (32768)** for both brains (VRAM fit is not the gate — both 7B models fit a P40 with ~18 GB spare). O3 resolved — use a **generic IPMI telemetry path** where available (not Redfish-only). O4 confirmed — **human gate via PR** (agents may use a git worktree if more efficient). O5 confirmed at **8 loop iterations (auto-tune if possible)**. O6 confirmed — **auto-tune if possible**. O7 resolved — **minimal tools, specialized/role-based agents**. O8 still needs research (LangGraph runtime image + deps). Net: O1–O7 resolved, leaving a single research pass (O8). The manifests ship `${IMAGE}` as a placeholder, so worker/supervisor code can be developed against the pinned model + 32K context.
+**Summary:** O1/O2 **resolved** — model is **Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M (~4.68 GB, fits comfortably on one 23 GB P40)** and the context window is **locked at 32K (32768)** for both brains (VRAM fit is not the gate — both 7B models fit a P40 with ~18 GB spare). O3 resolved — use the selected **IPMI telemetry path** via `ipmi_exporter` / Grafana IPMI plugin. O4 confirmed — **human gate via PR** (agents may use a git worktree if more efficient). O5 confirmed at **8 loop iterations (auto-tune if possible)**. O6 confirmed — **auto-tune if possible**. O7 resolved — **minimum necessary tools with specialized/role-based agents**. O8 remains a design-validation item: select and pin the LangGraph runtime image and dependencies. O1–O7 are resolved; no implementation is authorized by this approval.
 
 ---
 
-## 9. Next steps (gated on your validation — DO NOT BUILD YET)
+## 9. Validation steps (implementation is not authorized)
 
-1. **Review this document and approve it.** No building starts until you sign off.
-2. **Confirm the 32K (32768) context window** for the coder + judge models already
-   chosen (Qwen2.5-Coder-7B-Instruct-GGUF @ Q4_K_M) — resolves O1/O2. **32K is the
-   chosen window for both brains; VRAM fit is not the gate** (both 7B models fit a
-   single P40 with ~18 GB spare).
-3. **Confirm hardware telemetry transport** on the target node — resolves O3:
-  choose **IPMI** where available; otherwise use Redfish.
-4. **Decide the human-gate policy** — PR trigger, reviewer, allowed branches (O4;
-   confirmed: human gate via PR).
-5. **Set the loop parameters** — max iterations (O5; confirmed: 8, auto-tune if
-   possible) and worker count `N` (O6; auto-tune if possible).
-7. **Finalize the always-on agent's tool set** (O7; resolved: minimal tools,
-   specialized/role-based agents) and research the LangGraph runtime image + deps
-   (O8; still needs research).
-8. **Approve the design.** Once signed off, proceed to build in the usual
-   8h-design / 24/7-autonomous-agent / 8h-validate cadence.
+1. Validate the locked model and 32K context configuration for both P40 roles.
+2. Validate IPMI telemetry connectivity and the integration path to central
+  Prometheus; confirm the dashboard requirements in Grafana.
+3. Record the PR trigger, reviewer, and allowed-branch policy for the confirmed
+  human review gate.
+4. Validate the bounded retry limit of 8 iterations and the worker-count tuning
+  policy against the approved CPU limits.
+5. Select and pin the LangGraph runtime image and dependencies (O8), and finalize
+  the minimal role-based tool set (O7).
+
+These are validation activities only. Building remains out of scope until
+separately authorized.
 
 ---
 

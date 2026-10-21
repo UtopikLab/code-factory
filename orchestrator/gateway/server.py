@@ -8,7 +8,6 @@ import logging
 import os
 import re
 import secrets
-import sqlite3
 import ssl
 import sys
 import threading
@@ -17,11 +16,40 @@ import urllib.error
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
+from security import (
+    CredentialError,
+)
+from security import (
+    identity as _security_identity,
+)
+from security import (
+    is_external_workflow_payload as _security_is_external_workflow_payload,
+)
+from security import (
+    parse_allowed_repos as _security_parse_allowed_repos,
+)
+from security import (
+    reject_credentials as _security_reject_credentials,
+)
+from security import (
+    repo_allowed as _security_repo_allowed,
+)
+from security import (
+    validate_assigned_task_id as _security_validate_assigned_task_id,
+)
+from security import (
+    validate_repository as _security_validate_repository,
+)
+from task_api import TaskAPI
+from task_store import connect_task_database, retry_lifecycle
+
+__all__ = ["copy", "hashlib", "parse_qs", "re", "secrets", "uuid"]
 
 TOKEN = os.environ.get("CODEFACTORY_AUTH_TOKEN", "")
+SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_AUTH_TOKEN", "")
 
 logger = logging.getLogger("gateway")
 # StreamHandler with flushLevel=DEBUG forces every record to flush immediately.
@@ -36,23 +64,15 @@ logger.setLevel(logging.INFO)
 logger.propagate = False
 
 def _parse_allowed_repos(raw):
-    """Return None for 'any repo', else a set of allowed owner/name repositories.
-
-    An empty or whitespace-only value means 'allow all' (None), matching the
-    wildcard default so that leaving the variable unset also opens the gateway.
-    """
-    raw = (raw or "").strip()
-    if raw == "" or raw == "*":
-        return None
-    return {r for r in (x.strip() for x in raw.split(",")) if r}
+    return _security_parse_allowed_repos(raw)
 
 # ALLOWED_REPOS controls which repositories may push tasks to the orchestrator.
-#   - "*"            -> accept tasks from ANY repository (no validation)
+#   - "*"            -> deny all; wildcards are intentionally unsupported
 #   - "a/b,c/d"      -> whitelist of specific owner/name repositories
 #   - "a/b"          -> whitelist of a single repository
 # The legacy "ALLOWED_REPO" variable is accepted for backward compatibility.
 ALLOWED_REPOS_RAW = os.environ.get(
-    "ALLOWED_REPOS", os.environ.get("ALLOWED_REPO", "*")
+    "ALLOWED_REPOS", os.environ.get("ALLOWED_REPO", "")
 )
 ALLOWED_REPOS = _parse_allowed_repos(ALLOWED_REPOS_RAW)
 
@@ -62,10 +82,6 @@ WORKER_JOB_TEMPLATE = os.environ.get("WORKER_JOB_TEMPLATE", "orchestrator-worker
 SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 SA_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 DB_INIT_LOCK = threading.Lock()
-
-
-class CredentialError(Exception):
-    pass
 
 
 class KubernetesError(Exception):
@@ -84,43 +100,11 @@ def _secret_path(name=""):
 
 
 def _reject_credentials(payload, *tokens):
-    serialized = json.dumps(payload)
-    if (any(token and token in serialized for token in (*tokens, TOKEN))
-            or re.search(r"(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]{16,}", serialized)):
-        raise ValueError("credential-in-payload")
-    def inspect(value):
-        if isinstance(value, dict):
-            for key, child in value.items():
-                if re.search(r"token|secret|password|authorization|credential", key, re.IGNORECASE):
-                    raise ValueError("credential-in-payload")
-                inspect(child)
-        elif isinstance(value, list):
-            for child in value:
-                inspect(child)
-    inspect(payload)
+    return _security_reject_credentials(payload, *tokens, global_token=TOKEN)
 
 
 def _validate_repository(repo, issue, token):
-    if not repo or not token or len(token) > 4096 or any(char.isspace() for char in token) or token == TOKEN:
-        raise CredentialError("repository-credential-required")
-    try:
-        metadata = _github("GET", "/repos/" + quote(repo, safe="/"), token=token)
-        if metadata.get("full_name", "").lower() != repo.lower():
-            raise CredentialError("repository-identity-mismatch")
-        if metadata.get("permissions", {}).get("push") is not True or metadata.get("archived"):
-            raise CredentialError("repository-write-access-unverified")
-        for path in ("/contents", "/pulls?per_page=1", "/issues?per_page=1"):
-            _github("GET", "/repos/" + quote(repo, safe="/") + path, token=token)
-        if issue:
-            remote = _github("GET", f"/repos/{quote(repo, safe='/')}/issues/{issue}", token=token)
-            if remote.get("number") != issue or "pull_request" in remote or remote.get("html_url", "").lower() != f"https://github.com/{repo}/issues/{issue}".lower():
-                raise CredentialError("repository-issue-mismatch")
-    except urllib.error.HTTPError as error:
-        if error.code in (401, 403, 404):
-            raise CredentialError("repository-credential-denied") from None
-        raise CredentialError("repository-validation-unavailable") from None
-    except (OSError, ValueError, TypeError, AttributeError):
-        raise CredentialError("repository-validation-unavailable") from None
+    return _security_validate_repository(repo, issue, token, _github, TOKEN)
 
 
 def _create_task_secret(task_id, repo, token, callback):
@@ -135,95 +119,38 @@ def _create_task_secret(task_id, repo, token, callback):
                  (("repository-token", token), ("callback-token", callback),
                   ("expires-at", expires_at))},
     }
-    _k8s_request("POST", _secret_path(), secret)
-    return name
-
-
-def _task_repository_token(task, check_expiry=True):
-    if not task["credential_ref"]:
-        raise CredentialError("credential-missing")
-    try:
-        secret = _k8s_request("GET", _secret_path(task["credential_ref"]))
-    except KubernetesError as error:
-        if error.status == 404:
-            raise CredentialError("credential-missing") from None
-        raise
-    _validate_secret_binding(task, secret)
-    metadata = secret["metadata"]
-    try:
-        if check_expiry and float(metadata["annotations"]["expires-at"]) <= time.time():
-            raise CredentialError("credential-expired")
-        return base64.b64decode(secret["data"]["repository-token"], validate=True).decode()
-    except (ValueError, KeyError, UnicodeError):
-        raise CredentialError("credential-invalid") from None
-
-
-def _validate_secret_binding(task, secret):
-    metadata = secret.get("metadata", {})
-    if metadata.get("labels", {}).get("code-factory-task") != task["task_id"] or metadata.get("annotations", {}).get("repository") != task["repo"].lower():
-        raise CredentialError("credential-binding-mismatch")
-    try:
-        callback = base64.b64decode(secret["data"]["callback-token"], validate=True)
-    except (ValueError, KeyError):
-        raise CredentialError("credential-invalid") from None
-    if not task["callback_hash"] or not hmac.compare_digest(hashlib.sha256(callback).hexdigest(), task["callback_hash"]):
-        raise CredentialError("credential-binding-mismatch")
+    response = _k8s_request("POST", _secret_path(), secret)
+    uid = response.get("metadata", {}).get("uid")
+    if not isinstance(uid, str) or not uid:
+        raise KubernetesError()
+    return uid
 
 
 def _delete_task_secret(task):
     if task["credential_ref"]:
+        if not task["credential_uid"]:
+            raise KubernetesError(409)
         try:
-            secret = _k8s_request("GET", _secret_path(task["credential_ref"]))
-            _validate_secret_binding(task, secret)
-            uid = secret["metadata"].get("uid")
-            options = {"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": uid}} if uid else None
-            _k8s_request("DELETE", _secret_path(task["credential_ref"]), options)
+            _k8s_request("DELETE", _secret_path(task["credential_ref"]), {
+                "apiVersion": "v1", "kind": "DeleteOptions",
+                "preconditions": {"uid": task["credential_uid"]},
+            })
         except KubernetesError as error:
             if error.status != 404:
                 raise
 
 
 def _identity(payload):
-    nested = payload.get("payload", {})
-    repo = payload.get("repo") or nested.get("repo")
-    if any(value is not None and not isinstance(value, str) for value in (payload.get("repo"), nested.get("repo"))):
-        raise ValueError("invalid-repository")
-    if payload.get("repo") and nested.get("repo") and payload["repo"].lower() != nested["repo"].lower():
-        raise ValueError("repository-mismatch")
-    issue = nested.get("issue_number", payload.get("issue_number"))
-    if repo is not None and (not isinstance(repo, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)
-                             or any(part in (".", "..") for part in repo.split("/"))):
-        raise ValueError("invalid-repository")
-    if ("issue_number" in payload or "issue_number" in nested) and (type(issue) is not int or issue <= 0 or not repo):
-        raise ValueError("invalid-issue")
-    if "issue_number" in nested and "issue_number" in payload and nested["issue_number"] != payload["issue_number"]:
-        raise ValueError("issue-mismatch")
-    return repo, issue
+    return _security_identity(payload)
 
 
 def _repo_allowed(repo):
-    return not repo or ALLOWED_REPOS is None or repo.lower() in {entry.lower() for entry in ALLOWED_REPOS}
+    return _security_repo_allowed(repo, ALLOWED_REPOS)
 
 
 def _task_db():
     path = os.environ.get("TASK_DB_PATH", "/data/tasks/tasks.sqlite3")
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with DB_INIT_LOCK:
-        db = sqlite3.connect(path, timeout=30, isolation_level=None)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("""CREATE TABLE IF NOT EXISTS tasks (
-            task_id TEXT PRIMARY KEY, repo TEXT, issue INTEGER, status TEXT NOT NULL,
-            payload TEXT NOT NULL, result TEXT, job TEXT, lifecycle TEXT NOT NULL DEFAULT 'pending',
-            sync_started REAL NOT NULL DEFAULT 0)""")
-        columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
-        for name in ("credential_ref", "callback_hash", "retry_of", "retry_key"):
-            if name not in columns:
-                db.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT")
-        if "credential_cleanup" not in columns:
-            db.execute("ALTER TABLE tasks ADD COLUMN credential_cleanup TEXT NOT NULL DEFAULT 'retained'")
-        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS task_retry_parent ON tasks(retry_of) WHERE retry_of IS NOT NULL")
-    return db
+    return connect_task_database(path, DB_INIT_LOCK)
 
 
 def _github(method, path, body=None, *, token):
@@ -241,114 +168,15 @@ def _github(method, path, body=None, *, token):
 
 
 def _sync_lifecycle(task):
-    if not task["issue"]:
-        return
-    repo, issue = task["repo"], task["issue"]
-    if not _repo_allowed(repo):
-        raise ValueError("repo-not-allowed")
-    token = _task_repository_token(task)
-    def github(method, path, body=None):
-        return _github(method, path, body, token=token)
-    base = f"/repos/{quote(repo, safe='/')}/issues/{issue}"
-    remote = github("GET", base)
-    if remote.get("number") != issue or remote.get("html_url", "").lower() != f"https://github.com/{repo}/issues/{issue}".lower() or "pull_request" in remote:
-        raise ValueError("github-issue-mismatch")
-    labels = github("GET", base + "/labels?per_page=100")
-    names = {label["name"] for label in labels}
-    for name in ("queued", "done" if task["status"] == "failed" else "failed"):
-        if name in names:
-            github("DELETE", base + "/labels/" + quote(name, safe=""))
-    github("POST", base + "/labels", {"labels": ["done" if task["status"] == "completed" else "failed"]})
-    result = json.loads(task["result"])
-    marker = f"<!-- code-factory:{task['task_id']} -->"
-    message = f"{marker}\nCode Factory: {task['status']}."
-    if task["status"] == "completed" and result.get("pr_url"):
-        message += "\n" + result["pr_url"]
-    found = False
-    for page in range(1, 11):
-        comments = github("GET", base + f"/comments?per_page=100&page={page}")
-        if any(marker in comment.get("body", "") for comment in comments):
-            found = True
-            break
-        if len(comments) < 100:
-            break
-    else:
-        raise ValueError("comment-history-too-large")
-    if not found:
-        github("POST", base + "/comments", {"body": message})
+    return None
 
 
 def _retry_lifecycle(task_id):
-    db = _task_db()
-    try:
-        db.execute("BEGIN IMMEDIATE")
-        task = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-        if task["lifecycle"] == "synced" or (task["lifecycle"] == "syncing" and time.time() - task["sync_started"] < 1800):
-            db.commit()
-            return task["lifecycle"]
-        db.execute("UPDATE tasks SET lifecycle='syncing', sync_started=? WHERE task_id=?", (time.time(), task_id))
-        db.commit()
-        fatal = {"credential-missing", "credential-expired", "credential-denied", "credential-binding-mismatch", "credential-invalid"}
-        try:
-            if task["lifecycle"] in fatal:
-                raise CredentialError(task["lifecycle"])
-            if task["lifecycle"] != "cleanup-pending":
-                _sync_lifecycle(task)
-            db.execute("UPDATE tasks SET lifecycle='cleanup-pending' WHERE task_id=?", (task_id,))
-            db.execute("UPDATE tasks SET credential_cleanup='pending' WHERE task_id=?", (task_id,))
-            _delete_task_secret(task)
-            db.execute("UPDATE tasks SET credential_cleanup='deleted' WHERE task_id=?", (task_id,))
-            status = "synced"
-        except CredentialError as error:
-            status = str(error)
-        except urllib.error.HTTPError as error:
-            status = "credential-denied" if error.code in (401, 403, 404) else "pending"
-        except Exception:  # noqa: BLE001
-            logger.warning("github-lifecycle-pending task=%s", task_id)
-            status = "cleanup-pending" if db.execute("SELECT lifecycle FROM tasks WHERE task_id=?", (task_id,)).fetchone()[0] == "cleanup-pending" else "pending"
-        if status in fatal:
-            db.execute("UPDATE tasks SET credential_cleanup='pending' WHERE task_id=?", (task_id,))
-            try:
-                _delete_task_secret(task)
-                db.execute("UPDATE tasks SET credential_cleanup='deleted' WHERE task_id=?", (task_id,))
-            except (KubernetesError, CredentialError):
-                logger.warning("credential-cleanup-pending task=%s", task_id)
-        db.execute("UPDATE tasks SET lifecycle=? WHERE task_id=?", (status, task_id))
-        return status
-    finally:
-        db.close()
+    return retry_lifecycle(task_id, _task_db, _delete_task_secret, KubernetesError, logger)
 
 
 def _is_external_workflow_payload(payload):
-    """True when payload appears to originate from the external drain workflow."""
-    if not isinstance(payload, dict):
-        return False
-    if "worker_id" in payload:
-        return False
-    nested = payload.get("payload")
-    return (
-        "name" in payload
-        and "ref" in payload
-        and isinstance(nested, dict)
-        and "issue_number" in nested
-    )
-
-
-def _sanitize_dns_label(value):
-    """Return a RFC1123-compatible DNS label fragment."""
-    cleaned = re.sub(r"[^a-z0-9-]", "-", str(value).lower())
-    cleaned = re.sub(r"-+", "-", cleaned).strip("-")
-    return cleaned or "unknown"
-
-
-def _build_worker_job_name(task_id):
-    """Build unique, <=63-char Job name prefixed with orchestrator-worker."""
-    prefix = "orchestrator-worker"
-    ts = str(int(time.time()))
-    task_part = _sanitize_dns_label(task_id)
-    max_task_part = max(63 - (len(prefix) + len(ts) + 2), 1)
-    task_part = task_part[:max_task_part].rstrip("-") or "x"
-    return f"{prefix}-{task_part}-{ts}"
+    return _security_is_external_workflow_payload(payload)
 
 
 def _k8s_base_url():
@@ -393,95 +221,8 @@ def _k8s_request(method, path, body=None):
 
 
 def _validate_assigned_task_id(task_id):
-    if type(task_id) is int and task_id >= 0:
-        task_id = str(task_id)
-    if (
-        not isinstance(task_id, str)
-        or task_id == "unknown"
-        or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?", task_id)
-    ):
-        raise ValueError("invalid-assigned-task-id")
-    return task_id
+    return _security_validate_assigned_task_id(task_id)
 
-
-def _task_job_ttl_seconds():
-    try:
-        ttl = int(os.environ.get("TASK_JOB_TTL_SECONDS_AFTER_FINISHED", "86400"))
-    except ValueError:
-        raise ValueError("TASK_JOB_TTL_SECONDS_AFTER_FINISHED must be an integer from 1 to 604800") from None
-    if not 1 <= ttl <= 604800:
-        raise ValueError("TASK_JOB_TTL_SECONDS_AFTER_FINISHED must be an integer from 1 to 604800")
-    return ttl
-
-
-def _clone_job_from_template(template_job, namespace, job_name, task_id, payload=None):
-    template_spec = template_job.get("spec", {})
-    source_labels = template_job.get("metadata", {}).get("labels", {}) or {}
-    labels = dict(source_labels)
-    labels["task-id"] = str(task_id)
-    labels["triggered-by"] = "gateway"
-
-    pod_template = template_spec.get("template", {}) or {}
-    pod_meta = dict(pod_template.get("metadata") or {})
-    pod_labels = dict(pod_meta.get("labels") or {})
-    pod_labels.update(labels)
-    for key in (
-        "controller-uid",
-        "batch.kubernetes.io/controller-uid",
-        "job-name",
-        "batch.kubernetes.io/job-name",
-    ):
-        labels.pop(key, None)
-        pod_labels.pop(key, None)
-    pod_meta["labels"] = pod_labels
-    pod_template = dict(pod_template)
-    pod_template["metadata"] = pod_meta
-
-    if payload is not None:
-        assigned_id = _validate_assigned_task_id(task_id)
-        pod_spec = copy.deepcopy(pod_template.get("spec", {}))
-        coder = next(container for container in pod_spec.get("containers", []) if container["name"] == "coder")
-        coder["env"] = [
-            entry for entry in coder.get("env", [])
-            if entry["name"] not in ("ASSIGNED_TASK_ID", "ASSIGNED_TASK_PAYLOAD", "GITHUB_TOKEN", "REPO_GITHUB_PAT", "TASK_CALLBACK_TOKEN", "TASK_REPOSITORY", "TASK_CREDENTIAL_EXPIRES_AT")
-        ] + [
-            {"name": "ASSIGNED_TASK_ID", "value": assigned_id},
-            {"name": "ASSIGNED_TASK_PAYLOAD", "value": json.dumps(payload)},
-            {"name": "TASK_REPOSITORY", "value": _identity(payload)[0]},
-                        *[{"name": name, "valueFrom": {"secretKeyRef": {"name": "task-credential-" + assigned_id, "key": key}}}
-                            for name, key in (("REPO_GITHUB_PAT", "repository-token"), ("TASK_CALLBACK_TOKEN", "callback-token"), ("TASK_CREDENTIAL_EXPIRES_AT", "expires-at"))],
-        ]
-        pod_template["spec"] = pod_spec
-
-    return {
-        "apiVersion": "batch/v1",
-        "kind": "Job",
-        "metadata": {
-            "name": job_name,
-            "namespace": namespace,
-            "labels": labels,
-        },
-        "spec": {
-            "parallelism": 1 if payload is not None else template_spec.get("parallelism"),
-            "completions": 1 if payload is not None else template_spec.get("completions"),
-            "backoffLimit": 0 if payload is not None else template_spec.get("backoffLimit"),
-            "ttlSecondsAfterFinished": _task_job_ttl_seconds(),
-            "template": pod_template,
-        },
-    }
-
-
-def _create_worker_job(namespace, template_name, task_id, payload):
-    template_path = f"/apis/batch/v1/namespaces/{namespace}/jobs/{template_name}"
-    template_job = _k8s_request("GET", template_path)
-    job_name = _build_worker_job_name(task_id)
-    new_job = _clone_job_from_template(template_job, namespace, job_name, task_id, payload)
-    create_path = f"/apis/batch/v1/namespaces/{namespace}/jobs"
-    created = _k8s_request("POST", create_path, body=new_job)
-    return {
-        "name": created.get("metadata", {}).get("name", job_name),
-        "uid": created.get("metadata", {}).get("uid"),
-    }
 
 # --------------------------------------------------------------------------- #
 # Metrics
@@ -542,19 +283,15 @@ class Handler(BaseHTTPRequestHandler):
     def _authorized(self):
         return bool(TOKEN) and hmac.compare_digest(self.headers.get("Authorization", "").encode(), f"token {TOKEN}".encode())
 
+    def _supervisor_authorized(self):
+        return bool(SUPERVISOR_TOKEN) and hmac.compare_digest(
+            self.headers.get("Authorization", "").encode(), f"token {SUPERVISOR_TOKEN}".encode())
+
     def _lookup(self, db):
-        parsed = urlsplit(self.path)
-        task_id = parsed.path.removeprefix("/api/v1/tasks/").removesuffix("/sync").removesuffix("/retry")
-        query = parse_qs(parsed.query)
-        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,63}", task_id):
-            raise ValueError("invalid-task-id")
-        repo = query.get("repo", [None])[0]
-        task = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-        if task is None and task_id.isdigit() and repo:
-            task = db.execute("SELECT * FROM tasks WHERE lower(repo)=lower(?) AND issue=?", (repo, int(task_id))).fetchone()
-        if task and (not _repo_allowed(task["repo"]) or (repo and repo.lower() != (task["repo"] or "").lower())):
-            raise PermissionError("repo-not-allowed")
-        return task
+        return self._task_api().lookup(db)
+
+    def _task_api(self):
+        return TaskAPI(self, sys.modules[__name__])
 
     def _post_record(self, status):
         """Record request metrics for the terminal POST response."""
@@ -594,25 +331,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authorized():
                 self._json(401, {"error": "unauthorized"})
                 return
-            db = _task_db()
-            try:
-                task = self._lookup(db)
-                if task is None:
-                    self._json(404, {"error": "task-not-found"})
-                else:
-                    self._json(200, {"task_id": task["task_id"], "repo": task["repo"], "issue_number": task["issue"],
-                                     "status": task["status"], "result": json.loads(task["result"]) if task["result"] else None,
-                                     "lifecycle": task["lifecycle"], "credential_cleanup": task["credential_cleanup"],
-                                     "retry_of": task["retry_of"],
-                                     "retry_task_id": next((row[0] for row in db.execute(
-                                         "SELECT task_id FROM tasks WHERE retry_of=?", (task["task_id"],))), None),
-                                     "job": json.loads(task["job"]) if task["job"] else None})
-            except PermissionError:
-                self._json(403, {"error": "repo-not-allowed"})
-            except ValueError:
-                self._json(400, {"error": "invalid-task-id"})
-            finally:
-                db.close()
+            self._task_api().get_task()
             return
 
         if path != "/":
@@ -625,7 +344,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b'{"status":"ok"}')
 
     def do_POST(self):
-        if not self._authorized():
+        path = urlsplit(self.path).path
+        task_callback = (path.startswith("/api/v1/tasks/") and path != "/api/v1/tasks/spawn"
+                 and not path.endswith(("/retry", "/sync")))
+        supervisor_endpoint = path.startswith("/api/v1/supervisor/tasks/")
+        if not task_callback and not supervisor_endpoint and not self._authorized():
             self._json(401, {"error": "unauthorized"})
             return
         try:
@@ -637,6 +360,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise TypeError("invalid-payload")
             if urlsplit(self.path).path == "/api/v1/tasks/spawn":
                 self._spawn(payload)
+            elif urlsplit(self.path).path.startswith("/api/v1/supervisor/tasks/"):
+                self._supervisor_result(payload)
             elif urlsplit(self.path).path.endswith("/retry") and self.path.startswith("/api/v1/tasks/"):
                 self._retry(payload)
             elif urlsplit(self.path).path.endswith("/sync") and self.path.startswith("/api/v1/tasks/"):
@@ -655,172 +380,19 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "invalid-task-or-result"})
 
     def _retry(self, payload):
-        _reject_credentials(payload, self.headers.get("X-Repository-Token", ""))
-        if set(payload) != {"retry_key"} or not isinstance(payload["retry_key"], str) or not re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", payload["retry_key"]
-        ):
-            raise ValueError("invalid-retry-request")
-        db = _task_db()
-        try:
-            task = self._lookup(db)
-            if task is None:
-                self._json(404, {"error": "task-not-found"})
-                return
-            original = json.loads(task["payload"])
-        finally:
-            db.close()
-        original.pop("task_id", None)
-        self._spawn(original, retry_of=task["task_id"], retry_key=payload["retry_key"])
+        return self._task_api().retry(payload)
 
     def _spawn(self, payload, retry_of=None, retry_key=None):
-        token = self.headers.get("X-Repository-Token", "")
-        _reject_credentials(payload, token)
-        repo, issue = _identity(payload)
-        if "worker_id" in payload:
-            raise ValueError("gateway-assignment-required")
-        if _is_external_workflow_payload(payload) and issue is None:
-            raise ValueError("issue-required")
-        if "task_id" in payload:
-            _validate_assigned_task_id(payload["task_id"])
-            if issue is not None and str(payload["task_id"]) != str(issue):
-                raise ValueError("issue-mismatch")
-        if not _repo_allowed(repo):
-            raise PermissionError("repo-not-allowed")
-        if not self._transport_allowed():
-            raise CredentialError("transport-not-allowed")
-        _validate_repository(repo, issue, token)
-        task_id = "issue-" + hashlib.sha256(f"{repo.lower()}#{issue}".encode()).hexdigest()[:32] if issue else uuid.uuid4().hex
-        if retry_of:
-            task_id = "issue-" + hashlib.sha256(f"retry:{retry_of}:{retry_key}".encode()).hexdigest()[:32]
-        assigned = copy.deepcopy(payload)
-        assigned["task_id"] = task_id
-        if repo:
-            assigned["repo"] = repo
-        db = _task_db()
-        try:
-            db.execute("BEGIN IMMEDIATE")
-            old = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-            if old:
-                db.commit()
-                code = 409 if old["status"] == "failed" else 503 if old["status"] == "queued" else 202
-                self._json(code, {"task_id": task_id, "repo": repo, "status": old["status"], "replayed": True})
-                return
-            if retry_of:
-                parent = db.execute("SELECT * FROM tasks WHERE task_id=?", (retry_of,)).fetchone()
-                child = db.execute("SELECT task_id FROM tasks WHERE retry_of=?", (retry_of,)).fetchone()
-                if child:
-                    db.commit()
-                    self._json(409, {"error": "retry-already-created", "task_id": child["task_id"]})
-                    return
-                if not parent or parent["status"] != "failed" or not parent["result"]:
-                    db.commit()
-                    self._json(409, {"error": "retry-requires-failed-task"})
-                    return
-                settled = {"synced", "credential-missing", "credential-expired", "credential-denied",
-                           "credential-binding-mismatch", "credential-invalid"}
-                if parent["lifecycle"] not in settled or parent["credential_cleanup"] != "deleted":
-                    db.commit()
-                    self._json(409, {"error": "retry-requires-lifecycle-sync"})
-                    return
-                active = db.execute("SELECT task_id FROM tasks WHERE lower(repo)=lower(?) AND issue=? AND status IN ('queued','running')",
-                                    (repo, issue)).fetchone()
-                if active:
-                    db.commit()
-                    self._json(409, {"error": "issue-task-active", "task_id": active["task_id"]})
-                    return
-            callback = secrets.token_urlsafe(32)
-            credential_ref = "task-credential-" + task_id
-            db.execute("INSERT INTO tasks(task_id,repo,issue,status,payload,credential_ref,callback_hash,retry_of,retry_key) VALUES(?,?,?,?,?,?,?,?,?)",
-                       (task_id, repo, issue, "queued", json.dumps(assigned), credential_ref, hashlib.sha256(callback.encode()).hexdigest(),
-                        retry_of, retry_key))
-            db.commit()
-            try:
-                _create_task_secret(task_id, repo, token, callback)
-            except KubernetesError:
-                failure = json.dumps({"task_id": task_id, "repo": repo, "issue_number": issue,
-                                      "status": "failed", "error": "credential-create-failed"})
-                db.execute("UPDATE tasks SET status='failed', result=? WHERE task_id=?", (failure, task_id))
-                _retry_lifecycle(task_id)
-                self._json(503, {"task_id": task_id, "error": "credential-create-failed"})
-                return
-            job = None
-            if "worker_id" not in payload:
-                try:
-                    job = _create_worker_job(POD_NAMESPACE, WORKER_JOB_TEMPLATE, task_id, assigned)
-                except (OSError, ValueError, KeyError, RuntimeError, StopIteration, KubernetesError):
-                    failure = json.dumps({"task_id": task_id, "repo": repo, "issue_number": issue,
-                                          "status": "failed", "error": "job-create-failed"})
-                    db.execute("UPDATE tasks SET status='failed', result=? WHERE task_id=? AND status='queued'", (failure, task_id))
-                    _retry_lifecycle(task_id)
-                    self._json(500, {"task_id": task_id, "error": "job-create-failed"})
-                    return
-            db.execute("UPDATE tasks SET status='running', job=? WHERE task_id=? AND status='queued'", (json.dumps(job), task_id))
-            self._json(202, {"task_id": task_id, "repo": repo, "status": "running", "job_name": (job or {}).get("name")})
-        finally:
-            db.close()
+        return self._task_api().spawn(payload, retry_of, retry_key)
 
     def _resync(self, payload):
-        if payload:
-            raise ValueError("sync-body-must-be-empty")
-        db = _task_db()
-        try:
-            task = self._lookup(db)
-            if task is None:
-                self._json(404, {"error": "task-not-found"})
-                return
-            if task["status"] not in ("completed", "failed") or not task["result"]:
-                self._json(409, {"error": "task-not-terminal"})
-                return
-        finally:
-            db.close()
-        lifecycle = _retry_lifecycle(task["task_id"])
-        self._json(200, {"task_id": task["task_id"], "status": task["status"], "lifecycle": lifecycle})
+        return self._task_api().resync(payload)
 
     def _result(self, payload):
-        _reject_credentials(payload, self.headers.get("X-Task-Token", ""))
-        repo, issue = _identity(payload)
-        db = _task_db()
-        try:
-            db.execute("BEGIN IMMEDIATE")
-            task = self._lookup(db)
-            if task is None:
-                db.commit()
-                self._json(404, {"error": "task-not-found"})
-                return
-            callback = self.headers.get("X-Task-Token", "")
-            if not callback or not task["callback_hash"] or not hmac.compare_digest(hashlib.sha256(callback.encode()).hexdigest(), task["callback_hash"]):
-                raise PermissionError("task-callback-denied")
-            if task["lifecycle"] != "synced" and (not task["result"] or json.loads(task["result"]) != payload):
-                try:
-                    _reject_credentials(payload, _task_repository_token(task, check_expiry=False))
-                except (CredentialError, KubernetesError):
-                    pass
-            legacy_id = urlsplit(self.path).path.rsplit("/", 1)[1].isdigit() and repo is not None
-            if str(payload.get("task_id")) != (str(task["issue"]) if legacy_id else task["task_id"]):
-                raise ValueError("task-id-mismatch")
-            if (repo or "").lower() != (task["repo"] or "").lower() or issue != task["issue"]:
-                raise ValueError("result-identity-mismatch")
-            if payload.get("status") not in ("completed", "failed"):
-                raise ValueError("terminal-status-required")
-            if payload["status"] == "completed" and (payload.get("error") or not payload.get("patch")):
-                raise ValueError("empty-completion")
-            original = json.loads(task["payload"])
-            nested = original.get("payload", original)
-            if (task["issue"] and not any(nested.get(key) or original.get(key) for key in ("files", "edits", "changes"))
-                    and payload["status"] == "completed" and not re.fullmatch(
-                        rf"https://github\.com/{re.escape(task['repo'])}/pull/[1-9][0-9]*", payload.get("pr_url", ""), re.IGNORECASE)):
-                raise ValueError("completion-pr-required")
-            serialized = json.dumps(payload, sort_keys=True)
-            if task["result"] and json.loads(task["result"]) != payload:
-                db.commit()
-                self._json(409, {"error": "terminal-result-conflict"})
-                return
-            db.execute("UPDATE tasks SET status=?, result=? WHERE task_id=?", (payload["status"], serialized, task["task_id"]))
-            db.commit()
-            lifecycle = _retry_lifecycle(task["task_id"])
-            self._json(200, {"task_id": task["task_id"], "status": payload["status"], "lifecycle": lifecycle})
-        finally:
-            db.close()
+        return self._task_api().result(payload)
+
+    def _supervisor_result(self, payload):
+        return self._task_api().supervisor_result(payload)
 
     def log_message(self, format, *args):
         logger.info("%s request", self.command)

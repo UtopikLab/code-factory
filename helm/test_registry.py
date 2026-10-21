@@ -1,4 +1,3 @@
-import ast
 import base64
 import json
 import os
@@ -101,56 +100,77 @@ class RegistryValuesTests(unittest.TestCase):
         cases = [
             ({}, default, coder_default),
             ({"supervisor": {"config": {"judge-url": "https://judge.example.com/v1"}}},
-             "https://judge.example.com/v1", "https://judge.example.com/v1"),
+             "https://judge.example.com/v1", coder_default),
             ({"worker": {"coderUrl": "https://coder.example.com/v1"}},
              default, "https://coder.example.com/v1"),
         ]
         for values, judge, coder in cases:
             with self.subTest(values=values):
                 documents = self.documents("orchestrator", values)
-                config = next(document for document in documents if document["kind"] == "ConfigMap")
+                config = next(document for document in documents if document["kind"] == "ConfigMap"
+                              and document["metadata"]["name"] == "orchestrator-config")
+                catalog = next(document for document in documents if document["kind"] == "ConfigMap"
+                               and document["metadata"]["name"].startswith("orchestrator-agent-catalog-"))
+                runtime = json.loads(catalog["data"]["runtime-config.json"])
                 job = next(document for document in documents if document["kind"] == "Job")
                 env = {entry["name"]: entry for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]}
                 self.assertEqual(config["data"]["judge-url"], judge)
                 self.assertEqual(env["CODER_URL"]["value"], coder)
                 self.assertEqual(env["CODER_NATIVE_DOWNLOAD"]["value"], str(coder == coder_default).lower())
-                self.assertEqual(env["JUDGE_NATIVE_DOWNLOAD"]["value"], str(judge == default).lower())
-                self.assertEqual(env["JUDGE_URL"]["valueFrom"]["configMapKeyRef"]["key"], "judge-url")
+                self.assertEqual(runtime["judge_url"], judge)
+                self.assertEqual(runtime["coder_url"], coder)
+                self.assertEqual(runtime["judge_native_download"], judge == default)
+                self.assertNotIn("JUDGE_NATIVE_DOWNLOAD", env)
+                self.assertNotIn("JUDGE_URL", env)
+                supervisor = next(document for document in documents if document["kind"] == "Deployment"
+                                  and document["metadata"]["name"] == "orchestrator-supervisor")
+                supervisor_env = {entry["name"]: entry for entry in supervisor["spec"]["template"]["spec"]["containers"][0]["env"]}
+                self.assertEqual(supervisor_env["JUDGE_URL"]["valueFrom"]["configMapKeyRef"], {
+                    "name": "orchestrator-config", "key": "judge-url",
+                })
 
     def test_native_download_switches_can_be_overridden(self):
-        documents = self.documents("orchestrator", {"worker": {
-            "coderUrl": "https://custom-router/v1", "coderNativeDownload": True,
-            "judgeNativeDownload": False,
-        }})
-        job = next(document for document in documents if document["kind"] == "Job")
-        env = {entry["name"]: entry for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]}
-        self.assertEqual(env["CODER_NATIVE_DOWNLOAD"]["value"], "true")
-        self.assertEqual(env["JUDGE_NATIVE_DOWNLOAD"]["value"], "false")
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                documents = self.documents("orchestrator", {"worker": {
+                    "coderUrl": "https://custom-router/v1", "coderNativeDownload": enabled,
+                    "judgeNativeDownload": enabled,
+                }})
+                job = next(document for document in documents if document["kind"] == "Job")
+                env = {entry["name"]: entry for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+                catalog = next(document for document in documents if document["kind"] == "ConfigMap"
+                               and document["metadata"]["name"].startswith("orchestrator-agent-catalog-"))
+                runtime = json.loads(catalog["data"]["runtime-config.json"])
+                self.assertEqual(env["CODER_NATIVE_DOWNLOAD"]["value"], str(enabled).lower())
+                self.assertEqual(runtime["coder_native_download"], enabled)
+                self.assertEqual(runtime["judge_native_download"], enabled)
+                self.assertNotIn("JUDGE_NATIVE_DOWNLOAD", env)
 
     def test_requester_model_defaults_use_native_hf_identifier(self):
         model = "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M"
         documents = self.documents("orchestrator", {})
-        config = next(document for document in documents if document["kind"] == "ConfigMap")
+        config = next(document for document in documents if document["kind"] == "ConfigMap"
+                  and document["metadata"]["name"] == "orchestrator-config")
+        catalog = next(document for document in documents if document["kind"] == "ConfigMap"
+                   and document["metadata"]["name"].startswith("orchestrator-agent-catalog-"))
+        runtime = json.loads(catalog["data"]["runtime-config.json"])
         job = next(document for document in documents if document["kind"] == "Job")
         env = {entry["name"]: entry for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]}
         self.assertEqual(env["CODER_MODEL"]["value"], model)
         self.assertEqual(env["CODER_NATIVE_DOWNLOAD"]["value"], "true")
-        self.assertEqual(env["JUDGE_NATIVE_DOWNLOAD"]["value"], "true")
+        self.assertTrue(runtime["judge_native_download"])
+        self.assertEqual(runtime["judge_model"], model)
+        self.assertEqual(runtime["coder_model"], model)
         self.assertEqual(config["data"]["judge-model"], model)
-        worker_dir = HELM_DIR.parent / "orchestrator" / "worker"
-        module = ast.parse((worker_dir / "worker.py").read_text())
-        defaults = [node.value.value for node in module.body if isinstance(node, ast.Assign)
-                    and any(isinstance(target, ast.Name) and target.id == "DEFAULT_JUDGE_MODEL"
-                            for target in node.targets)]
-        self.assertEqual(defaults, [model])
-        self.assertIn(f'ENV JUDGE_MODEL="{model}"', (worker_dir / "Dockerfile").read_text())
+        self.assertNotIn("JUDGE_MODEL", env)
 
     def test_model_overrides_are_preserved(self):
         documents = self.documents("orchestrator", {
             "supervisor": {"config": {"judge-model": "custom-judge"}},
             "worker": {"worker-model": "custom-coder"},
         })
-        config = next(document for document in documents if document["kind"] == "ConfigMap")
+        config = next(document for document in documents if document["kind"] == "ConfigMap"
+                  and document["metadata"]["name"] == "orchestrator-config")
         job = next(document for document in documents if document["kind"] == "Job")
         env = {entry["name"]: entry for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]}
         self.assertEqual(env["CODER_MODEL"]["value"], "custom-coder")

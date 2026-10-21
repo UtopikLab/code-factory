@@ -61,14 +61,72 @@
                         "acceptor-url": {
                             "type": "string",
                             "pattern": "^https://[^/?#@]+/?$"
+                        },
+                        "coder-url": {
+                            "type": "string",
+                            "pattern": "^https?://[^/?#@]+/v1$"
+                        },
+                        "judge-url": {
+                            "type": "string",
+                            "pattern": "^https?://[^/?#@]+/v1$"
+                        },
+                        "coder-model": {
+                            "type": "string",
+                            "minLength": 1
+                        },
+                        "judge-model": {
+                            "type": "string",
+                            "minLength": 1
+                        },
+                        "acceptance-threshold": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                        },
+                        "max-total-attempts": {
+                            "type": "integer",
+                            "const": 8
+                        },
+                        "allowed-base-branches": {
+                            "type": "string"
+                        },
+                        "reviewers": {
+                            "type": "string"
                         }
                     }
+                }
+            }
+        },
+        "agentCatalog": {
+            "type": "object",
+            "required": [
+                "version"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "version": {
+                    "type": "string",
+                    "minLength": 1
                 }
             }
         },
         "worker": {
             "type": "object",
             "properties": {
+                "auth": {
+                    "type": "object",
+                    "required": [
+                        "existingSecret"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                        "existingSecret": {
+                            "type": "string",
+                            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+                            "maxLength": 253
+                        }
+                    }
+                },
                 "coderUrl": {
                     "type": "string"
                 },
@@ -251,6 +309,13 @@
                         },
                         "existingClaim": {
                             "type": "string"
+                        },
+                        "accessMode": {
+                            "type": "string",
+                            "enum": [
+                                "ReadWriteOnce",
+                                "ReadWriteMany"
+                            ]
                         }
                     }
                 }

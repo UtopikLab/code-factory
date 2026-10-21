@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Chart.Name }}-agent-catalog-{{ include "orchestrator.agentCatalogHash" . | trunc 12 }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: orchestrator
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    "helm.sh/resource-policy": keep
+    code-factory/config-version: {{ .Values.agentCatalog.version | default "1" | quote }}
+    code-factory/config-hash: {{ include "orchestrator.agentCatalogHash" . | quote }}
+data:
+  agent-roles.yaml: {{ .Files.Get "files/agent-catalog.yaml" | quote }}
+  agent-roles.schema.json: {{ .Files.Get "files/agent-catalog.schema.json" | quote }}
+  runtime-config.json: {{ include "orchestrator.agentRuntimeConfigJson" . | quote }}

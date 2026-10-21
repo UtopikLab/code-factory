@@ -27,6 +27,7 @@ import yaml
 def task_gateway(monkeypatch, tmp_path):
     monkeypatch.setenv("TASK_DB_PATH", str(tmp_path / "tasks.sqlite3"))
     monkeypatch.setattr(server, "TOKEN", "test-token")
+    monkeypatch.setattr(server, "SUPERVISOR_TOKEN", "supervisor-test-token")
     monkeypatch.setattr(server, "ALLOWED_REPOS", {"org/repo", "org/other"})
     monkeypatch.setenv("GATEWAY_TRANSPORT_MODE", "local-http")
     monkeypatch.setattr(server, "_validate_repository", Mock())
@@ -39,21 +40,27 @@ def task_gateway(monkeypatch, tmp_path):
             if name in stored:
                 raise server.KubernetesError(409)
             stored[name] = copy.deepcopy(body)
-            return body
+            stored[name]["metadata"]["uid"] = "credential-uid"
+            return copy.deepcopy(stored[name])
         if name not in stored:
             raise server.KubernetesError(404)
         if method == "DELETE":
+            if body["preconditions"]["uid"] != stored[name]["metadata"]["uid"]:
+                raise server.KubernetesError(409)
             return stored.pop(name)
         return copy.deepcopy(stored[name])
     monkeypatch.setattr(server, "_k8s_request", Mock(side_effect=kubernetes))
     create = Mock(return_value={"name": "assigned-worker", "uid": "uid"})
-    monkeypatch.setattr(server, "_create_worker_job", create)
     github = Mock(side_effect=RuntimeError("GitHub unavailable"))
     monkeypatch.setattr(server, "_github", github)
     return create, github
 
 
-def task_request(method, path, payload=None, token="test-token", repository_token="repo-test-only", callback="callback-test-only"):
+def task_request(method, path, payload=None, token="test-token", repository_token="repo-test-only", callback="callback-test-only", supervisor=True):
+    if (supervisor and method == "POST" and path.startswith("/api/v1/tasks/") and isinstance(payload, dict)
+        and payload.get("status") in ("completed", "failed") and callback == "callback-test-only"):
+        path = path.replace("/api/v1/tasks/", "/api/v1/supervisor/tasks/", 1)
+        token = "supervisor-test-token"
     body = json.dumps(payload).encode()
     handler = server.Handler.__new__(server.Handler)
     handler.command = method
@@ -89,10 +96,11 @@ def test_task_secret_is_immutable_and_duplicate_cannot_replace(task_gateway):
     assert "callback-test-only" not in json.dumps(dict(task))
     secret = server._k8s_request("GET", server._secret_path(task["credential_ref"]))
     assert secret["immutable"] is True
+    assert task["credential_uid"] == secret["metadata"]["uid"]
     assert "ownerReferences" not in secret["metadata"]
     assert base64.b64decode(secret["data"]["repository-token"]) == b"repo-test-only"
     assert task_request("POST", "/api/v1/tasks/spawn", issue_payload(), repository_token="different-repo-test-only")[0] == 202
-    assert server._task_repository_token(task) == "repo-test-only"
+    assert server._k8s_request("GET", server._secret_path(task["credential_ref"])) == secret
     assert task_request("POST", f"/api/v1/tasks/{task_id}", {
         "task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "task-execution-failed",
     }, callback="wrong-callback")[0] == 403
@@ -117,19 +125,22 @@ def test_retry_preserves_history_and_uses_new_credentials(task_gateway, monkeypa
     assert code == 202 and retried["task_id"] != original
     task_id = retried["task_id"]
     state = task_request("GET", f"/api/v1/tasks/{task_id}")[1]
-    assert state["retry_of"] == original and state["status"] == "running"
+    assert state["retry_of"] == original and state["status"] == "queued"
     parent = task_request("GET", f"/api/v1/tasks/{original}")[1]
     assert parent.pop("retry_task_id") == task_id
     previous.pop("retry_task_id")
     assert parent == previous
     db = server._task_db()
     row = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
-    assert server._task_repository_token(row) == "new-repo-test-only"
+    secret = server._k8s_request("GET", server._secret_path(row["credential_ref"]))
+    assert base64.b64decode(secret["data"]["repository-token"]) == b"new-repo-test-only"
     assert "new-repo-test-only" not in json.dumps(dict(row))
     db.close()
     result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "validation-failed"}
-    assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[0] == 403
-    assert task_request("POST", f"/api/v1/tasks/{task_id}", result, callback="new-callback-test-only")[0] == 200
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", result, callback="wrong-callback")[0] == 403
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", result, callback="new-callback-test-only")[0] == 400
+    assert task_request("POST", f"/api/v1/supervisor/tasks/{task_id}", result,
+                        token="supervisor-test-token")[0] == 200
 
 
 def test_retry_replays_without_creating_another_job(task_gateway, monkeypatch):
@@ -140,7 +151,7 @@ def test_retry_replays_without_creating_another_job(task_gateway, monkeypatch):
     code, replay = task_request("POST", path, {"retry_key": "manual-1"})
     assert code == 202 and replay["replayed"] and replay["task_id"] == first["task_id"]
     assert task_request("POST", path, {"retry_key": "manual-2"})[0] == 409
-    assert task_gateway[0].call_count == 2
+    assert task_gateway[0].call_count == 0
     assert task_request("POST", "/api/v1/tasks/spawn", issue_payload())[0] == 409
     child = first["task_id"]
     finish_failed_task(task_gateway, monkeypatch, child)
@@ -154,15 +165,15 @@ def test_retry_requires_terminal_synced_failure(task_gateway, monkeypatch):
     assert task_request("POST", path, {"retry_key": "manual-1"})[1]["error"] == "retry-requires-failed-task"
     result = {"task_id": original, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "validation-failed"}
     task_request("POST", f"/api/v1/tasks/{original}", result)
-    assert task_request("POST", path, {"retry_key": "manual-1"})[1]["error"] == "retry-requires-lifecycle-sync"
-    task_gateway[0].assert_called_once()
+    assert task_request("POST", path, {"retry_key": "manual-1"})[0] == 202
+    task_gateway[0].assert_not_called()
 
 
 def test_retry_can_recover_from_permanent_credential_failure(task_gateway, monkeypatch):
     original = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
     monkeypatch.setattr(server, "_sync_lifecycle", Mock(side_effect=server.CredentialError("credential-expired")))
     result = {"task_id": original, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "repository-credential-expired"}
-    assert task_request("POST", f"/api/v1/tasks/{original}", result)[1]["lifecycle"] == "credential-expired"
+    assert task_request("POST", f"/api/v1/tasks/{original}", result)[1]["lifecycle"] == "synced"
     code, retry = task_request("POST", f"/api/v1/tasks/{original}/retry", {"retry_key": "new-credential"},
                               repository_token="new-repo-test-only")
     assert code == 202 and retry["task_id"] != original
@@ -173,7 +184,7 @@ def test_retry_can_recover_from_permanent_credential_failure(task_gateway, monke
 def test_retry_rejects_invalid_requests(task_gateway, payload):
     original = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
     assert task_request("POST", f"/api/v1/tasks/{original}/retry", payload)[0] == 400
-    task_gateway[0].assert_called_once()
+    task_gateway[0].assert_not_called()
 
 
 def test_retry_revalidates_access_and_repository_allowlist(task_gateway, monkeypatch):
@@ -185,7 +196,7 @@ def test_retry_revalidates_access_and_repository_allowlist(task_gateway, monkeyp
     assert task_request("POST", path, {"retry_key": "manual-1"})[0] == 403
     monkeypatch.setattr(server, "ALLOWED_REPOS", {"another/repo"})
     assert task_request("POST", path, {"retry_key": "manual-1"})[0] == 403
-    task_gateway[0].assert_called_once()
+    task_gateway[0].assert_not_called()
 
 
 def test_concurrent_retries_have_only_one_child(task_gateway, monkeypatch):
@@ -195,7 +206,7 @@ def test_concurrent_retries_have_only_one_child(task_gateway, monkeypatch):
         responses = list(pool.map(lambda key: task_request("POST", f"/api/v1/tasks/{original}/retry", {"retry_key": key}),
                                   ["manual-1", "manual-2"]))
     assert sorted(code for code, _body in responses) == [202, 409]
-    assert task_gateway[0].call_count == 2
+    assert task_gateway[0].call_count == 0
     db = server._task_db()
     assert db.execute("SELECT COUNT(*) FROM tasks WHERE retry_of=?", (original,)).fetchone()[0] == 1
     db.close()
@@ -212,7 +223,7 @@ def test_secret_cleanup_retry_does_not_repeat_github_updates(task_gateway, monke
     assert task_request("POST", path, result)[1]["lifecycle"] == "cleanup-pending"
     delete.side_effect = None
     assert task_request("POST", path, result)[1]["lifecycle"] == "synced"
-    assert sync.call_count == 1
+    assert sync.call_count == 0
 
 
 def test_secret_creation_failure_is_durable_without_dispatch(task_gateway, monkeypatch):
@@ -224,27 +235,21 @@ def test_secret_creation_failure_is_durable_without_dispatch(task_gateway, monke
     assert task_request("POST", "/api/v1/tasks/spawn", issue_payload())[0] == 409
 
 
-@pytest.mark.parametrize("stage", ["secret", "dispatch"])
-def test_creation_failure_cleans_secret_after_terminal_processing(task_gateway, monkeypatch, stage):
+def test_secret_creation_lost_response_retains_unverified_secret(task_gateway, monkeypatch):
     monkeypatch.setattr(server, "_sync_lifecycle", Mock())
     request = server._k8s_request
-    if stage == "secret":
-        def lost_creation_response(method, path, body=None):
-            response = request(method, path, body)
-            if method == "POST":
-                raise server.KubernetesError(503)
-            return response
-        monkeypatch.setattr(server, "_k8s_request", lost_creation_response)
-    else:
-        task_gateway[0].side_effect = RuntimeError("dispatch unavailable")
+    def lost_creation_response(method, path, body=None):
+        response = request(method, path, body)
+        if method == "POST":
+            raise server.KubernetesError(503)
+        return response
+    monkeypatch.setattr(server, "_k8s_request", lost_creation_response)
     code, body = task_request("POST", "/api/v1/tasks/spawn", issue_payload())
-    assert code == (503 if stage == "secret" else 500)
+    assert code == 503
     task = task_request("GET", f"/api/v1/tasks/{body['task_id']}")[1]
     assert task["status"] == "failed"
-    assert task["lifecycle"] == "synced" and task["credential_cleanup"] == "deleted"
-    with pytest.raises(server.KubernetesError) as raised:
-        request("GET", server._secret_path("task-credential-" + body["task_id"]))
-    assert raised.value.status == 404
+    assert task["lifecycle"] == "credential-binding-mismatch" and task["credential_cleanup"] == "pending"
+    assert request("GET", server._secret_path("task-credential-" + body["task_id"]))["immutable"] is True
 
 
 def test_stale_secret_is_neither_adopted_nor_deleted(task_gateway):
@@ -270,7 +275,7 @@ def test_secret_cleanup_has_uid_precondition(task_gateway, monkeypatch):
     request = Mock(return_value=secret)
     monkeypatch.setattr(server, "_k8s_request", request)
     server._delete_task_secret(task)
-    assert request.call_args.args == ("DELETE", server._secret_path(task["credential_ref"]), {
+    request.assert_called_once_with("DELETE", server._secret_path(task["credential_ref"]), {
         "apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {"uid": "credential-uid"},
     })
 
@@ -280,7 +285,7 @@ def test_lifecycle_revocation_is_explicit_and_cleans_owned_secret(task_gateway, 
     task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
     task_gateway[1].side_effect = server.urllib.error.HTTPError("https://api.github.com/repos/org/repo", status, "repo-test-only", {}, None)
     result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "repository-credential-denied"}
-    assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[1]["lifecycle"] == "credential-denied"
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[1]["lifecycle"] == "synced"
     task = task_request("GET", f"/api/v1/tasks/{task_id}")[1]
     assert task["result"] == result and task["credential_cleanup"] == "deleted"
 
@@ -290,7 +295,7 @@ def test_sync_endpoint_recovers_after_restart_without_new_credential(task_gatewa
     path = f"/api/v1/tasks/{task_id}"
     assert task_request("POST", path + "/sync", {})[0] == 409
     result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "task-execution-failed"}
-    assert task_request("POST", path, result)[1]["lifecycle"] == "pending"
+    assert task_request("POST", path, result)[1]["lifecycle"] == "synced"
     monkeypatch.setattr(server, "_sync_lifecycle", Mock())
     assert task_request("POST", path + "/sync", {}, callback="", repository_token="")[1]["lifecycle"] == "synced"
     assert task_request("GET", path)[1]["credential_cleanup"] == "deleted"
@@ -314,7 +319,8 @@ def test_secret_delete_lost_response_recovers(task_gateway, monkeypatch):
     assert task_request("POST", path, result)[1]["lifecycle"] == "synced"
 
 
-@pytest.mark.parametrize("problem,expected", [(404, "credential-missing"), (503, "pending")])
+@pytest.mark.parametrize("problem,expected", [(404, "synced"), (409, "credential-binding-mismatch"),
+                                            (503, "cleanup-pending")])
 def test_secret_api_missing_is_not_transient_failure(task_gateway, monkeypatch, problem, expected):
     task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
     monkeypatch.setattr(server, "_k8s_request", Mock(side_effect=server.KubernetesError(problem)))
@@ -323,12 +329,26 @@ def test_secret_api_missing_is_not_transient_failure(task_gateway, monkeypatch, 
     assert task_request("GET", f"/api/v1/tasks/{task_id}")[1]["result"] == result
 
 
+def test_secret_cleanup_without_persisted_uid_never_calls_kubernetes(task_gateway, monkeypatch):
+    task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    db = server._task_db()
+    db.execute("UPDATE tasks SET credential_uid=NULL WHERE task_id=?", (task_id,))
+    db.close()
+    request = Mock(side_effect=AssertionError("Unverified Secret must not be read or deleted"))
+    monkeypatch.setattr(server, "_k8s_request", request)
+    result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2,
+              "status": "failed", "error": "task-execution-failed"}
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[1]["lifecycle"] == "credential-binding-mismatch"
+    assert task_request("GET", f"/api/v1/tasks/{task_id}")[1]["credential_cleanup"] == "pending"
+    request.assert_not_called()
+
+
 def test_completed_result_is_durable_during_secret_api_outage(task_gateway, monkeypatch):
     task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
     monkeypatch.setattr(server, "_k8s_request", Mock(side_effect=server.KubernetesError(503)))
     result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "completed",
               "patch": "valid patch", "pr_url": "https://github.com/org/repo/pull/3"}
-    assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[1]["lifecycle"] == "pending"
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[1]["lifecycle"] == "cleanup-pending"
     assert task_request("GET", f"/api/v1/tasks/{task_id}")[1]["result"] == result
 
 
@@ -346,7 +366,7 @@ def test_expired_secret_preserves_terminal_result(task_gateway, monkeypatch):
     now = server.time.time()
     monkeypatch.setattr(server.time, "time", lambda: now + 86401)
     result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "repository-credential-expired"}
-    assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[1]["lifecycle"] == "credential-expired"
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[1]["lifecycle"] == "synced"
     assert task_request("GET", f"/api/v1/tasks/{task_id}")[1]["result"] == result
 
 
@@ -367,8 +387,44 @@ def test_edge_tls_intake_keeps_authentication_without_proxy_headers(task_gateway
     assert task_request("POST", "/api/v1/tasks/spawn", issue_payload(), token="invalid")[0] == 401
     task_gateway[0].assert_not_called()
     code, result = task_request("POST", "/api/v1/tasks/spawn", issue_payload())
-    assert code == 202 and result["status"] == "running"
-    task_gateway[0].assert_called_once()
+    assert code == 202 and result["status"] == "queued"
+    task_gateway[0].assert_not_called()
+
+
+def test_intake_commits_queued_task_without_creating_job(task_gateway):
+    create_job, _github = task_gateway
+    code, accepted = task_request("POST", "/api/v1/tasks/spawn", issue_payload())
+    assert code == 202 and accepted["status"] == "queued"
+    create_job.assert_not_called()
+    task_id = accepted["task_id"]
+    db = server._task_db()
+    try:
+        row = db.execute("SELECT status, config_version, config_hash FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+    finally:
+        db.close()
+    assert row["status"] == "queued"
+    assert row["config_version"] == "1" and len(row["config_hash"]) == 64
+    assert task_request("POST", "/api/v1/tasks/spawn", issue_payload())[0] == 202
+    create_job.assert_not_called()
+
+
+def test_worker_candidate_is_durable_but_not_terminal(task_gateway):
+    create_job, _github = task_gateway
+    task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    candidate = {"task_id": task_id, "repo": "org/repo", "issue_number": 2,
+                 "status": "candidate", "role": "coder", "patch": "verified later",
+                 "validation": {"status": "passed"}}
+    code, report = task_request("POST", f"/api/v1/tasks/{task_id}", candidate)
+    assert code == 200 and report["status"] == "candidate"
+    state = task_request("GET", f"/api/v1/tasks/{task_id}")[1]
+    assert state["status"] == "queued" and state["result"] == candidate
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", {
+        **candidate, "status": "completed", "pr_url": "https://github.com/org/repo/pull/3",
+    }, supervisor=False)[0] == 400
+    terminal = {"task_id": task_id, "status": "completed",
+                "pr_url": "https://github.com/org/repo/pull/3"}
+    assert task_request("POST", f"/api/v1/supervisor/tasks/{task_id}", terminal, token="wrong")[0] == 401
+    create_job.assert_not_called()
 
 
 @pytest.mark.parametrize("mode,address", [("local-http", "127.0.0.1"), ("edge-tls", "0.0.0.0")])
@@ -418,7 +474,7 @@ def test_repository_validation_errors_are_sanitized(monkeypatch, status, reason)
 
 
 def test_repository_validation_probes_with_only_originating_credential(monkeypatch):
-    github = Mock(side_effect=[{"full_name": "ORG/Repo", "permissions": {"push": True}}, [], [], [],
+    github = Mock(side_effect=[{"full_name": "ORG/Repo", "permissions": {"pull": True, "push": False}}, [], [], [],
                                {"number": 2, "html_url": "https://github.com/org/repo/issues/2"}])
     monkeypatch.setattr(server, "_github", github)
     server._validate_repository("org/repo", 2, "repo-test-only")
@@ -449,7 +505,7 @@ def test_task_callback_cannot_report_another_repository_task(task_gateway, monke
     result = {"task_id": second, "repo": "org/other", "issue_number": 2, "status": "failed", "error": "task-execution-failed"}
     assert first != second
     assert task_request("POST", f"/api/v1/tasks/{second}", result, callback="callback-first")[0] == 403
-    assert task_request("GET", f"/api/v1/tasks/{second}")[1]["status"] == "running"
+    assert task_request("GET", f"/api/v1/tasks/{second}")[1]["status"] == "queued"
 
 
 @pytest.mark.parametrize("url,accepted", [
@@ -585,11 +641,10 @@ def test_helm_credential_references_and_rbac():
     root = Path(__file__).resolve().parents[2]
     render = subprocess.run(["helm", "template", "credential-check", str(root / "helm/orchestrator")], capture_output=True, text=True, check=True)
     documents = [document for document in yaml.safe_load_all(render.stdout) if document]
-    role = next(document for document in documents if document["kind"] == "Role")
+    role = next(document for document in documents if document["kind"] == "Role"
+                and document["metadata"]["name"] == "orchestrator-gateway")
     assert role["rules"] == [
-        {"apiGroups": ["batch"], "resources": ["jobs"], "resourceNames": ["orchestrator-worker"], "verbs": ["get"]},
-        {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create"]},
-        {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get", "create", "delete"]},
+        {"apiGroups": [""], "resources": ["secrets"], "verbs": ["create", "delete"]},
     ]
     job = next(document for document in documents if document["kind"] == "Job")
     assert job["spec"]["suspend"] is True
@@ -601,19 +656,51 @@ def test_helm_credential_references_and_rbac():
         for container in pod["containers"]:
             env = {entry["name"]: entry for entry in container.get("env", [])}
             assert not {"GITHUB_TOKEN", "REPO_GITHUB_PAT"} & env.keys()
-            if container["name"] in ("gateway", "coder"):
+            if container["name"] == "gateway":
                 assert env["CODEFACTORY_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"] == {
                     "name": "orchestrator-gateway-auth", "key": "gateway-auth-token",
                 }
             else:
                 assert "CODEFACTORY_AUTH_TOKEN" not in env
-                assert pod["automountServiceAccountToken"] is False
+                if container["name"] == "coder":
+                    assert "JUDGE_URL" not in env and "JUDGE_MODEL" not in env
+                if document["metadata"]["name"] == "orchestrator-supervisor":
+                    assert pod["automountServiceAccountToken"] is True
     ingress = next(document for document in documents if document["kind"] == "Ingress")
     assert ingress["spec"]["tls"] and ingress["metadata"]["annotations"]["traefik.ingress.kubernetes.io/router.entrypoints"] == "websecure"
     dedicated = subprocess.run(["helm", "template", "credential-check", str(root / "helm/orchestrator"), "--set", "gateway.auth.existingSecret=",
                                 "--set", "gateway.auth.token=gateway-test-only-32-character-value"], capture_output=True, text=True, check=True)
     secrets = [document for document in yaml.safe_load_all(dedicated.stdout) if document and document["kind"] == "Secret"]
     assert next(document for document in secrets if document["metadata"]["name"] == "orchestrator-gateway-auth")["data"].keys() == {"gateway-auth-token"}
+    supervisor = next(document for document in documents if document["kind"] == "Deployment"
+                      and document["metadata"]["name"] == "orchestrator-supervisor")
+    supervisor_env = {entry["name"]: entry for entry in supervisor["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert supervisor_env["PR_GITHUB_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == "orchestrator-supervisor-auth"
+
+
+def test_helm_pins_nonsecret_catalog_runtime_and_p40_routes():
+    if not shutil.which("helm"):
+        pytest.skip("helm unavailable")
+    chart = Path(__file__).resolve().parents[2] / "helm/orchestrator"
+    rendered = subprocess.run(["helm", "template", "runtime-check", str(chart)],
+                              capture_output=True, text=True, check=True)
+    documents = [document for document in yaml.safe_load_all(rendered.stdout) if document]
+    catalog = next(document for document in documents if document["kind"] == "ConfigMap"
+                   and document["metadata"]["name"].startswith("orchestrator-agent-catalog-"))
+    data = catalog["data"]
+    digest = server.hashlib.sha256((data["agent-roles.yaml"] + data["agent-roles.schema.json"]
+                                    + data["runtime-config.json"]).encode()).hexdigest()
+    assert catalog["metadata"]["annotations"]["code-factory/config-hash"] == digest
+    assert catalog["metadata"]["name"].endswith(digest[:12])
+    assert not any(secret_name in data["runtime-config.json"] for secret_name in
+                   ("openai-api-key", "pr-github-token", "coder-api-key", "supervisor-auth-token"))
+    runtime = json.loads(data["runtime-config.json"])
+    assert runtime["coder_url"] == "http://llama-server-args-gpu0.inference.svc.cluster.local:8000/v1"
+    assert runtime["judge_url"] == "http://llama-server-args-gpu1.inference.svc.cluster.local:8000/v1"
+    worker = next(document for document in documents if document["kind"] == "Job")
+    worker_env = {entry["name"]: entry for entry in worker["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert worker_env["CODER_URL"]["value"] == runtime["coder_url"]
+    assert "JUDGE_URL" not in worker_env and "OPENAI_API_KEY" not in worker_env
 
 
 @pytest.mark.parametrize("mode,secret,profile", [("internal", "gateway-test-tls", False), ("external", "", False),
@@ -684,22 +771,16 @@ def test_helm_task_job_ttl_reaches_submitted_job(monkeypatch, ttl):
     assert seed["spec"]["suspend"] is True
     assert seed["spec"]["backoffLimit"] == 0
     assert "ttlSecondsAfterFinished" not in seed["spec"]
+    supervisor = next(document for document in documents if document["kind"] == "Deployment"
+                      and document["metadata"]["name"] == "orchestrator-supervisor")
+    env = {entry["name"]: entry.get("value")
+           for entry in supervisor["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["TASK_JOB_TTL_SECONDS_AFTER_FINISHED"] == str(ttl if ttl is not None else 86400)
     gateway = next(document for document in documents if document["kind"] == "Deployment"
                    and document["metadata"]["name"] == "orchestrator-gateway")
-    env = {entry["name"]: entry.get("value")
-           for entry in gateway["spec"]["template"]["spec"]["containers"][0]["env"]}
-    assert env["TASK_JOB_TTL_SECONDS_AFTER_FINISHED"] == str(ttl if ttl is not None else 86400)
-    assert env["TASK_CREDENTIAL_TTL_SECONDS"] == "86400"
-    monkeypatch.setenv("TASK_JOB_TTL_SECONDS_AFTER_FINISHED", env["TASK_JOB_TTL_SECONDS_AFTER_FINISHED"])
-    request = Mock(side_effect=[seed, {"metadata": {"name": "assigned-job", "uid": "assigned-uid"}}])
-    monkeypatch.setattr(server, "_k8s_request", request)
-    result = server._create_worker_job("orchestrator", "orchestrator-worker", "2", {"repo": "org/repo"})
-    assert result == {"name": "assigned-job", "uid": "assigned-uid"}
-    assert request.call_args.args == ("POST", "/apis/batch/v1/namespaces/orchestrator/jobs")
-    submitted = json.loads(json.dumps(request.call_args.kwargs["body"]))
-    assert submitted["spec"]["ttlSecondsAfterFinished"] == (ttl if ttl is not None else 86400)
-    assert "suspend" not in submitted["spec"]
-    assert "ownerReferences" not in submitted["metadata"]
+    gateway_env = {entry["name"]: entry.get("value")
+                   for entry in gateway["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert "TASK_JOB_TTL_SECONDS_AFTER_FINISHED" not in gateway_env
     assert seed == original
 
 
@@ -735,10 +816,10 @@ def test_gateway_github_transport_uses_only_explicit_repository_token(monkeypatc
 
 @pytest.mark.parametrize("metadata,error", [
     ({"full_name": "org/other", "permissions": {"push": True}}, "identity-mismatch"),
-    ({"full_name": "org/repo", "permissions": {"push": False}}, "write-access-unverified"),
-    ({"full_name": "org/repo"}, "write-access-unverified"),
+    ({"full_name": "org/repo", "permissions": {"pull": True, "push": True}}, "read-access-unverified"),
+    ({"full_name": "org/repo"}, "read-access-unverified"),
 ])
-def test_repository_validation_rejects_wrong_identity_or_unproven_write(monkeypatch, metadata, error):
+def test_repository_validation_rejects_wrong_identity_or_write_access(monkeypatch, metadata, error):
     github = Mock(return_value=metadata)
     monkeypatch.setattr(server, "_github", github)
     with pytest.raises(server.CredentialError, match=error):
@@ -752,45 +833,23 @@ def test_durable_repo_scoped_tasks_and_report_retry(task_gateway):
     assert code == 202
     task_id = spawned["task_id"]
     assert task_id.startswith("issue-")
-    assigned = create.call_args.args[3]
-    assert assigned["task_id"] == task_id
-    assert assigned["payload"] == issue_payload()["payload"]
-    assert task_request("GET", f"/api/v1/tasks/{task_id}")[1]["status"] == "running"
+    assert task_request("GET", f"/api/v1/tasks/{task_id}")[1]["status"] == "queued"
     result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "completed",
               "patch": "real patch", "pr_url": "https://github.com/org/repo/pull/3"}
     path = f"/api/v1/tasks/{task_id}"
     code, report = task_request("POST", path, result)
-    assert code == 200 and report["lifecycle"] == "pending"
+    assert code == 200 and report["status"] == "completed"
     assert task_request("GET", path)[1]["result"] == result
-    calls = []
-
-    def api(method, path, body=None, *, token):
-        assert token == "repo-test-only"
-        calls.append((method, path, body))
-        if path.endswith("/issues/2"):
-            return {"number": 2, "html_url": "https://github.com/org/repo/issues/2"}
-        if method == "GET" and "/labels" in path:
-            return [{"name": "queued"}]
-        if method == "GET" and "/comments" in path:
-            return []
-        return {}
-
-    github.side_effect = api
-    assert task_request("POST", path, result)[1]["lifecycle"] == "synced"
-    assert ("DELETE", "/repos/org/repo/issues/2/labels/queued", None) in calls
-    assert any(body and body.get("labels") == ["done"] for _, _, body in calls)
-    assert any(body and result["pr_url"] in body.get("body", "") for _, _, body in calls)
-    count = len(calls)
     assert task_request("POST", path, result)[0] == 200
-    assert len(calls) == count
+    github.assert_not_called()
     assert task_request("GET", "/api/v1/tasks/2?repo=org%2Frepo")[1]["task_id"] == task_id
     assert task_request("GET", "/api/v1/tasks/2")[0] == 404
     assert task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["replayed"]
-    assert create.call_count == 1
+    assert create.call_count == 0
     assert task_request("POST", path, {**result, "status": "failed"})[0] == 409
     other = task_request("POST", "/api/v1/tasks/spawn", issue_payload("org/other"))[1]
     assert other["task_id"] != task_id
-    assert task_request("POST", path, {**result, "repo": "org/other"})[0] == 400
+    assert task_request("POST", path, {**result, "repo": "org/other"})[0] == 409
     assert task_request("GET", path, token="wrong")[0] == 401
 
 
@@ -804,23 +863,23 @@ def test_concurrent_duplicate_spawn_and_reports(task_gateway, monkeypatch):
         responses = list(pool.map(spawn, range(4)))
     task_id = responses[0][1]["task_id"]
     assert {response[1]["task_id"] for response in responses} == {task_id}
-    assert create.call_count == 1
+    assert create.call_count == 0
     result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "validation-failed"}
     with ThreadPoolExecutor(max_workers=4) as pool:
         reports = list(pool.map(lambda _: task_request("POST", f"/api/v1/tasks/{task_id}", result), range(4)))
     assert all(code == 200 for code, _ in reports)
-    assert sync.call_count == 1
+    assert sync.call_count == 0
 
 
-def test_spawn_failure_is_not_accepted(task_gateway):
+def test_gateway_does_not_dispatch_even_when_job_creator_fails(task_gateway):
     create, _ = task_gateway
     create.side_effect = RuntimeError("cluster unavailable")
     code, body = task_request("POST", "/api/v1/tasks/spawn", issue_payload())
-    assert code == 500
+    assert code == 202
     task = task_request("GET", f"/api/v1/tasks/{body['task_id']}")[1]
-    assert task["status"] == "failed" and task["result"]["error"] == "job-create-failed"
-    assert task_request("POST", "/api/v1/tasks/spawn", issue_payload())[0] == 409
-    assert create.call_count == 1
+    assert task["status"] == "queued"
+    assert task_request("POST", "/api/v1/tasks/spawn", issue_payload())[0] == 202
+    assert create.call_count == 0
 
 
 def test_task_storage_survives_new_process(task_gateway, tmp_path):
@@ -835,18 +894,7 @@ def test_task_storage_survives_new_process(task_gateway, tmp_path):
     ], text=True)
     status, saved = json.loads(output)
     assert status == "failed" and json.loads(saved) == result
-    secret = server._k8s_request("GET", server._secret_path("task-credential-" + task_id))
-    secret_file = tmp_path / "mock-kubernetes-secret.json"
-    secret_file.write_text(json.dumps(secret))
-    recovered = subprocess.check_output([
-        sys.executable, "-c",
-        ("import json, server, sys; "
-         "server._k8s_request = lambda *args, **kwargs: json.load(open(sys.argv[2])); "
-         "db = server._task_db(); task = db.execute('SELECT * FROM tasks WHERE task_id=?', (sys.argv[1],)).fetchone(); "
-         "print(server._task_repository_token(task) == 'repo-test-only')"),
-        task_id, str(secret_file),
-    ], cwd=Path(server.__file__).parent, text=True)
-    assert recovered.strip() == "True"
+    assert task_request("GET", f"/api/v1/tasks/{task_id}")[1]["status"] == "failed"
 
 
 @pytest.mark.parametrize("bad", [
@@ -865,30 +913,17 @@ def test_invalid_issue_identity(task_gateway, bad):
 def test_failed_lifecycle_never_marks_done(task_gateway):
     _, github = task_gateway
     task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
-    def api(method, path, body=None, *, token):
-        assert token == "repo-test-only"
-        if path.endswith("/issues/2"):
-            return {"number": 2, "html_url": "https://github.com/org/repo/issues/2"}
-        if method == "GET" and "/labels" in path:
-            return [{"name": "queued"}, {"name": "done"}]
-        if method == "GET" and "/comments" in path:
-            return [{"body": f"<!-- code-factory:{task_id} -->\nCode Factory: failed."}]
-        return {}
-    github.side_effect = api
     result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "review-rejected"}
     assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[1]["lifecycle"] == "synced"
-    assert any(call.args[0] == "DELETE" and call.args[1].endswith("/done") for call in github.call_args_list)
-    assert any(call.args[0] == "POST" and call.args[2] == {"labels": ["failed"]} for call in github.call_args_list)
-    assert not any(call.args[0] == "POST" and "/comments" in call.args[1] for call in github.call_args_list)
+    github.assert_not_called()
 
 # --------------------------------------------------------------------------- #
 # _parse_allowed_repos helper
 # --------------------------------------------------------------------------- #
 
 
-def test_wildcard_means_any_repo():
-    assert server._parse_allowed_repos("*") is None
-    assert server._parse_allowed_repos("*") == server._parse_allowed_repos("*")
+def test_wildcard_does_not_enable_any_repo():
+    assert server._parse_allowed_repos("*") == set()
 
 
 def test_single_repo_whitelist():
@@ -902,9 +937,9 @@ def test_multiple_comma_separated_repos():
 
 
 def test_empty_and_blank_fallbacks():
-    assert server._parse_allowed_repos("") is None
-    assert server._parse_allowed_repos("   ") is None
-    assert server._parse_allowed_repos(None) is None
+    assert server._parse_allowed_repos("") == set()
+    assert server._parse_allowed_repos("   ") == set()
+    assert server._parse_allowed_repos(None) == set()
 
 
 def test_legacy_allowed_repo_variable():
@@ -914,7 +949,7 @@ def test_legacy_allowed_repo_variable():
     del server.ALLOWED_REPOS_RAW
     del server.ALLOWED_REPOS
     server.ALLOWED_REPOS_RAW = os.environ.get(
-        "ALLOWED_REPOS", os.environ.get("ALLOWED_REPO", "*")
+        "ALLOWED_REPOS", os.environ.get("ALLOWED_REPO", "")
     )
     server.ALLOWED_REPOS = server._parse_allowed_repos(server.ALLOWED_REPOS_RAW)
     assert server.ALLOWED_REPOS == {"UtopikLab/code-factory"}
@@ -981,91 +1016,9 @@ def test_payload_missing_required_external_fields_is_not_external():
     assert server._is_external_workflow_payload(payload) is False
 
 
-def test_build_worker_job_name_sanitized_and_limited(monkeypatch):
-    monkeypatch.setattr(server.time, "time", lambda: 1700000000)
-    name = server._build_worker_job_name("Task ID With Spaces_and_SYMBOLS___" + ("x" * 80))
-
-    assert name.startswith("orchestrator-worker-")
-    assert name.endswith("-1700000000")
-    assert len(name) <= 63
-    assert "_" not in name
-    assert " " not in name
-
-
-@pytest.mark.parametrize("label_location", ["job", "pod", "both"])
-def test_clone_job_strips_generated_labels(label_location):
-    generated_labels = {
-        "controller-uid": "old-controller",
-        "batch.kubernetes.io/controller-uid": "old-controller",
-        "job-name": "old-job",
-        "batch.kubernetes.io/job-name": "old-job",
-    }
-    job_labels = {"app": "worker", "task-id": "old-task", "triggered-by": "old-trigger"}
-    pod_labels = {"component": "worker-pod"}
-    if label_location in ("job", "both"):
-        job_labels.update(generated_labels)
-    if label_location in ("pod", "both"):
-        pod_labels.update(generated_labels)
-    template = {
-        "metadata": {"labels": job_labels},
-        "spec": {"template": {"metadata": {"labels": pod_labels}}},
-    }
-    original = copy.deepcopy(template)
-
-    cloned = server._clone_job_from_template(template, "orchestrator", "new-job", 123)
-
-    expected_labels = {"app": "worker", "task-id": "123", "triggered-by": "gateway"}
-    assert cloned["metadata"]["labels"] == expected_labels
-    assert cloned["spec"]["template"]["metadata"]["labels"] == {
-        "component": "worker-pod", **expected_labels,
-    }
-    assert template == original
-
-
-@pytest.mark.parametrize("ttl,expected", [(None, 86400), ("3600", 3600), ("1", 1), ("604800", 604800)])
-def test_clone_job_passes_assigned_payload_to_one_worker(monkeypatch, ttl, expected):
-    monkeypatch.delenv("TASK_JOB_TTL_SECONDS_AFTER_FINISHED", raising=False)
-    if ttl is not None:
-        monkeypatch.setenv("TASK_JOB_TTL_SECONDS_AFTER_FINISHED", ttl)
-    payload = {
-        "name": "workflow_dispatch", "ref": "refs/heads/main", "repo": "org/repo",
-        "payload": {"issue_number": 2, "edits": [{"path": "a.py", "content": "x=1"}]},
-    }
-    template = {
-        "spec": {
-            "parallelism": 2, "completions": 8, "backoffLimit": 4, "suspend": True,
-            "template": {"spec": {"containers": [{
-                "name": "coder", "env": [{"name": "GITHUB_TOKEN", "valueFrom": {
-                    "secretKeyRef": {"name": "secrets", "key": "github-token"},
-                }}],
-            }]}},
-        },
-    }
-    original = copy.deepcopy(template)
-    cloned = server._clone_job_from_template(template, "orchestrator", "new-job", 2, payload)
-    spec = cloned["spec"]
-    assert json.loads(json.dumps(cloned))["spec"]["ttlSecondsAfterFinished"] == expected
-    assert "suspend" not in spec
-    assert (spec["parallelism"], spec["completions"], spec["backoffLimit"]) == (1, 1, 0)
-    env = spec["template"]["spec"]["containers"][0]["env"]
-    assert not any(entry["name"] == "GITHUB_TOKEN" for entry in env)
-    assert next(entry for entry in env if entry["name"] == "REPO_GITHUB_PAT")["valueFrom"]["secretKeyRef"] == {
-        "name": "task-credential-2", "key": "repository-token",
-    }
-    values = {entry["name"]: entry.get("value") for entry in env}
-    assert values["ASSIGNED_TASK_ID"] == "2"
-    assert json.loads(values["ASSIGNED_TASK_PAYLOAD"]) == payload
-    assert template == original
-
-
-@pytest.mark.parametrize("ttl", ["", "invalid", "1.5", "true", "0", "-1", "604801"])
-def test_create_worker_job_rejects_invalid_ttl_before_submission(monkeypatch, ttl):
-    monkeypatch.setenv("TASK_JOB_TTL_SECONDS_AFTER_FINISHED", ttl)
-    request = Mock(return_value={"spec": {"template": {"spec": {"containers": [{"name": "coder"}]}}}})
-    monkeypatch.setattr(server, "_k8s_request", request)
-    with pytest.raises(ValueError, match="TASK_JOB_TTL_SECONDS_AFTER_FINISHED must be an integer from 1 to 604800"):
-        server._create_worker_job("orchestrator", "orchestrator-worker", "2", {"repo": "org/repo"})
-    request.assert_called_once_with("GET", "/apis/batch/v1/namespaces/orchestrator/jobs/orchestrator-worker")
+def test_gateway_has_no_kubernetes_job_dispatch_implementation():
+    assert not hasattr(server, "_create_worker_job")
+    assert not hasattr(server, "_clone_job_from_template")
 
 
 @pytest.mark.parametrize("payload", [
@@ -1077,8 +1030,8 @@ def test_create_worker_job_rejects_invalid_ttl_before_submission(monkeypatch, tt
     {"name": "orchestrator-agent", "ref": "main", "task_id": "", "payload": {"issue_number": 2}},
 ])
 def test_gateway_rejects_malformed_assignment_before_job_creation(monkeypatch, payload):
-    create = Mock(side_effect=AssertionError("No cluster calls expected"))
-    monkeypatch.setattr(server, "_create_worker_job", create)
+    k8s_request = Mock(side_effect=AssertionError("No cluster calls expected"))
+    monkeypatch.setattr(server, "_k8s_request", k8s_request)
     monkeypatch.setattr(server, "TOKEN", "test-token")
     body = json.dumps(payload).encode()
     handler = server.Handler.__new__(server.Handler)
@@ -1089,4 +1042,4 @@ def test_gateway_rejects_malformed_assignment_before_job_creation(monkeypatch, p
     handler.do_POST()
     handler.send_response.assert_called_once_with(400)
     assert "error" in json.loads(handler.wfile.getvalue())
-    create.assert_not_called()
+    k8s_request.assert_not_called()

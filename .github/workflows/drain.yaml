@@ -93,11 +93,15 @@ jobs:
                   if response.status != 202 or len(raw) > 1048576:
                       raise ValueError("Invalid intake response")
                   result = json.loads(raw)
-              task_id = result.get("task_id", "")
-              if not re.fullmatch(r"issue-[a-f0-9]{32}", task_id) or result.get("status") not in ("running", "completed"):
-                  raise ValueError("Invalid task acknowledgement")
+                  task_id = result.get("task_id", "")
+                  if not re.fullmatch(r"issue-[a-f0-9]{32}", task_id) or result.get("status") not in ("queued", "running", "completed"):
+                      raise ValueError("Invalid task acknowledgement")
           except urllib.error.HTTPError as error:
               raise SystemExit("Task intake failed: HTTP " + str(error.code)) from None
           except (OSError, ValueError, TypeError, AttributeError):
               raise SystemExit("Task intake failed; check transport, access and gateway task state") from None
           print("Task accepted: " + task_id)
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as step_summary:
+                  step_summary.write("Task accepted: " + task_id + "\n")
