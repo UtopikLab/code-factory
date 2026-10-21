@@ -814,15 +814,25 @@ def test_gateway_github_transport_uses_only_explicit_repository_token(monkeypatc
 
 @pytest.mark.parametrize("metadata,error", [
     ({"full_name": "org/other", "permissions": {"push": True}}, "identity-mismatch"),
-    ({"full_name": "org/repo", "permissions": {"pull": True, "push": True}}, "read-access-unverified"),
     ({"full_name": "org/repo"}, "read-access-unverified"),
 ])
-def test_repository_validation_rejects_wrong_identity_or_write_access(monkeypatch, metadata, error):
+def test_repository_validation_rejects_wrong_identity_or_missing_read_access(monkeypatch, metadata, error):
     github = Mock(return_value=metadata)
     monkeypatch.setattr(server, "_github", github)
     with pytest.raises(server.CredentialError, match=error):
         server._validate_repository("org/repo", 2, "repo-test-only")
     assert github.call_args.kwargs == {"token": "repo-test-only"}
+
+
+def test_repository_validation_accepts_repository_write_access(monkeypatch):
+    github = Mock(side_effect=[
+        {"full_name": "org/repo", "permissions": {"pull": True, "push": True}},
+        [], [], [], {"number": 2, "html_url": "https://github.com/org/repo/issues/2"},
+    ])
+    monkeypatch.setattr(server, "_github", github)
+    server._validate_repository("org/repo", 2, "repo-test-only")
+    assert len(github.call_args_list) == 5
+    assert all(call.kwargs == {"token": "repo-test-only"} for call in github.call_args_list)
 
 
 def test_durable_repo_scoped_tasks_and_report_retry(task_gateway):

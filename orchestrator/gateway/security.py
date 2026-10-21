@@ -37,7 +37,7 @@ def validate_repository(repo, issue, token, github, global_token=""):
         if metadata.get("full_name", "").lower() != repo.lower():
             raise CredentialError("repository-identity-mismatch")
         permissions = metadata.get("permissions", {})
-        if permissions.get("pull") is not True or permissions.get("push") is True or metadata.get("archived"):
+        if permissions.get("pull") is not True or metadata.get("archived"):
             raise CredentialError("repository-read-access-unverified")
         for path in ("/contents", "/pulls?per_page=1", "/issues?per_page=1"):
             github("GET", "/repos/" + quote(repo, safe="/") + path, token=token)
