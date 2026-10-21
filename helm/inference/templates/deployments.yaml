@@ -28,7 +28,7 @@ spec:
   # GPU scheduling race). Set via inference.gpuCount.
   replicas: {{ $inf.gpuCount | default 2 }}
   strategy:
-    type: RollingUpdate
+    type: Recreate
   selector:
     matchLabels:
       app: inference-server

@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -119,11 +120,31 @@ class RegistryValuesTests(unittest.TestCase):
         })
         self.assertNotEqual(result.returncode, 0)
 
+    def test_external_proxy_example(self):
+        example = HELM_DIR / "orchestrator" / "example.values.yaml"
+        contents = example.read_text()
+        self.assertNotIn("utopiklab.com", contents)
+        values = yaml.safe_load(contents)
+        self.assertEqual(values["supervisor"]["config"]["acceptor-url"],
+                         "https://gateway.example.com")
+        documents = self.documents("orchestrator", values)
+        ingress = next(document for document in documents if document["kind"] == "Ingress")
+        self.assertEqual(ingress["spec"]["rules"][0]["host"], "orchestrator.local")
+        self.assertNotIn("tls", ingress["spec"])
+        self.assertEqual(ingress["metadata"]["annotations"][
+            "traefik.ingress.kubernetes.io/router.entrypoints"], "web")
+
     def test_deploy_values_path_and_failure_propagation(self):
-        with tempfile.TemporaryDirectory(prefix="helm-registry-test-") as directory:
+        with tempfile.TemporaryDirectory(prefix="helm registry test-") as directory:
             root = Path(directory)
-            values = root / "private values.yaml"
-            values.write_text("registry:\n  create: false\n")
+            script = root / "deploy.sh"
+            shutil.copyfile(HELM_DIR / "deploy.sh", script)
+            default_private = root / "local.secrets-values.yaml"
+            custom_private = root / "private values.yaml"
+            chart_dir = root / "charts"
+            (chart_dir / "orchestrator").mkdir(parents=True)
+            default_overlay = chart_dir / "orchestrator" / "local.values.yaml"
+            custom_overlay = root / "custom proxy values.yaml"
             log = root / "calls.jsonl"
             for command in ("helm", "kubectl"):
                 executable = root / command
@@ -137,19 +158,46 @@ class RegistryValuesTests(unittest.TestCase):
                 )
                 executable.chmod(0o700)
             environment = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}",
-                               SECRETS_FILE=str(values), HELM_DIR=str(HELM_DIR), TEST_CALLS=str(log))
-            for failure in (False, True):
-                with self.subTest(failure=failure):
-                    log.unlink(missing_ok=True)
-                    environment["TEST_UPGRADE_EXIT"] = "23" if failure else "0"
-                    result = subprocess.run(["bash", str(HELM_DIR / "deploy.sh")],
-                                            env=environment, capture_output=True, text=True, check=False)
-                    self.assertEqual(result.returncode, 23 if failure else 0)
-                    calls = [json.loads(line) for line in log.read_text().splitlines()]
-                    upgrades = [call for call in calls if call[:2] == ["helm", "upgrade"]]
-                    self.assertEqual(len(upgrades), 1 if failure else 2)
-                    for call in upgrades:
-                        self.assertEqual(call[call.index("--values") + 1], str(values))
+                               HELM_DIR=str(chart_dir), TEST_CALLS=str(log))
+            environment.pop("ORCHESTRATOR_VALUES_FILE", None)
+            for overlay_mode in ("absent", "default", "custom"):
+                default_overlay.unlink(missing_ok=True)
+                custom_overlay.unlink(missing_ok=True)
+                environment.pop("ORCHESTRATOR_VALUES_FILE", None)
+                overlay = custom_overlay if overlay_mode == "custom" else default_overlay
+                if overlay_mode != "absent":
+                    overlay.write_text("gateway:\n  ingress:\n    tlsTermination: external\n")
+                if overlay_mode == "custom":
+                    environment["ORCHESTRATOR_VALUES_FILE"] = str(overlay)
+                for private_mode in ("absent", "default", "custom"):
+                    default_private.unlink(missing_ok=True)
+                    custom_private.unlink(missing_ok=True)
+                    environment.pop("SECRETS_FILE", None)
+                    values = custom_private if private_mode == "custom" else default_private
+                    if private_mode != "absent":
+                        values.write_text("registry:\n  create: false\n")
+                    if private_mode == "custom":
+                        environment["SECRETS_FILE"] = str(values)
+                    for failure in (False, True):
+                        with self.subTest(overlay=overlay_mode, private=private_mode, failure=failure):
+                            log.unlink(missing_ok=True)
+                            environment["TEST_UPGRADE_EXIT"] = "23" if failure else "0"
+                            result = subprocess.run(["bash", str(script)],
+                                                    env=environment, capture_output=True,
+                                                    text=True, check=False)
+                            self.assertEqual(result.returncode, 23 if failure else 0)
+                            calls = [json.loads(line) for line in log.read_text().splitlines()]
+                            upgrades = [call for call in calls if call[:2] == ["helm", "upgrade"]]
+                            self.assertEqual(len(upgrades), 1 if failure else 2)
+                            for call in upgrades:
+                                expected = []
+                                if "orchestrator" in call and overlay_mode != "absent":
+                                    expected.append(str(overlay))
+                                if private_mode != "absent":
+                                    expected.append(str(values))
+                                actual = [call[index + 1] for index, argument in enumerate(call)
+                                          if argument == "--values"]
+                                self.assertEqual(actual, expected)
 
 
 if __name__ == "__main__":

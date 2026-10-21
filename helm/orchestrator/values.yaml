@@ -16,7 +16,7 @@ registry:
 # Supervisor (code-factory-supervisor) Deployment — the resident LangGraph loop.
 # Shared values for both the supervisor and task-acceptor resources.
 supervisor:
-  image: "ghcr.io/utopiklab/code-factory-supervisor:e863bedf3321541f1997f6591500d0dc784d1c26"
+  image: "ghcr.io/utopiklab/code-factory-supervisor:latest"
   imagePullPolicy: Always
   replicas: 1
   labels:
@@ -30,11 +30,11 @@ supervisor:
   # config.repo seeds the gateway's ALLOWED_REPO env. "*" means any repo is allowed.
   config:
     repo: "*"
-    # In-cluster gateway DNS for the coder-worker's ACCEPTOR_URL. Defaults to the
-    # gateway Service DNS (e.g. orchestrator-orchestrator-gateway.orchestrator.svc.cluster.local:8000).
+    # Reachable HTTPS origin for the coder-worker's ACCEPTOR_URL, independent of
+    # gateway.ingress.host when an external TLS proxy rewrites Host.
     acceptor-url: "https://orchestrator.local"
     # OpenAI API key consumed by the supervisor loop + gateway. Sourced from the
-    # secrets-values.yaml chart (passed via `--values`), so it is empty here by
+    # local.secrets-values.yaml file (passed via `--values`), so it is empty here by
     # default and overridden at deploy time.
     openai-api-key: "<your-openai-key>"
 
@@ -51,7 +51,7 @@ supervisor:
 # (the worker Job image + resource config).
 worker:
   name: worker
-  image: "ghcr.io/utopiklab/code-factory-worker:e863bedf3321541f1997f6591500d0dc784d1c26"
+  image: "ghcr.io/utopiklab/code-factory-worker:latest"
   imagePullPolicy: Always
   labels:
     app: orchestrator
@@ -78,9 +78,11 @@ gateway:
   trustedTlsProxyCidrs: []
   ingress:
     host: "orchestrator.local"
+    tlsTermination: internal
     tlsSecretName: "orchestrator-gateway-tls"
   taskCredentialTtlSeconds: 86400
-  image: "ghcr.io/utopiklab/code-factory-gateway:e863bedf3321541f1997f6591500d0dc784d1c26"
+  taskJobTtlSecondsAfterFinished: 86400
+  image: "ghcr.io/utopiklab/code-factory-gateway:latest"
   imagePullPolicy: Always
   replicas: 1
   persistence:

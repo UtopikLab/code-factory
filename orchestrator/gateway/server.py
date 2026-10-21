@@ -403,6 +403,16 @@ def _validate_assigned_task_id(task_id):
     return task_id
 
 
+def _task_job_ttl_seconds():
+    try:
+        ttl = int(os.environ.get("TASK_JOB_TTL_SECONDS_AFTER_FINISHED", "86400"))
+    except ValueError:
+        raise ValueError("TASK_JOB_TTL_SECONDS_AFTER_FINISHED must be an integer from 1 to 604800") from None
+    if not 1 <= ttl <= 604800:
+        raise ValueError("TASK_JOB_TTL_SECONDS_AFTER_FINISHED must be an integer from 1 to 604800")
+    return ttl
+
+
 def _clone_job_from_template(template_job, namespace, job_name, task_id, payload=None):
     template_spec = template_job.get("spec", {})
     source_labels = template_job.get("metadata", {}).get("labels", {}) or {}
@@ -454,6 +464,7 @@ def _clone_job_from_template(template_job, namespace, job_name, task_id, payload
             "parallelism": 1 if payload is not None else template_spec.get("parallelism"),
             "completions": 1 if payload is not None else template_spec.get("completions"),
             "backoffLimit": 0 if payload is not None else template_spec.get("backoffLimit"),
+            "ttlSecondsAfterFinished": _task_job_ttl_seconds(),
             "template": pod_template,
         },
     }

@@ -1,6 +1,51 @@
 # k8s-node01 Orchestrator Deployment Summary
 
-**Status:** ✅ UP AND RUNNING
+**Status:** Partial recovery; gateway HTTPS intake remains blocked (2026-10-21).
+
+## Verified Recovery: 2026-10-21
+
+- Both inference Deployments were patched sequentially to `Recreate`, matching
+  `helm/inference/templates/deployments.yaml`. Both reached generation 60,
+  observed generation 60, one updated/Ready replica, and
+  `Progressing=True / NewReplicaSetAvailable`. GPU requests and image references
+  were unchanged. Both running images resolved to
+  `ghcr.io/ggml-org/llama.cpp@sha256:31b39eacce2bab5fde9286ec3980ed5548a3987644e94da0d0c2092f93313538`.
+- Live remediation used individual `kubectl patch deployment` operations and
+  bounded `kubectl rollout status` checks, not a Helm release upgrade. The deploy
+  script was not run: it upgrades both releases and deletes the seed worker Job.
+- HTTPS verification for `orchestrator.local` failed hostname validation. The
+  referenced `orchestrator-gateway-tls` Secret is absent; no cert-manager CRDs,
+  Traefik certificate resolver, or reusable ingress TLS certificate was found.
+  The only TLS Secret found was the Kubernetes serving certificate, not an
+  application certificate. Local hostname resolution also failed.
+- Required TLS prerequisite: an approved, reachable DNS hostname and a valid
+  certificate/chain trusted by both GitHub runners and internal workers, supplied
+  through an approved certificate mechanism. GitHub reachability is unverified.
+  No certificate bypass or self-signed trust rollout was used.
+- Current Traefik pod IP is `10.42.0.46` with host networking disabled; this is
+  topology evidence, not a captured gateway peer address. Proxy trust remains
+  disabled with no trusted CIDRs. Before enabling it, confirm the immediate peer,
+  restrict trust to its narrow address range, and validate namespace ingress
+  isolation without disrupting external metrics scraping. No isolation policy
+  was added while TLS and the final access path remain unresolved.
+- The local gateway TTL implementation and chart setting are not deployed:
+  running `/app/server.py` lacks `_task_job_ttl_seconds`, and
+  `TASK_JOB_TTL_SECONDS_AFTER_FINISHED` is absent. CI publishes seven-character
+  SHA tags and `latest`, and cannot include the uncommitted TTL changes. A
+  rootless builder is available, but access to the K3s containerd socket is
+  denied. Deployment needs explicit image-publication permission or an
+  administrator-approved local import; neither was attempted.
+- Gateway and supervisor remain Ready with their existing image references.
+  Gateway runtime digest is
+  `ghcr.io/utopiklab/code-factory-gateway@sha256:e972d35041ebe8a4111c225f890bb76b93b159a4195fc0b1e51dca5c841c7978`.
+  The task PVC is Bound; `/data/tasks/tasks.sqlite3` does not yet exist. No task
+  was submitted to initialize it. The seed Job remains suspended with no TTL;
+  all seven historical Jobs and credential Secrets were preserved.
+- Focused validation: 112 tests and 24 subtests passed across gateway and Helm
+  registry tests; both charts passed `helm lint`; render assertions verified
+  `Recreate`, unchanged GPU allocations, the 86400-second TTL env, and fail-closed
+  proxy defaults. Older sections below describe the original deployment, not a
+  current end-to-end health guarantee.
 
 **Date Deployed:** 2026-10-11  
 **Architecture:** Keep-vs-defer minimal loop  

@@ -4,7 +4,7 @@ This is a local implementation, not a deployment or a token rotation. Treat the
 previously exposed classic PAT as compromised. Its owner must revoke/replace it
 through a separately authorized process, audit its consumers and activity, and
 replace each consumer with a credential for its actual purpose. Do not reuse it
-for migration. The local real secret-values file is intentionally not modified.
+for migration. The local private file is renamed without changing its contents.
 
 ## Three Independent Credentials
 
@@ -20,12 +20,12 @@ or managed-identity integration is claimed by this Kubernetes implementation.
 
 ## Private Helm Values
 
-Use `helm/secrets-values.yaml` like a local `.env` file, but with YAML syntax:
+Use `helm/local.secrets-values.yaml` like a local `.env` file, but with YAML syntax:
 
 ```sh
 # Only on first setup; do not overwrite an existing private file.
-test -e helm/secrets-values.yaml || (umask 077; cp helm/example.secrets-values.yaml helm/secrets-values.yaml)
-chmod 600 helm/secrets-values.yaml
+test -e helm/local.secrets-values.yaml || (umask 077; cp helm/example.secrets-values.yaml helm/local.secrets-values.yaml)
+chmod 600 helm/local.secrets-values.yaml
 ```
 
 Edit that private file locally. Replace the compromised PAT with a newly issued
@@ -74,7 +74,7 @@ rendered Secrets in release records, including the registry credential in both
 namespaces. Restrict Helm release/Secret RBAC, backups and local file access, and
 enable cluster encryption at rest. Do not use `helm get values`, rendered-manifest
 dumps, `--debug`, or shell tracing with real credentials. This change does not
-revoke/rotate any token, edit the existing private file, or deploy anything.
+revoke/rotate any token, change the private file's contents, or deploy anything.
 
 ## Repository Permission Preflight
 
@@ -113,10 +113,14 @@ Before a separately authorized rollout:
    Alternatively set `existingSecret` empty and supply `gateway.auth.token` through
    your secure Helm mechanism. It must be at least 32 characters. Do not dump
    rendered Secret manifests, enable shell tracing, or put secrets in CLI arguments.
-2. Set `gateway.ingress.host`, `gateway.ingress.tlsSecretName`, and
-   `supervisor.config.acceptor-url` to a reachable HTTPS gateway origin with a
-   trusted certificate. The ingress uses Traefik `websecure` and TLS. Workers must
-   reach this HTTPS origin too; plain internal Service URLs are not accepted.
+2. Choose `gateway.ingress.tlsTermination`: `internal` (default) uses Traefik
+   `websecure` and requires a nonempty `gateway.ingress.tlsSecretName` for the
+   routing host. `external` uses Traefik `web` over HTTP, without a TLS annotation
+   or TLS Secret reference; no in-cluster TLS Secret is required in this mode.
+   Set `gateway.ingress.host` to the Host received by Traefik, including any
+   deliberate upstream rewrite. Independently set `supervisor.config.acceptor-url`
+   to the public HTTPS origin with a trusted certificate. Workers must resolve
+   and reach that origin; plain internal Service URLs are not accepted.
 3. Behind that TLS terminator, explicitly enable `gateway.trustTlsProxy` and set
    `gateway.trustedTlsProxyCidrs` to the **actual immediate proxy source addresses**.
    Restrict gateway port 8000 to that proxy using cluster network policy/firewalls;
@@ -128,6 +132,110 @@ Before a separately authorized rollout:
    (HTTPS URL ending `/api/v1/tasks/spawn`), `ORCHESTRATOR_TOKEN` (gateway auth),
    and `TASK_REPOSITORY_TOKEN` (that repository's dedicated fine-grained PAT).
    Use the canonical [drain workflow](../../.github/workflows/drain.yaml).
+
+### External Reverse Proxy TLS Route
+
+The optional external TLS route is: external TLS reverse proxy -> HTTP ingress
+-> gateway. The reverse proxy is equipment outside this project's scope; the
+project does not manage its configuration. Set the Ingress host to the Host
+received by Traefik. If the external proxy deliberately rewrites Host to
+`orchestrator.local`, keep that internal routing host even though the public
+hostname differs. Without a rewrite, use the public hostname instead.
+For example, with a public HTTPS origin and an internal Host rewrite:
+
+```yaml
+gateway:
+    ingress:
+         tlsTermination: external
+         host: orchestrator.local
+         tlsSecretName: ""
+supervisor:
+    config:
+      acceptor-url: https://gateway.example.com
+```
+
+Keep environment-specific routing in an ignored local override, not in chart
+defaults or the committed [external proxy example](../../helm/orchestrator/example.values.yaml).
+On first setup only (preserves an existing operator file):
+
+```sh
+test -e helm/orchestrator/local.values.yaml || cp helm/orchestrator/example.values.yaml helm/orchestrator/local.values.yaml
+git check-ignore helm/orchestrator/local.values.yaml
+```
+
+Edit the local file's public HTTPS origin and routing host for your environment.
+The example uses `gateway.example.com`; it is never automatically loaded.
+During a separately authorized rollout, `./helm/deploy.sh` automatically loads
+the local override if present, for the orchestrator chart only. Precedence is
+chart `values.yaml`, then `helm/orchestrator/local.values.yaml`, then private
+`helm/local.secrets-values.yaml`
+(last wins). Set `ORCHESTRATOR_VALUES_FILE` to use a different local path;
+`SECRETS_FILE` still selects the private file. Keep custom paths ignored too.
+For manual Helm commands, pass the local override with `--values` before the
+private values file. Without an override, generic chart defaults retain internal TLS.
+
+The filename prefix identifies the environment: `values.yaml` holds shared,
+tracked defaults; `example.values.yaml` is a tracked generic example;
+`local.values.yaml` is an ignored environment override; and
+`local.secrets-values.yaml` holds ignored credentials. The tracked credential
+example remains `helm/example.secrets-values.yaml`. Future environments may use
+`dev`, `staging`, or `prod` prefixes, but the script only defaults to `local`;
+other paths require the explicit overrides above. Inference receives the shared
+private file, never the orchestrator's local override. Keep private files and
+environment-specific overrides ignored before using other prefixes.
+
+`.gitignore` does not protect files already tracked by Git. If this local override
+was previously tracked, run `git rm --cached -- helm/orchestrator/local.values.yaml`
+to stage its removal from version control while keeping the file on disk. Review
+that staged change before committing. Ignoring or untracking does not remove old
+values from commit history. Do not force-add local overrides.
+
+These are routing values, not a complete secure deployment configuration. They
+do not enable proxy trust. Keep Traefik's `web` entrypoint free of a global
+redirect to `websecure` for this route; credential-bearing clients reject
+redirects. Do not change the Ingress host to the public hostname while the proxy
+rewrites Host. Configure source workflows' `ORCHESTRATOR_URL` as
+the public HTTPS origin followed by `/api/v1/tasks/spawn`, for example
+`https://gateway.example.com/api/v1/tasks/spawn`.
+
+Before deploying external mode, verify all of the following:
+
+- Obtain the external proxy frontend VIP/IP for DNS and certificate checks, and
+   the actual proxy backend source IP as observed by Traefik. These can differ;
+   neither should be inferred from routing configuration. DNS must resolve the public
+   name to the frontend from workers and submitters. Verify the frontend serves
+   a certificate valid for the configured public hostname, including its chain in
+   those clients' trust stores. Do not bypass verification or invent a certificate.
+- On the external proxy frontend, remove incoming `X-Forwarded-Proto` before
+   setting `X-Forwarded-Proto: https` only for verified TLS requests. Plain HTTP must
+   not reach this credential-bearing backend with a trusted HTTPS assertion.
+   The Host rewrite is separate and does not establish this policy.
+- Configure Traefik `entryPoints.web.forwardedHeaders.trustedIPs` with only the
+   verified external proxy source addresses; never enable forwarded-header insecure mode.
+   Confirm untrusted direct traffic cannot supply an accepted HTTPS assertion.
+- Establish the actual immediate Traefik peer addresses seen by the gateway
+   before setting `gateway.trustTlsProxy: true` and
+   `gateway.trustedTlsProxyCidrs`. The gateway checks its TCP peer, not the public
+   client or external proxy IP. Restrict gateway ingress to the verified proxy identity
+   using an enforced CNI/network boundary; do not infer a selector or trust a broad
+   pod CIDR from routing configuration. Validate spoof rejection and the deployed image's
+   proxy-check behavior before credential-bearing use.
+
+On 2026-10-21, a credential-free GET to `http://192.168.1.51/api/v1` with
+`Host: orchestrator.local` returned HTTP 404 while the live Ingress used only
+`websecure`. This supports the entrypoint mismatch; it is not authentication or
+end-to-end TLS acceptance evidence. The local chart change does not itself
+reconfigure the external reverse proxy, DNS, Traefik, gateway trust, or a running workload.
+
+After correcting the public hostname on 2026-10-21, the local resolver returned
+`70.53.188.185` via `wan1.utopiklab.com`. OpenSSL verified the certificate chain
+and hostname for `orchestrator.utopiklab.com`: issuer Let's Encrypt `YR1`, SAN
+`*.utopiklab.com`, valid 2026-10-12 through 2027-01-10. A credential-free HTTPS
+GET to `/healthz` returned HTTP 404 with successful certificate verification and
+no redirect. The Ingress only routes `/api/v1`, so this response does not establish
+an API routing failure or successful authentication. No worker pod was running;
+worker-origin DNS/TLS reachability remains unverified. The public DNS address is
+not evidence of the external proxy's backend source IP or the gateway's immediate peer.
 
 Runtime `GITHUB_TOKEN` is not a fallback for gateway authentication or repository
 work. Reconcile old in-flight tasks before switching versions; old DB rows are not
@@ -187,6 +295,35 @@ Do not attach credential Secrets to Job ownerReferences: Job garbage collection
 could otherwise delete a credential before lifecycle retries finish. Restore the
 database and task Secrets consistently; callback hashes prevent adopting stale
 same-name Secrets after a partial restore.
+
+## Finished Task Job Retention
+
+New gateway-created task Jobs set `spec.ttlSecondsAfterFinished` to 86400
+seconds (24 hours) by default. Configure retention in orchestrator Helm values:
+
+```yaml
+gateway:
+   taskJobTtlSecondsAfterFinished: 86400
+```
+
+The setting accepts integers from 1 through 604800 seconds (seven days) and is
+passed to the gateway as `TASK_JOB_TTL_SECONDS_AFTER_FINISHED`. Invalid runtime
+values fail Job creation rather than silently disabling cleanup. The suspended
+worker seed remains a template with no TTL; assigned Jobs receive the TTL directly.
+
+Kubernetes TTL-after-finished cleanup makes a Job eligible for cascading deletion
+after it reaches `Complete` or `Failed` and the retention interval elapses. Cleanup
+is asynchronous and removes dependent Pods and their Kubernetes-accessible logs;
+export logs elsewhere for longer retention. This is not a running-task deadline.
+The gateway's SQLite task records remain on its durable PVC. Credential expiry,
+terminal processing and Secret cleanup remain independent; Secrets are not owned
+by Jobs, so lifecycle retries can continue after Job cleanup.
+
+Activation requires rebuilding the gateway image and a separately authorized Helm
+deployment. No historical Jobs are changed or backfilled. Adding a TTL to an old
+finished Job can make it immediately eligible for deletion, including its Pods
+and logs; any such migration requires separate review and authorization. Local
+render and mocked submission tests do not establish live TTL-controller behavior.
 
 ## Cluster Boundary And Local Evidence
 

@@ -1,0 +1,8 @@
+gateway:
+  ingress:
+    tlsTermination: external
+    host: orchestrator.local
+    tlsSecretName: ""
+supervisor:
+  config:
+    acceptor-url: https://gateway.example.com

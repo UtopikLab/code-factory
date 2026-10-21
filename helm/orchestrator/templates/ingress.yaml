@@ -1,11 +1,9 @@
 {{/*
 Ingress for the orchestrator gateway (task-acceptor).
 
-Exposes task intake and reporting through the TLS-only Traefik entrypoint.
-
-Note: `orchestrator.local` must resolve (Traefik hosts entry or a DNS
-record). For pure localhost testing you can temporarily change the host to
-`localhost`.
+Exposes task intake and reporting through the configured Traefik entrypoint.
+The routing host can differ from the public HTTPS worker origin when an
+external TLS terminator rewrites Host.
 */}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -13,8 +11,12 @@ metadata:
   name: {{ .Chart.Name }}-orchestrator-gateway-ingress
   namespace: {{ .Values.namespace }}
   annotations:
+    {{- if eq .Values.gateway.ingress.tlsTermination "internal" }}
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.tls: "true"
+    {{- else }}
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    {{- end }}
     traefik.ingress.kubernetes.io/service.method: ANY
   labels:
     app: {{ .Chart.Name }}
@@ -22,9 +24,11 @@ metadata:
     app.kubernetes.io/component: task-acceptor
     app.k8s.io/managed-by: Helm
 spec:
+  {{- if eq .Values.gateway.ingress.tlsTermination "internal" }}
   tls:
     - hosts: [{{ .Values.gateway.ingress.host | quote }}]
       secretName: {{ .Values.gateway.ingress.tlsSecretName }}
+  {{- end }}
   rules:
     - host: {{ .Values.gateway.ingress.host }}
       http:

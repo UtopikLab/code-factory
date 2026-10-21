@@ -130,6 +130,9 @@
         },
         "gateway": {
             "type": "object",
+            "required": [
+                "taskJobTtlSecondsAfterFinished"
+            ],
             "allOf": [
                 {
                     "if": {
@@ -208,24 +211,53 @@
                 },
                 "ingress": {
                     "type": "object",
+                    "additionalProperties": false,
                     "required": [
                         "host",
-                        "tlsSecretName"
+                        "tlsTermination"
                     ],
+                    "if": {
+                        "properties": {
+                            "tlsTermination": {
+                                "const": "internal"
+                            }
+                        }
+                    },
+                    "then": {
+                        "required": [
+                            "tlsSecretName"
+                        ],
+                        "properties": {
+                            "tlsSecretName": {
+                                "minLength": 1
+                            }
+                        }
+                    },
                     "properties": {
                         "host": {
                             "type": "string",
                             "minLength": 1
                         },
-                        "tlsSecretName": {
+                        "tlsTermination": {
                             "type": "string",
-                            "minLength": 1
+                            "enum": [
+                                "internal",
+                                "external"
+                            ]
+                        },
+                        "tlsSecretName": {
+                            "type": "string"
                         }
                     }
                 },
                 "taskCredentialTtlSeconds": {
                     "type": "integer",
                     "minimum": 60,
+                    "maximum": 604800
+                },
+                "taskJobTtlSecondsAfterFinished": {
+                    "type": "integer",
+                    "minimum": 1,
                     "maximum": 604800
                 },
                 "persistence": {

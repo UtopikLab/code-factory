@@ -58,6 +58,8 @@ spec:
               value: {{ join "," .Values.gateway.trustedTlsProxyCidrs | quote }}
             - name: TASK_CREDENTIAL_TTL_SECONDS
               value: {{ .Values.gateway.taskCredentialTtlSeconds | quote }}
+            - name: TASK_JOB_TTL_SECONDS_AFTER_FINISHED
+              value: {{ .Values.gateway.taskJobTtlSecondsAfterFinished | quote }}
             - name: ALLOWED_REPOS
               value: {{ default .Values.supervisor.config.repo .Values.gateway.config.repo | quote }}
             - name: TASK_DB_PATH

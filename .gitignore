@@ -29,3 +29,5 @@ err.txt
 vendored/
 *.lock-bins/
 secrets-values.yaml
+local.secrets-values.yaml
+local.values.yaml

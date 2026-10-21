@@ -89,6 +89,7 @@ def test_task_secret_is_immutable_and_duplicate_cannot_replace(task_gateway):
     assert "callback-test-only" not in json.dumps(dict(task))
     secret = server._k8s_request("GET", server._secret_path(task["credential_ref"]))
     assert secret["immutable"] is True
+    assert "ownerReferences" not in secret["metadata"]
     assert base64.b64decode(secret["data"]["repository-token"]) == b"repo-test-only"
     assert task_request("POST", "/api/v1/tasks/spawn", issue_payload(), repository_token="different-repo-test-only")[0] == 202
     assert server._task_repository_token(task) == "repo-test-only"
@@ -394,7 +395,49 @@ def test_helm_credential_references_and_rbac():
     assert next(document for document in secrets if document["metadata"]["name"] == "orchestrator-gateway-auth")["data"].keys() == {"gateway-auth-token"}
 
 
+@pytest.mark.parametrize("mode,secret,profile", [("internal", "gateway-test-tls", False), ("external", "", False),
+                                               ("external", None, False), ("external", "", True)])
+def test_helm_ingress_tls_termination(mode, secret, profile):
+    if not shutil.which("helm"):
+        pytest.skip("helm unavailable")
+    chart = Path(__file__).resolve().parents[2] / "helm/orchestrator"
+    origin = "https://gateway.example.com"
+    values = {"gateway": {"ingress": {"host": "orchestrator.local", "tlsTermination": mode, "tlsSecretName": secret}},
+              "supervisor": {"config": {"acceptor-url": origin}}}
+    if profile:
+        values = yaml.safe_load((chart / "example.values.yaml").read_text())
+        origin = values["supervisor"]["config"]["acceptor-url"]
+    rendered = subprocess.run(["helm", "template", "ingress-check", str(chart), "--values", "-"],
+                              input=yaml.safe_dump(values), capture_output=True, text=True, check=True)
+    documents = [document for document in yaml.safe_load_all(rendered.stdout) if document]
+    ingress = next(document for document in documents if document["kind"] == "Ingress")
+    assert ingress["spec"]["rules"][0]["host"] == "orchestrator.local"
+    annotations = ingress["metadata"]["annotations"]
+    if mode == "internal":
+        assert annotations["traefik.ingress.kubernetes.io/router.entrypoints"] == "websecure"
+        assert annotations["traefik.ingress.kubernetes.io/router.tls"] == "true"
+        assert ingress["spec"]["tls"] == [{"hosts": ["orchestrator.local"], "secretName": secret}]
+    else:
+        assert annotations["traefik.ingress.kubernetes.io/router.entrypoints"] == "web"
+        assert "traefik.ingress.kubernetes.io/router.tls" not in annotations
+        assert "tls" not in ingress["spec"]
+    job = next(document for document in documents if document["kind"] == "Job")
+    env = {entry["name"]: entry for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+    reference = env["ACCEPTOR_URL"]["valueFrom"]["configMapKeyRef"]
+    config = next(document for document in documents if document["kind"] == "ConfigMap"
+                  and document["metadata"]["name"] == reference["name"])
+    assert config["data"][reference["key"]] == origin
+    gateway = next(document for document in documents if document["kind"] == "Deployment"
+                   and document["metadata"]["name"] == "orchestrator-gateway")
+    env = {entry["name"]: entry.get("value") for entry in gateway["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["TRUST_TLS_PROXY"] == "false"
+    assert env["TRUSTED_TLS_PROXY_CIDRS"] == ""
+
+
 @pytest.mark.parametrize("setting", ["supervisor.config.acceptor-url=http://gateway", "gateway.trustTlsProxy=true",
+                                    "gateway.ingress.tlsTermination=invalid", "gateway.ingress.tlsSecretName=",
+                                    "gateway.ingress.tlsTermination=null", "gateway.ingress.tlsSecretName=null",
+                                    "gateway.ingress.externalTls=true",
                                     "gateway.taskCredentialTtlSeconds=0", "gateway.auth.existingSecret=", "gateway.auth.token=conflicting-test-only"])
 def test_helm_rejects_unsafe_credential_configuration(setting):
     if not shutil.which("helm"):
@@ -403,6 +446,51 @@ def test_helm_rejects_unsafe_credential_configuration(setting):
     rendered = subprocess.run(["helm", "template", "credential-check", str(chart), "--set", setting],
                               capture_output=True, text=True, check=False)
     assert rendered.returncode != 0
+
+
+@pytest.mark.parametrize("ttl", [None, 3600, 1, 604800])
+def test_helm_task_job_ttl_reaches_submitted_job(monkeypatch, ttl):
+    if not shutil.which("helm"):
+        pytest.skip("helm unavailable")
+    chart = Path(__file__).resolve().parents[2] / "helm/orchestrator"
+    values = {} if ttl is None else {"gateway": {"taskJobTtlSecondsAfterFinished": ttl}}
+    rendered = subprocess.run(["helm", "template", "ttl-check", str(chart), "--values", "-"],
+                              input=yaml.safe_dump(values), capture_output=True, text=True, check=True)
+    documents = [document for document in yaml.safe_load_all(rendered.stdout) if document]
+    seed = next(document for document in documents if document["kind"] == "Job")
+    original = copy.deepcopy(seed)
+    assert seed["spec"]["suspend"] is True
+    assert seed["spec"]["backoffLimit"] == 0
+    assert "ttlSecondsAfterFinished" not in seed["spec"]
+    gateway = next(document for document in documents if document["kind"] == "Deployment"
+                   and document["metadata"]["name"] == "orchestrator-gateway")
+    env = {entry["name"]: entry.get("value")
+           for entry in gateway["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["TASK_JOB_TTL_SECONDS_AFTER_FINISHED"] == str(ttl if ttl is not None else 86400)
+    assert env["TASK_CREDENTIAL_TTL_SECONDS"] == "86400"
+    monkeypatch.setenv("TASK_JOB_TTL_SECONDS_AFTER_FINISHED", env["TASK_JOB_TTL_SECONDS_AFTER_FINISHED"])
+    request = Mock(side_effect=[seed, {"metadata": {"name": "assigned-job", "uid": "assigned-uid"}}])
+    monkeypatch.setattr(server, "_k8s_request", request)
+    result = server._create_worker_job("orchestrator", "orchestrator-worker", "2", {"repo": "org/repo"})
+    assert result == {"name": "assigned-job", "uid": "assigned-uid"}
+    assert request.call_args.args == ("POST", "/apis/batch/v1/namespaces/orchestrator/jobs")
+    submitted = json.loads(json.dumps(request.call_args.kwargs["body"]))
+    assert submitted["spec"]["ttlSecondsAfterFinished"] == (ttl if ttl is not None else 86400)
+    assert "suspend" not in submitted["spec"]
+    assert "ownerReferences" not in submitted["metadata"]
+    assert seed == original
+
+
+@pytest.mark.parametrize("ttl", [0, -1, 604801, 1.5, "3600", True, None])
+def test_helm_rejects_invalid_task_job_ttl(ttl):
+    if not shutil.which("helm"):
+        pytest.skip("helm unavailable")
+    chart = Path(__file__).resolve().parents[2] / "helm/orchestrator"
+    rendered = subprocess.run(["helm", "template", "ttl-check", str(chart), "--values", "-"],
+                              input=yaml.safe_dump({"gateway": {"taskJobTtlSecondsAfterFinished": ttl}}),
+                              capture_output=True, text=True, check=False)
+    assert rendered.returncode != 0
+    assert "taskJobTtlSecondsAfterFinished" in rendered.stderr
 
 
 def test_gateway_github_transport_uses_only_explicit_repository_token(monkeypatch):
@@ -712,14 +800,18 @@ def test_clone_job_strips_generated_labels(label_location):
     assert template == original
 
 
-def test_clone_job_passes_assigned_payload_to_one_worker():
+@pytest.mark.parametrize("ttl,expected", [(None, 86400), ("3600", 3600), ("1", 1), ("604800", 604800)])
+def test_clone_job_passes_assigned_payload_to_one_worker(monkeypatch, ttl, expected):
+    monkeypatch.delenv("TASK_JOB_TTL_SECONDS_AFTER_FINISHED", raising=False)
+    if ttl is not None:
+        monkeypatch.setenv("TASK_JOB_TTL_SECONDS_AFTER_FINISHED", ttl)
     payload = {
         "name": "workflow_dispatch", "ref": "refs/heads/main", "repo": "org/repo",
         "payload": {"issue_number": 2, "edits": [{"path": "a.py", "content": "x=1"}]},
     }
     template = {
         "spec": {
-            "parallelism": 2, "completions": 8, "backoffLimit": 4,
+            "parallelism": 2, "completions": 8, "backoffLimit": 4, "suspend": True,
             "template": {"spec": {"containers": [{
                 "name": "coder", "env": [{"name": "GITHUB_TOKEN", "valueFrom": {
                     "secretKeyRef": {"name": "secrets", "key": "github-token"},
@@ -730,6 +822,8 @@ def test_clone_job_passes_assigned_payload_to_one_worker():
     original = copy.deepcopy(template)
     cloned = server._clone_job_from_template(template, "orchestrator", "new-job", 2, payload)
     spec = cloned["spec"]
+    assert json.loads(json.dumps(cloned))["spec"]["ttlSecondsAfterFinished"] == expected
+    assert "suspend" not in spec
     assert (spec["parallelism"], spec["completions"], spec["backoffLimit"]) == (1, 1, 0)
     env = spec["template"]["spec"]["containers"][0]["env"]
     assert not any(entry["name"] == "GITHUB_TOKEN" for entry in env)
@@ -740,6 +834,16 @@ def test_clone_job_passes_assigned_payload_to_one_worker():
     assert values["ASSIGNED_TASK_ID"] == "2"
     assert json.loads(values["ASSIGNED_TASK_PAYLOAD"]) == payload
     assert template == original
+
+
+@pytest.mark.parametrize("ttl", ["", "invalid", "1.5", "true", "0", "-1", "604801"])
+def test_create_worker_job_rejects_invalid_ttl_before_submission(monkeypatch, ttl):
+    monkeypatch.setenv("TASK_JOB_TTL_SECONDS_AFTER_FINISHED", ttl)
+    request = Mock(return_value={"spec": {"template": {"spec": {"containers": [{"name": "coder"}]}}}})
+    monkeypatch.setattr(server, "_k8s_request", request)
+    with pytest.raises(ValueError, match="TASK_JOB_TTL_SECONDS_AFTER_FINISHED must be an integer from 1 to 604800"):
+        server._create_worker_job("orchestrator", "orchestrator-worker", "2", {"repo": "org/repo"})
+    request.assert_called_once_with("GET", "/apis/batch/v1/namespaces/orchestrator/jobs/orchestrator-worker")
 
 
 @pytest.mark.parametrize("payload", [

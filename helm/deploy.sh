@@ -26,7 +26,8 @@ HELM_DIR="${HELM_DIR:-$SCRIPT_DIR}"
 # Optional private YAML values file, passed to both charts via `--values`.
 # The file is git-ignored and local-only, so it is optional: if
 # it is absent the deploy proceeds exactly as before (no `--values`).
-SECRETS_FILE="${SECRETS_FILE:-${SCRIPT_DIR}/secrets-values.yaml}"
+SECRETS_FILE="${SECRETS_FILE:-${SCRIPT_DIR}/local.secrets-values.yaml}"
+ORCHESTRATOR_VALUES_FILE="${ORCHESTRATOR_VALUES_FILE:-${HELM_DIR}/orchestrator/local.values.yaml}"
 NAMESPACE_IN="inference"
 NAMESPACE_O="orchestrator"
 RELEASE_IN="k8s-inference"
@@ -53,8 +54,11 @@ reset_ns() {
   # re-run. `--wait=false` lets a not-yet-ready device-plugin (deferred GPU) not
   # block the release; GPUs come online later via NFD.
   local -a values_args=()
+  if [[ "$3" == "orchestrator" && -f "${ORCHESTRATOR_VALUES_FILE}" ]]; then
+    values_args+=(--values "${ORCHESTRATOR_VALUES_FILE}")
+  fi
   if [[ -f "${SECRETS_FILE}" ]]; then
-    values_args=(--values "${SECRETS_FILE}")
+    values_args+=(--values "${SECRETS_FILE}")
   fi
   # Delete the controller-owned Job before the upgrade. Helm's strategic-merge
   # patch on a Job conflicts with the immutable fields the controller stamps on
