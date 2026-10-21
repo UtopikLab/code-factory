@@ -677,6 +677,8 @@ def issue_pipeline(monkeypatch, tmp_path):
         state.model_calls.append(body)
         assert "github-test-secret" not in request.content.decode() and "model-test-secret" not in request.content.decode()
         if state.model_error:
+            if isinstance(state.model_error, httpx.Response):
+                return state.model_error
             return httpx.Response(503, json={"error": {"message": "unavailable"}})
         if state.empty_choices:
             return httpx.Response(200, json={"id": "response", "object": "chat.completion", "created": 1,
@@ -766,6 +768,36 @@ def test_issue_to_pr_terminal_end_to_end(issue_pipeline, tmp_path):
     assert repeated == final
     assert len(state.branches) == len(state.pulls) == 1
     assert len([call for call in state.api_calls if call[:2] == ("POST", "/repos/org/repo/pulls")]) == 1
+
+
+@pytest.mark.parametrize("response, expected", [
+    (httpx.Response(400, json={"error": {"message": "synthetic context limit exceeded", "type": "invalid_request_error",
+                                      "code": "context_limit", "param": "max_tokens"}, "prompt": "do-not-log-prompt"}),
+     "synthetic context limit exceeded"),
+    (httpx.Response(400, text="synthetic unsupported response_format\njson_object"), "synthetic unsupported response_format json_object"),
+    (httpx.Response(400, text=""), "response="),
+    (httpx.Response(400, json={"error": {"message": "model-test-secret github-test-secret gateway-test-secret callback-test-secret"}}),
+     "[REDACTED]"),
+    (httpx.Response(400, text="x" * 2000 + "model-test-secret"), "[truncated]"),
+])
+def test_coder_http_error_diagnostics_persist_safely(issue_pipeline, caplog, response, expected):
+    state = issue_pipeline
+    state.model_error = response
+
+    final = asyncio.run(worker.main_async(acceptor_url="https://acceptor"))
+
+    assert final["status"] == "failed"
+    assert not final.get("report_failed")
+    diagnostic = final["error"]
+    assert diagnostic.startswith("coder-http-error: status=400 model=configured-coder response=")
+    assert expected in diagnostic and diagnostic in caplog.text
+    assert len(diagnostic) <= 1012
+    for secret in ("model-test-secret", "github-test-secret", "gateway-test-secret", "callback-test-secret", "do-not-log-prompt"):
+        assert secret not in diagnostic and secret not in caplog.text
+    assert state.gateway("GET", state.task_path)[1]["result"]["error"] == diagnostic
+    assert len(state.model_calls) == 1
+    state.runner.assert_not_awaited()
+    assert not state.branches and not state.pulls
 
 
 def test_failed_issue_retry_publishes_without_overwriting_history(issue_pipeline, monkeypatch):

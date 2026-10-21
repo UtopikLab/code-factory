@@ -33,6 +33,7 @@ NAMESPACE_O="orchestrator"
 RELEASE_IN="k8s-inference"
 RELEASE_O="orchestrator"
 
+
 # --- helpers ---------------------------------------------------------------
 log()  { printf '==> %s\n' "$*"; }
 warn() { printf '!! %s\n' "$*" >&2; }
@@ -96,3 +97,6 @@ log "done. releases:"
 kubectl get pods -n "$NAMESPACE_IN"   --show-labels=false 2>/dev/null | tail -n +2
 kubectl get pods -n "$NAMESPACE_O"    --show-labels=false 2>/dev/null | tail -n +2
 # log "next: install NFD, then set gpu: \"1\" in helm/inference/values.yaml and re-run this script."
+
+kubectl -n orchestrator delete pods --field-selector=status.phase=Succeeded
+kubectl -n orchestrator delete pods --field-selector=status.phase=Failed
