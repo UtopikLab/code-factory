@@ -689,8 +689,20 @@ class RegistryValuesTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("repositoriesSecret", result.stderr)
 
+    def test_management_admin_without_managed_repositories(self):
+        values = self.management_values()
+        values["management"].update({
+            "authMode": "admin",
+            "admin": {"username": "admin", "password": "admin-password-test-sentinel"},
+            "repositories": {},
+        })
+        documents = self.documents("orchestrator", values)
+        secret = next(document for document in documents if document["kind"] == "Secret"
+                      and document["metadata"]["name"] == "orchestrator-management-repositories")
+        self.assertEqual(json.loads(base64.b64decode(secret["data"]["repositories.json"])), {})
+
     def test_management_invalid_managed_repository_credentials_fail(self):
-        for repositories in ({}, {"example/project": ""}, {"example/project": "has space"},
+        for repositories in ({"example/project": ""}, {"example/project": "has space"},
                              {"example/project": "<placeholder>"}, {"invalid": TOKEN},
                              {"../project": TOKEN}, {"example/..": TOKEN},
                              {"example/project": 123}):

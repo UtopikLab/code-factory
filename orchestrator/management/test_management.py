@@ -4,6 +4,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -79,11 +80,47 @@ def test_admin_login_without_oidc(boundary, tmp_path):
                            headers={"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"})
     assert response.status_code == 202
     assert upstream.call_args.args[0].headers["Authorization"] == "token gateway-test-secret"
-    for password in ("", "too-short"):
+    for password in ("", "short!", "abcdefgh", "abcdefgh ", "abcdefg<", "abcdef! "):
         settings["MANAGEMENT_ADMIN_PASSWORD"] = password
         assert TestClient(create_app(settings)).get("/management/api/session").status_code == 503
     settings["MANAGEMENT_AUTH_MODE"] = "unknown"
     assert TestClient(create_app(settings)).get("/management/api/session").status_code == 503
+
+
+@pytest.mark.parametrize("password", ["abcdefg!", "elevenchar!"])
+def test_admin_password_accepts_eight_characters_with_special_character(boundary, password):
+    _, _, _, settings = boundary
+    settings.update({"MANAGEMENT_AUTH_MODE": "admin", "MANAGEMENT_ADMIN_PASSWORD": password})
+    client = TestClient(create_app(settings))
+    assert client.get("/management/api/session", auth=("admin", password)).json() == {"subject": "admin"}
+
+
+@pytest.mark.parametrize("repository_config", ["absent", "empty"])
+def test_admin_operations_without_repository_access(boundary, tmp_path, repository_config):
+    _, upstream, _, settings = boundary
+    settings.update({"MANAGEMENT_AUTH_MODE": "admin", "MANAGEMENT_ADMIN_PASSWORD": "abcdefg!"})
+    if repository_config == "absent":
+        settings.pop("MANAGEMENT_REPOSITORIES_FILE")
+    else:
+        Path(settings["MANAGEMENT_REPOSITORIES_FILE"]).write_text("{}")
+    (tmp_path / "index.html").write_text("<html>Management</html>")
+    settings["MANAGEMENT_STATIC_DIR"] = str(tmp_path)
+    client = TestClient(create_app(settings, httpx.MockTransport(upstream)))
+    client.auth = ("admin", "abcdefg!")
+    for path in ("/", "/management/api/session", "/management/api/config"):
+        assert client.get(path).status_code == 200
+    assert client.get("/management/api/repositories").json() == {"repositories": []}
+    upstream.assert_not_called()
+    upstream.return_value = httpx.Response(200, json={"tasks": [{"task_id": "task-1", "patch": "private"}],
+                                                    "total": 1, "limit": 25, "offset": 0})
+    assert client.get("/management/api/tasks").json()["tasks"] == [{"task_id": "task-1"}]
+    upstream.return_value = httpx.Response(200, json={"task_id": "task-1", "result": {"patch": "private"}})
+    assert client.get("/management/api/tasks/task-1").json() == {"task_id": "task-1", "pr_url": None}
+    upstream.reset_mock()
+    response = client.post("/management/api/tasks", json={"repo": "org/repo", "issue_number": 7},
+                           headers={"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"})
+    assert response.status_code == 403
+    upstream.assert_not_called()
 
 
 def test_secure_defaults_and_all_routes_require_identity(boundary):
@@ -191,14 +228,27 @@ def test_no_configuration_or_deployment_mutations(boundary):
     upstream.assert_not_called()
 
 
-def test_adapter_to_real_gateway_contract(boundary, monkeypatch, tmp_path):
+@pytest.mark.parametrize("auth_mode", ["admin", "oidc"])
+@pytest.mark.parametrize("github_status", [200, 401, 403, 404, 503])
+def test_adapter_to_real_gateway_contract(boundary, monkeypatch, tmp_path, auth_mode, github_status):
     _, _, _, settings = boundary
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gateway"))
     import server as gateway
     monkeypatch.setattr(gateway, "TOKEN", "gateway-test-secret")
     monkeypatch.setenv("TASK_DB_PATH", str(tmp_path / "tasks.sqlite3"))
     monkeypatch.setenv("GATEWAY_TRANSPORT_MODE", "local-http")
-    monkeypatch.setattr(gateway, "_validate_repository", Mock())
+    def github(method, path, *, token):
+        assert method == "GET" and token == "repository-test-secret"
+        if path == "/repos/org/repo":
+            return {"full_name": "org/repo", "permissions": {"pull": True}}
+        if github_status != 200:
+            raise urllib.error.HTTPError("https://api.github.com" + path, github_status, "denied", {}, None)
+        if path == "/repos/org/repo/issues/7":
+            return {"number": 7, "html_url": "https://github.com/org/repo/issues/7"}
+        return []
+
+    monkeypatch.setattr(gateway, "_github", Mock(side_effect=github))
+    monkeypatch.setattr(gateway, "_validate_repository", Mock(wraps=gateway._validate_repository))
     monkeypatch.setattr(gateway, "_create_task_secret", Mock(return_value="test-uid"))
     http_server = gateway.ThreadingHTTPServer(("127.0.0.1", 0), gateway.Handler)
     thread = threading.Thread(target=http_server.serve_forever, daemon=True)
@@ -211,12 +261,21 @@ def test_adapter_to_real_gateway_contract(boundary, monkeypatch, tmp_path):
     original_keys = boundary[0].app
     del original_keys
     try:
+        settings.update({"MANAGEMENT_AUTH_MODE": auth_mode, "MANAGEMENT_ADMIN_PASSWORD": "abcdefg!"})
         app = create_app(settings)
         identity_dependency = next(route for route in app.routes if route.path == "/management/api/session").dependant.dependencies[0].call
-        app.dependency_overrides[identity_dependency] = lambda: "operator"
+        if auth_mode == "oidc":
+            app.dependency_overrides[identity_dependency] = lambda: "operator"
         client = TestClient(app)
+        if auth_mode == "admin":
+            client.auth = ("admin", "abcdefg!")
         client.headers.update({"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"})
         accepted = client.post("/management/api/tasks", json={"repo": "org/repo", "issue_number": 7})
+        if github_status != 200:
+            assert accepted.status_code == 403
+            gateway._create_task_secret.assert_not_called()
+            assert client.get("/management/api/tasks").json()["total"] == 0
+            return
         assert accepted.status_code == 202
         task_id = accepted.json()["task_id"]
         assert client.get("/management/api/tasks").json()["tasks"][0]["task_id"] == task_id
@@ -257,3 +316,34 @@ def test_management_helm_opt_in_and_snapshot(tmp_path):
     runtime = json.loads(snapshot["data"]["runtime-config.json"])
     assert runtime["coder_model"] and runtime["judge_model"]
     assert pod["volumes"][1]["configMap"]["name"] == snapshot["metadata"]["name"]
+
+
+@pytest.mark.parametrize("command", ["template", "lint"])
+@pytest.mark.parametrize("password,repositories,valid", [
+    ("abcdefg!", {}, True),
+    ("elevenchar!", {}, True),
+    ("abcdefg!", {"org/repo": "repository-test-secret"}, True),
+    ("short!", {}, False),
+    ("abcdefgh", {}, False),
+    ("abcdefghijklmnop", {}, False),
+    ("abcdef! ", {}, False),
+    ("abcdefg<", {}, False),
+    ("abcdefg!", {"org/repo": ""}, False),
+])
+def test_management_helm_admin_password_and_optional_repositories(tmp_path, command, password, repositories, valid):
+    chart = Path(__file__).resolve().parents[2] / "helm" / "orchestrator"
+    values = tmp_path / "management.yaml"
+    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS, "management": {
+        "enabled": True, "publicOrigin": "https://factory.example",
+        "admin": {"username": "admin", "password": password}, "repositories": repositories}}))
+    arguments = ["helm", command, *(["test"] if command == "template" else []), str(chart), "-f", str(values)]
+    result = subprocess.run(arguments, text=True, capture_output=True, check=False)
+    assert (result.returncode == 0) == valid, result.stderr + result.stdout
+    if valid and command == "template":
+        documents = [document for document in yaml.safe_load_all(result.stdout) if document]
+        repository_secret = next(document for document in documents if document["kind"] == "Secret"
+                                 and document["metadata"]["name"] == "orchestrator-management-repositories")
+        assert json.loads(base64.b64decode(repository_secret["data"]["repositories.json"])) == repositories
+        admin_secret = next(document for document in documents if document["kind"] == "Secret"
+                            and document["metadata"]["name"] == "orchestrator-management-admin")
+        assert base64.b64decode(admin_secret["data"]["password"]).decode() == password

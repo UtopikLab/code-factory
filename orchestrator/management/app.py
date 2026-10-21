@@ -37,7 +37,9 @@ def create_app(settings=None, transport=None, signing_keys=None):
 
     async def identity(request: Request):
         if auth_mode == "admin":
-            if not origin or not admin_username or len(admin_password) < 16:
+            if (not origin or not admin_username or len(admin_password) < 8
+                    or re.search(r"[<>\s]", admin_password)
+                    or not re.search(r"[^A-Za-z0-9<>\s]", admin_password)):
                 raise HTTPException(503, "admin-not-configured")
             credentials = await basic(request)
             if credentials is not None:
@@ -76,6 +78,8 @@ def create_app(settings=None, transport=None, signing_keys=None):
         return response
 
     def repositories():
+        if not settings.get("MANAGEMENT_REPOSITORIES_FILE"):
+            return {}
         try:
             data = json.loads(Path(settings["MANAGEMENT_REPOSITORIES_FILE"]).read_text())
             if not isinstance(data, dict) or any(

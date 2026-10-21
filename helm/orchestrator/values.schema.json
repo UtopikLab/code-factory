@@ -123,8 +123,7 @@
                 "required": [
                     "image",
                     "publicOrigin",
-                    "authMode",
-                    "repositories"
+                    "authMode"
                 ],
                 "if": {
                     "properties": {
@@ -148,8 +147,8 @@
                                     "minLength": 1
                                 },
                                 "password": {
-                                    "minLength": 16,
-                                    "pattern": "^[^<>\\s]+$"
+                                    "minLength": 8,
+                                    "pattern": "^[^<>\\s]*[^A-Za-z0-9<>\\s][^<>\\s]*$"
                                 }
                             }
                         }
@@ -186,8 +185,7 @@
                 },
                 "properties": {
                     "repositories": {
-                        "minProperties": 1,
-                        "description": "Set management.repositories in helm/local.secrets-values.yaml."
+                        "description": "Optional for operational access; configure repository PATs in helm/local.secrets-values.yaml to submit repository tasks."
                     },
                     "image": {
                         "minLength": 1

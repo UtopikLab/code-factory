@@ -80,7 +80,7 @@ ignored `helm/local.secrets-values.yaml`, at the root (not under `orchestrator`)
 management:
    admin:
       username: admin
-      password: "<independent-admin-password-at-least-16-characters>"
+      password: "<independent-admin-password-minimum-8-with-special-character>"
    repositories:
       owner/repository: "<repository-specific-pat>"
 ```
@@ -88,7 +88,8 @@ management:
 Replace the repository key and all placeholders with real values in that file.
 Management defaults to `authMode: admin`, requiring no OIDC provider. Opening its
 URL prompts for the admin username and password using browser HTTP Basic authentication.
-The password must contain at least 16 non-whitespace characters and must be unique;
+The password must contain at least 8 characters, including a special (non-alphanumeric)
+character, with no whitespace or angle brackets, and must be unique;
 there is no built-in password. Helm creates `orchestrator-management-admin` and
 passes the password through a Secret reference, never a ConfigMap. Use HTTPS at the
 ingress or external TLS proxy and restrict direct backend access. This mode provides
@@ -101,7 +102,16 @@ in the ordinary orchestrator values, and populate `management.oidc.issuer`, `aud
 `jwksUrl`, and `allowedSubjects` in the private values file. Admin password authentication
 is disabled in OIDC mode; invalid OIDC tokens never fall back to the admin account.
 
-An empty repository map or blank repository tokens are rejected when management is enabled.
+Repository configuration is optional: leave `management.repositories: {}` for local
+admin operational access without any repository PAT. Admin authentication permits the
+UI, session, configuration summary, and allowlisted task status summaries; these
+responses do not expose repository content, patches, task payloads, or credentials.
+Submitting repository work requires an explicitly configured repository PAT. The
+gateway verifies that PAT with GitHub for the named repository's identity, read
+permission, content, pull request, and issue access before accepting a task. Invalid
+or insufficient PATs and unavailable validation fail closed, including for local
+admins; admin credentials never substitute for repository authorization.
+Blank configured repository tokens are rejected.
 Missing OIDC fields or an empty authorized subject list are rejected only in OIDC mode.
 Keep `management.enabled`,
 the image, public origin, and ingress settings in the ordinary orchestrator values.
@@ -113,8 +123,9 @@ and subject authorization remain required. The private file is already applied
 last by `deploy.sh`; no script arguments or nested chart wrapper are needed.
 
 There is no external repository-Secret override. When management is disabled,
-its repository and admin Secrets are not rendered. A populated repository map and
-the selected authentication mode's settings are required only when management is enabled.
+its repository and admin Secrets are not rendered. The selected authentication
+mode's settings are required only when management is enabled; a populated repository
+map is required only to submit repository work.
 
 The GHCR Secret is named `ghcr-read-packages-pull-secret` in each chart namespace,
 and all workloads reference that name by default. The checked-in shared values
