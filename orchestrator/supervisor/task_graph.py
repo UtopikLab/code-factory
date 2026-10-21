@@ -3,6 +3,8 @@
 from datetime import datetime
 from typing import TypedDict
 
+from langgraph.graph import END, START, StateGraph
+
 
 class TaskState(TypedDict):
     task_id: str
@@ -63,19 +65,19 @@ def passes_acceptance(state, supervisor) -> bool:
 
 
 def create_supervisor_graph(supervisor):
-    graph = supervisor.StateGraph(supervisor.TaskState)
+    graph = StateGraph(supervisor.TaskState)
     graph.add_node("plan", supervisor.node_plan)
     graph.add_node("execute_workers", supervisor.node_execute_workers)
     graph.add_node("evaluate", supervisor.node_evaluate)
     graph.add_node("pick_best", supervisor.node_pick_best)
     graph.add_node("gate", supervisor.node_gate)
-    graph.add_edge(supervisor.START, "plan")
+    graph.add_edge(START, "plan")
     graph.add_edge("plan", "execute_workers")
     graph.add_edge("execute_workers", "evaluate")
     graph.add_edge("evaluate", "pick_best")
     graph.add_conditional_edges("pick_best", supervisor.should_retry,
                                 {"retry": "plan", "gate": "gate"})
-    graph.add_edge("gate", supervisor.END)
+    graph.add_edge("gate", END)
     return graph.compile()
 
 

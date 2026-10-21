@@ -268,8 +268,8 @@ def _start_probe_server() -> ThreadingHTTPServer:
 
 
 async def _main_async() -> None:
-    server = _start_probe_server()
     loop = SupervisorLoop()
+    server = _start_probe_server()
     try:
         await loop.run_forever()
     finally:

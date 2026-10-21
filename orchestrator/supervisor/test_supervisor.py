@@ -9,6 +9,8 @@ logic, which are deterministic and do not require a running inference server.
 import asyncio
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -37,6 +39,23 @@ def test_supervisor_mock_is_explicit(monkeypatch):
     monkeypatch.setenv("SUPERVISOR_MOCK_MODE", "true")
     state = {"task_id": "task", "worker_outputs": []}
     assert asyncio.run(node_execute_workers(state))["worker_outputs"]
+
+
+def test_supervisor_entrypoint_builds_graph_from_main_module():
+    script = str(Path(supervisor_module.__file__).resolve())
+    probe = """
+import asyncio
+import pathlib
+import sys
+script = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(script.parent))
+def check_graph(coroutine):
+    assert sys.modules["__main__"].SupervisorLoop().graph is not None
+    coroutine.close()
+asyncio.run = check_graph
+exec(compile(script.read_text(), str(script), "exec"), sys.modules["__main__"].__dict__)
+"""
+    subprocess.run([sys.executable, "-c", probe, script], check=True, capture_output=True, text=True)
 
 
 def test_durable_claim_recovery_and_eight_total_attempt_cap(tmp_path):
