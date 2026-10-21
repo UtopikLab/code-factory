@@ -294,6 +294,42 @@ never adopted or deleted: operators must verify ownership before reconciling it.
 No credential substitution or refresh endpoint exists. Keep the durable task result
 and inspect branch/PR artifacts before separately authorizing a new attempt.
 
+### Explicit Task Retry
+
+Ordinary intake replay still returns 409 for a failed task; reopening an issue or
+re-running its original event does not erase that failure. After fixing the cause
+and checking for any existing branch/PR artifacts, use the source repository's
+**Actions -> Autonomous drain loop -> Run workflow** with the failed `retry_task_id`.
+The workflow sends the gateway authentication and current repository credential to:
+
+```text
+POST /api/v1/tasks/{failed_task_id}/retry
+{"retry_key":"operator-request-1"}
+```
+
+For manual API callers, choose a unique retry key for the intentional request and
+reuse it when repeating that request. The workflow uses its run ID, which remains
+stable across reruns of the same run. Requests require both normal intake headers;
+the parent callback token is not reused. Access to the parent's repository is
+revalidated. The task must be failed, and lifecycle processing must be settled
+with credential cleanup complete. Pending sync/cleanup must be resolved via `/sync`
+first. Permanent credential failures with completed cleanup may be retried with
+a fresh repository credential; they do not require reviving the expired token.
+
+A retry creates a new task ID, Secret, callback and one-worker Job. The old task,
+result, Job, and logs are preserved. GET exposes `retry_of` and `retry_task_id` to
+navigate attempt history. Only one direct retry is allowed per failed attempt;
+concurrent or repeated requests cannot launch duplicate workers. Repeating the
+same retry key returns that attempt's current state; a different key against an
+already-retried parent returns 409 and its child ID. If the child fails, explicitly
+retry that child rather than its ancestor. Running and completed tasks cannot be
+restarted. Queued/ambiguous dispatches still require operator reconciliation.
+
+This route does not fix missing models, dependency failures, or sandbox setup.
+Rebuild/deploy the gateway image and update the source repository's workflow before
+using it. Local tests mock all GitHub, Kubernetes, model and validation interactions;
+they do not submit a live retry or prove a live PR outcome.
+
 The default task credential TTL is 86400 seconds; `gateway.taskCredentialTtlSeconds`
 allows 60 through 604800. It is an application use deadline, not automatic PAT
 revocation or Kubernetes garbage collection. Queued/running tasks interrupted before

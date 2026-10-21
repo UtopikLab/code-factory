@@ -7,7 +7,7 @@ Faithful to orchestrator/worker.yaml (ConfigMap + Job coder-worker).
   "task-wait-seconds" (int (default (index .Values.supervisor.config "task-wait-seconds") 30))
   "loop-state-dir" (default (index .Values.supervisor.config "loop-state-dir") "/data/loop-state")
   "acceptor-url" (required "supervisor.config.acceptor-url must be a trusted HTTPS gateway origin" (index .Values.supervisor.config "acceptor-url"))
-  "judge-url" (default (index .Values.supervisor.config "judge-url") "https://inference.local/v1")
+  "judge-url" (default "http://inference-server.inference.svc.cluster.local:8000/v1" (index .Values.supervisor.config "judge-url"))
   "judge-model" (default (index .Values.supervisor.config "judge-model") "qwen2.5-coder-7b-instruct-q4-km@32k")
   "worker-roles" (index .Values.worker "worker-roles")
 -}}
@@ -92,7 +92,7 @@ spec:
             - name: ALLOWED_REPOS
               value: {{ default .Values.supervisor.config.repo .Values.gateway.config.repo | quote }}
             - name: CODER_URL
-              value: {{ default (default "https://inference.local/v1" (index .Values.supervisor.config "judge-url")) .Values.worker.coderUrl | quote }}
+              value: {{ default (default "http://inference-server.inference.svc.cluster.local:8000/v1" (index .Values.supervisor.config "judge-url")) .Values.worker.coderUrl | quote }}
             - name: CODER_MODEL
               value: {{ index .Values.worker "worker-model" | quote }}
             - name: JUDGE_ACCEPT_THRESHOLD

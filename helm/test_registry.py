@@ -28,6 +28,25 @@ class RegistryValuesTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, "Sentinel-only Helm render failed")
         return [document for document in yaml.safe_load_all(result.stdout) if document]
 
+    def test_model_endpoint_defaults_and_overrides(self):
+        default = "http://inference-server.inference.svc.cluster.local:8000/v1"
+        cases = [
+            ({}, default, default),
+            ({"supervisor": {"config": {"judge-url": "https://judge.example.com/v1"}}},
+             "https://judge.example.com/v1", "https://judge.example.com/v1"),
+            ({"worker": {"coderUrl": "https://coder.example.com/v1"}},
+             default, "https://coder.example.com/v1"),
+        ]
+        for values, judge, coder in cases:
+            with self.subTest(values=values):
+                documents = self.documents("orchestrator", values)
+                config = next(document for document in documents if document["kind"] == "ConfigMap")
+                job = next(document for document in documents if document["kind"] == "Job")
+                env = {entry["name"]: entry for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+                self.assertEqual(config["data"]["judge-url"], judge)
+                self.assertEqual(env["CODER_URL"]["value"], coder)
+                self.assertEqual(env["JUDGE_URL"]["valueFrom"]["configMapKeyRef"]["key"], "judge-url")
+
     def test_registry_auth_and_pod_references(self):
         for chart in ("orchestrator", "inference"):
             with self.subTest(chart=chart):

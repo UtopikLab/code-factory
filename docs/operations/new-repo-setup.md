@@ -127,6 +127,8 @@ are immutable: identical repeated reports are accepted, conflicting reports retu
 Duplicate issue intake reuses the recorded task without launching another worker.
 A failed task replay returns 409; it does not silently start another attempt.
 This version does not provide automatic new attempts after an issue is reopened.
+Use the workflow's manual `retry_task_id` action for an intentional new attempt,
+as described in [explicit task retry](credential-separation.md#explicit-task-retry).
 
 Results are saved **before** terminal GitHub updates. Successful sync removes `queued`
 and `failed`, adds `done`, and posts a task-marked comment with the PR link. Failure
@@ -244,8 +246,9 @@ An accepted response has this shape (the ID is opaque):
 Retain the task ID and check authenticated task GET state. Only a completed recorded
 result with a PR link and `lifecycle: synced` establishes the intended terminal
 workflow; intake acceptance alone does not. Local implementation verification does
-not perform this live step. Reopened failed issues reuse the failed task until an
-operator explicitly reconciles it; they do not automatically start a fresh attempt.
+not perform this live step. Reopened failed issues reuse the failed task; they do
+not automatically start a fresh attempt. After resolving the failure and pending
+lifecycle processing, use **Run workflow** with that failed task's ID to retry.
 
 ---
 

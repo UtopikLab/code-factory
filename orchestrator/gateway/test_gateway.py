@@ -99,6 +99,108 @@ def test_task_secret_is_immutable_and_duplicate_cannot_replace(task_gateway):
     github.assert_not_called()
 
 
+def finish_failed_task(task_gateway, monkeypatch, task_id):
+    monkeypatch.setattr(server, "_sync_lifecycle", Mock())
+    result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2,
+              "status": "failed", "error": "validation-failed"}
+    code, state = task_request("POST", f"/api/v1/tasks/{task_id}", result)
+    assert code == 200 and state["lifecycle"] == "synced"
+    return task_request("GET", f"/api/v1/tasks/{task_id}")[1]
+
+
+def test_retry_preserves_history_and_uses_new_credentials(task_gateway, monkeypatch):
+    original = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    previous = finish_failed_task(task_gateway, monkeypatch, original)
+    monkeypatch.setattr(server.secrets, "token_urlsafe", Mock(return_value="new-callback-test-only"))
+    code, retried = task_request("POST", f"/api/v1/tasks/{original}/retry", {"retry_key": "manual-1"},
+                                 repository_token="new-repo-test-only")
+    assert code == 202 and retried["task_id"] != original
+    task_id = retried["task_id"]
+    state = task_request("GET", f"/api/v1/tasks/{task_id}")[1]
+    assert state["retry_of"] == original and state["status"] == "running"
+    parent = task_request("GET", f"/api/v1/tasks/{original}")[1]
+    assert parent.pop("retry_task_id") == task_id
+    previous.pop("retry_task_id")
+    assert parent == previous
+    db = server._task_db()
+    row = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+    assert server._task_repository_token(row) == "new-repo-test-only"
+    assert "new-repo-test-only" not in json.dumps(dict(row))
+    db.close()
+    result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "validation-failed"}
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", result)[0] == 403
+    assert task_request("POST", f"/api/v1/tasks/{task_id}", result, callback="new-callback-test-only")[0] == 200
+
+
+def test_retry_replays_without_creating_another_job(task_gateway, monkeypatch):
+    original = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    finish_failed_task(task_gateway, monkeypatch, original)
+    path = f"/api/v1/tasks/{original}/retry"
+    first = task_request("POST", path, {"retry_key": "manual-1"})[1]
+    code, replay = task_request("POST", path, {"retry_key": "manual-1"})
+    assert code == 202 and replay["replayed"] and replay["task_id"] == first["task_id"]
+    assert task_request("POST", path, {"retry_key": "manual-2"})[0] == 409
+    assert task_gateway[0].call_count == 2
+    assert task_request("POST", "/api/v1/tasks/spawn", issue_payload())[0] == 409
+    child = first["task_id"]
+    finish_failed_task(task_gateway, monkeypatch, child)
+    code, grandchild = task_request("POST", f"/api/v1/tasks/{child}/retry", {"retry_key": "manual-2"})
+    assert code == 202 and grandchild["task_id"] not in (original, child)
+
+
+def test_retry_requires_terminal_synced_failure(task_gateway, monkeypatch):
+    original = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    path = f"/api/v1/tasks/{original}/retry"
+    assert task_request("POST", path, {"retry_key": "manual-1"})[1]["error"] == "retry-requires-failed-task"
+    result = {"task_id": original, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "validation-failed"}
+    task_request("POST", f"/api/v1/tasks/{original}", result)
+    assert task_request("POST", path, {"retry_key": "manual-1"})[1]["error"] == "retry-requires-lifecycle-sync"
+    task_gateway[0].assert_called_once()
+
+
+def test_retry_can_recover_from_permanent_credential_failure(task_gateway, monkeypatch):
+    original = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    monkeypatch.setattr(server, "_sync_lifecycle", Mock(side_effect=server.CredentialError("credential-expired")))
+    result = {"task_id": original, "repo": "org/repo", "issue_number": 2, "status": "failed", "error": "repository-credential-expired"}
+    assert task_request("POST", f"/api/v1/tasks/{original}", result)[1]["lifecycle"] == "credential-expired"
+    code, retry = task_request("POST", f"/api/v1/tasks/{original}/retry", {"retry_key": "new-credential"},
+                              repository_token="new-repo-test-only")
+    assert code == 202 and retry["task_id"] != original
+
+
+@pytest.mark.parametrize("payload", [{}, {"retry_key": ""}, {"retry_key": 1}, {"retry_key": "invalid/path"},
+                                    {"retry_key": "manual-1", "repo": "other/repo"}])
+def test_retry_rejects_invalid_requests(task_gateway, payload):
+    original = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    assert task_request("POST", f"/api/v1/tasks/{original}/retry", payload)[0] == 400
+    task_gateway[0].assert_called_once()
+
+
+def test_retry_revalidates_access_and_repository_allowlist(task_gateway, monkeypatch):
+    original = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    finish_failed_task(task_gateway, monkeypatch, original)
+    path = f"/api/v1/tasks/{original}/retry"
+    assert task_request("POST", path, {"retry_key": "manual-1"}, token="wrong")[0] == 401
+    monkeypatch.setattr(server, "_validate_repository", Mock(side_effect=server.CredentialError("repository-credential-denied")))
+    assert task_request("POST", path, {"retry_key": "manual-1"})[0] == 403
+    monkeypatch.setattr(server, "ALLOWED_REPOS", {"another/repo"})
+    assert task_request("POST", path, {"retry_key": "manual-1"})[0] == 403
+    task_gateway[0].assert_called_once()
+
+
+def test_concurrent_retries_have_only_one_child(task_gateway, monkeypatch):
+    original = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    finish_failed_task(task_gateway, monkeypatch, original)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(lambda key: task_request("POST", f"/api/v1/tasks/{original}/retry", {"retry_key": key}),
+                                  ["manual-1", "manual-2"]))
+    assert sorted(code for code, _body in responses) == [202, 409]
+    assert task_gateway[0].call_count == 2
+    db = server._task_db()
+    assert db.execute("SELECT COUNT(*) FROM tasks WHERE retry_of=?", (original,)).fetchone()[0] == 1
+    db.close()
+
+
 def test_secret_cleanup_retry_does_not_repeat_github_updates(task_gateway, monkeypatch):
     task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
     sync = Mock()
@@ -364,6 +466,7 @@ def test_task_callback_cannot_report_another_repository_task(task_gateway, monke
     ("https://intake.test\\other", False),
 ])
 def test_drain_workflow_credential_headers_and_https(monkeypatch, tmp_path, capsys, url, accepted):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "issues")
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load((root / ".github/workflows/drain.yaml").read_text())
     step = next(step for step in workflow["jobs"]["send-to-orchestrator"]["steps"] if step.get("shell") == "python")
@@ -406,6 +509,7 @@ def test_drain_workflow_credential_headers_and_https(monkeypatch, tmp_path, caps
 
 @pytest.mark.parametrize("status", [401, 403, 404, 409, 503])
 def test_drain_workflow_http_errors_report_only_status(monkeypatch, tmp_path, capsys, status):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "issues")
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load((root / ".github/workflows/drain.yaml").read_text())
     step = next(step for step in workflow["jobs"]["send-to-orchestrator"]["steps"] if step.get("shell") == "python")
@@ -434,6 +538,45 @@ def test_drain_workflow_http_errors_report_only_status(monkeypatch, tmp_path, ca
     output = capsys.readouterr()
     assert output.out == output.err == ""
     assert body.tell() == 0
+
+
+@pytest.mark.parametrize("task_id,valid", [("issue-" + "a" * 32, True), ("../../another/path", False), ("", False)])
+def test_drain_manual_retry_uses_stable_run_key(monkeypatch, tmp_path, task_id, valid):
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/drain.yaml").read_text())
+    step = next(step for step in workflow["jobs"]["send-to-orchestrator"]["steps"] if step.get("shell") == "python")
+    assert step["env"]["RETRY_TASK_ID"] == "${{ inputs.retry_task_id }}"
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"repository": {"full_name": "org/repo"}}))
+    for key, value in {
+        "CODEFACTORY_URL": "https://intake.test",
+        "CODEFACTORY_AUTH_TOKEN": "gateway-test-only",
+        "REPO_GITHUB_PAT": "repo-test-only",
+        "GITHUB_EVENT_PATH": str(event), "GITHUB_REPOSITORY": "org/repo",
+        "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_RUN_ID": "12345", "RETRY_TASK_ID": task_id,
+    }.items():
+        monkeypatch.setenv(key, value)
+    response = Mock(status=202)
+    response.read.return_value = json.dumps({"task_id": "issue-" + "b" * 32, "status": "running"}).encode()
+    context = Mock()
+    context.__enter__ = Mock(return_value=response)
+    context.__exit__ = Mock(return_value=False)
+    opener = Mock()
+    opener.open.return_value = context
+    monkeypatch.setattr(server.urllib.request, "build_opener", Mock(return_value=opener))
+    script_file = tmp_path / "retry.py"
+    script_file.write_text(step["run"])
+    if not valid:
+        with pytest.raises(SystemExit):
+            runpy.run_path(str(script_file))
+        opener.open.assert_not_called()
+        return
+    runpy.run_path(str(script_file))
+    request = opener.open.call_args.args[0]
+    assert request.full_url == f"https://intake.test/api/v1/tasks/{task_id}/retry"
+    assert json.loads(request.data) == {"retry_key": "12345"}
+    assert request.get_header("Authorization") == "token gateway-test-only"
+    assert request.get_header("X-repository-token") == "repo-test-only"
 
 
 def test_helm_credential_references_and_rbac():

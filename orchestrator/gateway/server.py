@@ -217,11 +217,12 @@ def _task_db():
             payload TEXT NOT NULL, result TEXT, job TEXT, lifecycle TEXT NOT NULL DEFAULT 'pending',
             sync_started REAL NOT NULL DEFAULT 0)""")
         columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
-        for name in ("credential_ref", "callback_hash"):
+        for name in ("credential_ref", "callback_hash", "retry_of", "retry_key"):
             if name not in columns:
                 db.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT")
         if "credential_cleanup" not in columns:
             db.execute("ALTER TABLE tasks ADD COLUMN credential_cleanup TEXT NOT NULL DEFAULT 'retained'")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS task_retry_parent ON tasks(retry_of) WHERE retry_of IS NOT NULL")
     return db
 
 
@@ -543,7 +544,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _lookup(self, db):
         parsed = urlsplit(self.path)
-        task_id = parsed.path.removeprefix("/api/v1/tasks/").removesuffix("/sync")
+        task_id = parsed.path.removeprefix("/api/v1/tasks/").removesuffix("/sync").removesuffix("/retry")
         query = parse_qs(parsed.query)
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,63}", task_id):
             raise ValueError("invalid-task-id")
@@ -602,6 +603,9 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(200, {"task_id": task["task_id"], "repo": task["repo"], "issue_number": task["issue"],
                                      "status": task["status"], "result": json.loads(task["result"]) if task["result"] else None,
                                      "lifecycle": task["lifecycle"], "credential_cleanup": task["credential_cleanup"],
+                                     "retry_of": task["retry_of"],
+                                     "retry_task_id": next((row[0] for row in db.execute(
+                                         "SELECT task_id FROM tasks WHERE retry_of=?", (task["task_id"],))), None),
                                      "job": json.loads(task["job"]) if task["job"] else None})
             except PermissionError:
                 self._json(403, {"error": "repo-not-allowed"})
@@ -633,6 +637,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise TypeError("invalid-payload")
             if urlsplit(self.path).path == "/api/v1/tasks/spawn":
                 self._spawn(payload)
+            elif urlsplit(self.path).path.endswith("/retry") and self.path.startswith("/api/v1/tasks/"):
+                self._retry(payload)
             elif urlsplit(self.path).path.endswith("/sync") and self.path.startswith("/api/v1/tasks/"):
                 self._resync(payload)
             elif self.path.startswith("/api/v1/tasks/"):
@@ -648,7 +654,25 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, UnicodeDecodeError):
             self._json(400, {"error": "invalid-task-or-result"})
 
-    def _spawn(self, payload):
+    def _retry(self, payload):
+        _reject_credentials(payload, self.headers.get("X-Repository-Token", ""))
+        if set(payload) != {"retry_key"} or not isinstance(payload["retry_key"], str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", payload["retry_key"]
+        ):
+            raise ValueError("invalid-retry-request")
+        db = _task_db()
+        try:
+            task = self._lookup(db)
+            if task is None:
+                self._json(404, {"error": "task-not-found"})
+                return
+            original = json.loads(task["payload"])
+        finally:
+            db.close()
+        original.pop("task_id", None)
+        self._spawn(original, retry_of=task["task_id"], retry_key=payload["retry_key"])
+
+    def _spawn(self, payload, retry_of=None, retry_key=None):
         token = self.headers.get("X-Repository-Token", "")
         _reject_credentials(payload, token)
         repo, issue = _identity(payload)
@@ -666,6 +690,8 @@ class Handler(BaseHTTPRequestHandler):
             raise CredentialError("transport-not-allowed")
         _validate_repository(repo, issue, token)
         task_id = "issue-" + hashlib.sha256(f"{repo.lower()}#{issue}".encode()).hexdigest()[:32] if issue else uuid.uuid4().hex
+        if retry_of:
+            task_id = "issue-" + hashlib.sha256(f"retry:{retry_of}:{retry_key}".encode()).hexdigest()[:32]
         assigned = copy.deepcopy(payload)
         assigned["task_id"] = task_id
         if repo:
@@ -679,10 +705,34 @@ class Handler(BaseHTTPRequestHandler):
                 code = 409 if old["status"] == "failed" else 503 if old["status"] == "queued" else 202
                 self._json(code, {"task_id": task_id, "repo": repo, "status": old["status"], "replayed": True})
                 return
+            if retry_of:
+                parent = db.execute("SELECT * FROM tasks WHERE task_id=?", (retry_of,)).fetchone()
+                child = db.execute("SELECT task_id FROM tasks WHERE retry_of=?", (retry_of,)).fetchone()
+                if child:
+                    db.commit()
+                    self._json(409, {"error": "retry-already-created", "task_id": child["task_id"]})
+                    return
+                if not parent or parent["status"] != "failed" or not parent["result"]:
+                    db.commit()
+                    self._json(409, {"error": "retry-requires-failed-task"})
+                    return
+                settled = {"synced", "credential-missing", "credential-expired", "credential-denied",
+                           "credential-binding-mismatch", "credential-invalid"}
+                if parent["lifecycle"] not in settled or parent["credential_cleanup"] != "deleted":
+                    db.commit()
+                    self._json(409, {"error": "retry-requires-lifecycle-sync"})
+                    return
+                active = db.execute("SELECT task_id FROM tasks WHERE lower(repo)=lower(?) AND issue=? AND status IN ('queued','running')",
+                                    (repo, issue)).fetchone()
+                if active:
+                    db.commit()
+                    self._json(409, {"error": "issue-task-active", "task_id": active["task_id"]})
+                    return
             callback = secrets.token_urlsafe(32)
             credential_ref = "task-credential-" + task_id
-            db.execute("INSERT INTO tasks(task_id,repo,issue,status,payload,credential_ref,callback_hash) VALUES(?,?,?,?,?,?,?)",
-                       (task_id, repo, issue, "queued", json.dumps(assigned), credential_ref, hashlib.sha256(callback.encode()).hexdigest()))
+            db.execute("INSERT INTO tasks(task_id,repo,issue,status,payload,credential_ref,callback_hash,retry_of,retry_key) VALUES(?,?,?,?,?,?,?,?,?)",
+                       (task_id, repo, issue, "queued", json.dumps(assigned), credential_ref, hashlib.sha256(callback.encode()).hexdigest(),
+                        retry_of, retry_key))
             db.commit()
             try:
                 _create_task_secret(task_id, repo, token, callback)

@@ -3,13 +3,19 @@ name: Autonomous drain loop
 on:
   issues:
     types: [opened, reopened, assigned]
+  workflow_dispatch:
+    inputs:
+      retry_task_id:
+        description: Failed task ID to retry after resolving its failure
+        required: true
+        type: string
 
 permissions:
   contents: read
   issues: read
 
 concurrency:
-  group: drain-${{ github.repository }}-${{ github.event.issue.number }}
+  group: drain-${{ github.repository }}-${{ github.event.issue.number || inputs.retry_task_id }}
   cancel-in-progress: false
 
 jobs:
@@ -18,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check issue state
+        if: github.event_name == 'issues'
         id: issue-state
         uses: actions/github-script@v7
         with:
@@ -35,6 +42,7 @@ jobs:
           CODEFACTORY_URL: ${{ secrets.CODEFACTORY_URL }}
           CODEFACTORY_AUTH_TOKEN: ${{ secrets.CODEFACTORY_AUTH_TOKEN }}
           REPO_GITHUB_PAT: ${{ secrets.REPO_GITHUB_PAT }}
+          RETRY_TASK_ID: ${{ inputs.retry_task_id }}
         shell: python
         run: |
           import json
@@ -60,7 +68,15 @@ jobs:
           repo = os.environ["GITHUB_REPOSITORY"]
           if event["repository"]["full_name"].lower() != repo.lower():
               raise SystemExit("Repository identity mismatch")
-          payload = {"repo": repo, "issue_number": event["issue"]["number"]}
+          if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+              retry_task_id = os.environ.get("RETRY_TASK_ID", "")
+              retry_key = os.environ["GITHUB_RUN_ID"]
+              if not re.fullmatch(r"issue-[a-f0-9]{32}", retry_task_id) or not re.fullmatch(r"[0-9]+", retry_key):
+                  raise SystemExit("A valid failed task ID and workflow run ID are required")
+              url = parsed._replace(path="/api/v1/tasks/" + retry_task_id + "/retry").geturl()
+              payload = {"retry_key": retry_key}
+          else:
+              payload = {"repo": repo, "issue_number": event["issue"]["number"]}
 
           class NoRedirect(urllib.request.HTTPRedirectHandler):
               def redirect_request(self, req, fp, code, msg, headers, newurl):

@@ -768,6 +768,34 @@ def test_issue_to_pr_terminal_end_to_end(issue_pipeline, tmp_path):
     assert len([call for call in state.api_calls if call[:2] == ("POST", "/repos/org/repo/pulls")]) == 1
 
 
+def test_failed_issue_retry_publishes_without_overwriting_history(issue_pipeline, monkeypatch):
+    import server
+
+    state = issue_pipeline
+    state.model_error = True
+    failed = asyncio.run(worker.main_async(acceptor_url="https://acceptor"))
+    assert failed["status"] == "failed" and not state.pulls
+    previous = state.gateway("GET", state.task_path)[1]
+    assert previous["lifecycle"] == "synced" and previous["credential_cleanup"] == "deleted"
+    code, retried = state.gateway("POST", state.task_path + "/retry", {"retry_key": "operator-1"})
+    assert code == 202 and retried["task_id"] != state.task_id
+    assert len(state.jobs) == 2
+    env = state.jobs[-1]["spec"]["template"]["spec"]["containers"][0]["env"]
+    for entry in env:
+        if "value" in entry:
+            monkeypatch.setenv(entry["name"], entry["value"])
+        else:
+            reference = entry["valueFrom"]["secretKeyRef"]
+            secret = server._k8s_request("GET", server._secret_path(reference["name"]))
+            monkeypatch.setenv(entry["name"], base64.b64decode(secret["data"][reference["key"]]).decode())
+    state.model_error = False
+    completed = asyncio.run(worker.main_async(acceptor_url="https://acceptor"))
+    assert completed["status"] == "completed" and completed["pr_url"]
+    assert state.gateway("GET", state.task_path)[1]["result"] == previous["result"]
+    assert state.gateway("GET", "/api/v1/tasks/" + retried["task_id"])[1]["retry_of"] == state.task_id
+    assert len(state.comments) == 2 and len(state.pulls) == 1 and state.labels == {"done"}
+
+
 @pytest.mark.parametrize("failure", ["generation", "empty", "noop", "whitespace", "traversal", "protected", "validation", "judge", "nan-score", "identity", "symlink", "policy", "api-shape", "empty-choices"])
 def test_issue_failures_never_publish(issue_pipeline, monkeypatch, failure):
     state = issue_pipeline
