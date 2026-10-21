@@ -74,6 +74,24 @@ def test_metrics_reports_all_components(running_server):
     assert "http_request_duration_seconds" in body
 
 
+def test_metrics_reports_durable_task_counts_by_current_status(monkeypatch, tmp_path):
+    monkeypatch.setenv("TASK_DB_PATH", str(tmp_path / "tasks.sqlite3"))
+    db = server._task_db()
+    db.executemany(
+        "INSERT INTO tasks(task_id, status, payload) VALUES(?,?,?)",
+        [("queued-task", "queued", "{}"), ("running-task", "running", "{}"),
+         ("failed-task", "failed", "{}"), ("another-failed-task", "failed", "{}")],
+    )
+    db.close()
+
+    server._refresh_task_state_metrics()
+    body = server.generate_latest().decode("utf-8")
+
+    assert 'gateway_tasks_by_status{status="queued"} 1.0' in body
+    assert 'gateway_tasks_by_status{status="running"} 1.0' in body
+    assert 'gateway_tasks_by_status{status="failed"} 2.0' in body
+
+
 def test_metrics_healthz_gauge(running_server):
     _, body = _get("/metrics")
     assert "gateway_healthz_gauge" in body

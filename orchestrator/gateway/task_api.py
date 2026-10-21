@@ -138,6 +138,7 @@ class TaskAPI:
                 gateway._retry_lifecycle(task_id)
                 handler._json(503, {"task_id": task_id, "error": "credential-create-failed"})
                 return
+            gateway.ACCEPTED_TASKS.labels(kind="retry" if retry_of else "initial").inc()
             handler._json(202, {"task_id": task_id, "repo": repo, "status": "queued"})
         finally:
             db.close()

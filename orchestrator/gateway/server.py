@@ -218,6 +218,11 @@ REQUESTS = Counter(
     "Total HTTP requests received, by method, path and status code.",
     ["method", "path", "status"],
 )
+ACCEPTED_TASKS = Counter(
+    "gateway_tasks_accepted_total",
+    "Durable tasks accepted by the gateway, by intake kind.",
+    ["kind"],
+)
 DURATION = Histogram(
     "http_request_duration_seconds",
     "Request duration in seconds.",
@@ -235,6 +240,25 @@ SCRAPE = Gauge(
     "gateway_scrape_interval_seconds",
     "Age of the last /metrics scrape in seconds.",
 )
+TASKS_BY_STATUS = Gauge(
+    "gateway_tasks_by_status",
+    "Number of durable tasks in the task database, by current status.",
+    ["status"],
+)
+
+
+def _refresh_task_state_metrics():
+    TASKS_BY_STATUS.clear()
+    path = os.environ.get("TASK_DB_PATH", "/data/tasks/tasks.sqlite3")
+    if not os.path.exists(path):
+        return
+    db = _task_db()
+    try:
+        counts = db.execute("SELECT status, COUNT(*) FROM tasks GROUP BY status").fetchall()
+    finally:
+        db.close()
+    for status, count in counts:
+        TASKS_BY_STATUS.labels(status=status).set(count)
 
 class Handler(BaseHTTPRequestHandler):
     def _transport_allowed(self):
@@ -298,6 +322,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/metrics":
             logger.info("metrics scrape")
             SCRAPE.set(0)
+            _refresh_task_state_metrics()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain;version=0.0.4")
             self.end_headers()

@@ -101,6 +101,18 @@ def test_task_secret_is_immutable_and_duplicate_cannot_replace(task_gateway):
     github.assert_not_called()
 
 
+def test_acceptance_metrics_count_initial_and_retry_but_not_replay(task_gateway, monkeypatch):
+    initial_before = server.ACCEPTED_TASKS.labels(kind="initial")._value.get()
+    retry_before = server.ACCEPTED_TASKS.labels(kind="retry")._value.get()
+    task_id = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
+    task_request("POST", "/api/v1/tasks/spawn", issue_payload())
+    finish_failed_task(task_gateway, monkeypatch, task_id)
+    task_request("POST", f"/api/v1/tasks/{task_id}/retry", {"retry_key": "manual-1"})
+
+    assert server.ACCEPTED_TASKS.labels(kind="initial")._value.get() == initial_before + 1
+    assert server.ACCEPTED_TASKS.labels(kind="retry")._value.get() == retry_before + 1
+
+
 def finish_failed_task(task_gateway, monkeypatch, task_id):
     monkeypatch.setattr(server, "_sync_lifecycle", Mock())
     result = {"task_id": task_id, "repo": "org/repo", "issue_number": 2,

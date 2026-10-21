@@ -283,14 +283,16 @@ Merge / Reject
   - **Gateway** (`orchestrator/gateway`): `http_requests_total`,
     `http_request_duration_seconds`, `http_request_errors_total`,
     `gateway_active_requests_gauge`, `gateway_healthz_gauge`,
-    `gateway_scrape_interval_seconds`
+    `gateway_scrape_interval_seconds`, `gateway_tasks_accepted_total{kind}`
+    (successful initial/retry intake), and `gateway_tasks_by_status` (current
+    durable task rows grouped by `queued`, `running`, `completed`, or `failed`)
   - **Supervisor** (`orchestrator/supervisor`): `orchestrator_tasks_total`,
     `orchestrator_iterations_total`, `orchestrator_best_score`,
     `orchestrator_current_iteration`, `orchestrator_supervisor_state`,
     `orchestrator_duration_seconds`, `orchestrator_active_tasks`
   - **Worker** (`orchestrator/worker`): `worker_tasks_total`,
-    `worker_code_changes_total`, `worker_evaluation_score`,
-    `worker_job_duration_seconds`, `worker_last_status`, `worker_active_jobs`
+    `worker_code_changes_total`, `worker_job_duration_seconds`,
+    `worker_last_status`, `worker_active_jobs`
 
 ### Central Prometheus
 - **Endpoint:** http://truenas.utopiklab.lan:9090/  (Grafana + Prometheus)
@@ -305,8 +307,8 @@ Merge / Reject
 - Import node-exporter dashboard
 - **Import** `dashboards/grafana-dashboard.json` (uid `cfe-orchestrator`) — combined
   pipeline dashboard: request/error rate + latency (gateway), tasks over time /
-  current iteration / best score / active tasks (supervisor), code changes /
-  eval score / job duration / active jobs (worker), plus active-workload gauges.
+  current task state / current iteration / best score (supervisor), tasks by
+  outcome / code changes / job duration / active jobs (worker), plus active-workload gauges.
 
 ### Known Issues
 - iDRAC/IPMI exporter pod in CrashLoopBackOff (config format issue) — not critical for core loop

@@ -32,17 +32,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(cfe_gateway_requests[5m])",
+          "expr": "rate(http_requests_total[5m])",
           "legendFormat": "gateway requests/s"
         },
         {
           "refId": "B",
-          "expr": "rate(cfe_supervisor_tasks[5m])",
-          "legendFormat": "supervisor tasks/s"
+          "expr": "rate(gateway_tasks_accepted_total[5m])",
+          "legendFormat": "accepted tasks/s"
         },
         {
           "refId": "C",
-          "expr": "rate(cfe_worker_tasks[5m])",
+          "expr": "rate(worker_tasks_total[5m])",
           "legendFormat": "worker tasks/s"
         }
       ]
@@ -61,18 +61,18 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "cfe_gateway_active",
+          "expr": "gateway_active_requests_gauge",
           "legendFormat": "gateway active"
         },
         {
           "refId": "B",
-          "expr": "cfe_active_jobs",
+          "expr": "worker_active_jobs",
           "legendFormat": "worker active jobs"
         },
         {
           "refId": "C",
-          "expr": "cfe_active_tasks",
-          "legendFormat": "supervisor active tasks"
+          "expr": "gateway_tasks_by_status{status=\"running\"}",
+          "legendFormat": "durable tasks running"
         }
       ]
     },
@@ -90,7 +90,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(cfe_gateway_errors[5m])",
+          "expr": "rate(http_request_errors_total[5m])",
           "legendFormat": "errors/s"
         }
       ]
@@ -109,7 +109,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(cfe_gateway_requests[5m])",
+          "expr": "rate(http_requests_total[5m])",
           "legendFormat": "requests/s"
         }
       ]
@@ -128,14 +128,14 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "cfe_request_duration_sum/cfe_request_duration_count",
+          "expr": "http_request_duration_seconds_sum/http_request_duration_seconds_count",
           "legendFormat": "avg latency (s)"
         }
       ]
     },
     {
       "id": "5",
-      "title": "Supervisor: Tasks Over Time",
+      "title": "Gateway: Tasks Accepted",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
@@ -147,13 +147,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "cfe_supervisor_tasks",
-          "legendFormat": "total tasks"
-        },
-        {
-          "refId": "B",
-          "expr": "cfe_supervisor_iterations",
-          "legendFormat": "total iterations"
+          "expr": "gateway_tasks_accepted_total",
+          "legendFormat": "{{kind}}"
         }
       ]
     },
@@ -171,7 +166,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "cfe_best_score",
+          "expr": "orchestrator_best_score",
           "legendFormat": "best eval score"
         }
       ]
@@ -190,7 +185,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "cfe_current_iteration",
+          "expr": "orchestrator_current_iteration",
           "legendFormat": "current iteration"
         }
       ]
@@ -209,7 +204,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "cfe_supervisor_state",
+          "expr": "orchestrator_supervisor_state",
           "legendFormat": "state"
         }
       ]
@@ -228,8 +223,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "cfe_active_tasks",
-          "legendFormat": "active tasks"
+          "expr": "gateway_tasks_by_status{status=\"running\"}",
+          "legendFormat": "durable tasks running"
         }
       ]
     },
@@ -247,14 +242,14 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(cfe_worker_code_changes[5m])",
+          "expr": "rate(worker_code_changes_total[5m])",
           "legendFormat": "code changes/s"
         }
       ]
     },
     {
       "id": "11",
-      "title": "Worker: Eval Score",
+      "title": "Worker: Tasks by Outcome",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
@@ -266,8 +261,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "cfe_worker_eval_score",
-          "legendFormat": "eval score"
+          "expr": "worker_tasks_total",
+          "legendFormat": "{{status}}"
         }
       ]
     },
@@ -285,7 +280,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "cfe_worker_job_duration_seconds",
+          "expr": "rate(worker_job_duration_seconds_sum[5m])/rate(worker_job_duration_seconds_count[5m])",
           "legendFormat": "job duration"
         }
       ]
@@ -304,7 +299,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "cfe_active_jobs",
+          "expr": "worker_active_jobs",
           "legendFormat": "active jobs"
         }
       ]
@@ -323,8 +318,27 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "cfe_worker_last_status",
-          "legendFormat": "last status"
+          "expr": "worker_last_status",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": "15",
+      "title": "Tasks: Current State",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "datasource": "${prometheus}",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "gateway_tasks_by_status",
+          "legendFormat": "{{status}}"
         }
       ]
     }
