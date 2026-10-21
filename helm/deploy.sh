@@ -25,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 HELM_DIR="${HELM_DIR:-$SCRIPT_DIR}"
 # Optional nonsecret YAML values file, passed to both charts via `--values`.
 LOCAL_VALUES_FILE="${LOCAL_VALUES_FILE:-${HELM_DIR}/local.values.yaml}"
-# Private credentials are applied last and contain no deployment behavior.
+# Private credentials and management identity settings are applied last.
 SECRETS_FILE="${SECRETS_FILE:-${SCRIPT_DIR}/local.secrets-values.yaml}"
 ORCHESTRATOR_VALUES_FILE="${ORCHESTRATOR_VALUES_FILE:-${HELM_DIR}/orchestrator/local.values.yaml}"
 NAMESPACE_IN="inference"

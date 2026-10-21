@@ -27,8 +27,19 @@
                     "type": "string",
                     "pattern": "^(https://[^@?#]+)?$"
                 },
-                "repositoriesSecret": {
-                    "type": "string"
+                "repositories": {
+                    "type": "object",
+                    "propertyNames": {
+                        "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+                        "not": {
+                            "pattern": "^\\.{1,2}/|/\\.{1,2}$"
+                        }
+                    },
+                    "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[^\\s<>]+$"
+                    }
                 },
                 "ingress": {
                     "type": "object",
@@ -93,19 +104,19 @@
                 "required": [
                     "image",
                     "publicOrigin",
-                    "repositoriesSecret",
-                    "oidc"
+                    "oidc",
+                    "repositories"
                 ],
                 "properties": {
+                    "repositories": {
+                        "minProperties": 1,
+                        "description": "Set management.repositories in helm/local.secrets-values.yaml."
+                    },
                     "image": {
                         "minLength": 1
                     },
                     "publicOrigin": {
                         "pattern": "^https://[^/@?#]+$"
-                    },
-                    "repositoriesSecret": {
-                        "minLength": 1,
-                        "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
                     },
                     "ingress": {
                         "if": {
@@ -206,10 +217,12 @@
                     "additionalProperties": false,
                     "properties": {
                         "openaiApiKey": {
-                            "type": "string"
+                            "type": "string",
+                            "pattern": "^$|^[^<>\\s]+$"
                         },
                         "coderApiKey": {
-                            "type": "string"
+                            "type": "string",
+                            "pattern": "^$|^[^<>\\s]+$"
                         }
                     }
                 }
@@ -257,28 +270,8 @@
             "type": "object",
             "properties": {
                 "auth": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                        "existingSecret",
-                        "pullRequestSecret",
-                        "createSecret"
-                    ],
-                    "properties": {
-                        "existingSecret": {
-                            "type": "string",
-                            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
-                            "maxLength": 253
-                        },
-                        "createSecret": {
-                            "type": "boolean"
-                        },
-                        "pullRequestSecret": {
-                            "type": "string",
-                            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
-                            "maxLength": 253
-                        }
-                    }
+                    "not": {},
+                    "description": "Set credentials.internal.supervisorServiceToken and credentials.github.pullRequestPat in helm/local.secrets-values.yaml."
                 },
                 "config": {
                     "type": "object",
@@ -356,21 +349,8 @@
             "type": "object",
             "properties": {
                 "auth": {
-                    "type": "object",
-                    "required": [
-                        "existingSecret"
-                    ],
-                    "additionalProperties": false,
-                    "properties": {
-                        "existingSecret": {
-                            "type": "string",
-                            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
-                            "maxLength": 253
-                        },
-                        "createSecret": {
-                            "type": "boolean"
-                        }
-                    }
+                    "not": {},
+                    "description": "Set credentials.models.coderApiKey in helm/local.secrets-values.yaml if the endpoint requires authentication."
                 },
                 "coderUrl": {
                     "type": "string"
@@ -439,18 +419,8 @@
             ],
             "properties": {
                 "auth": {
-                    "type": "object",
-                    "required": [
-                        "existingSecret"
-                    ],
-                    "additionalProperties": false,
-                    "properties": {
-                        "existingSecret": {
-                            "type": "string",
-                            "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
-                            "maxLength": 253
-                        }
-                    }
+                    "not": {},
+                    "description": "Set credentials.internal.gatewayClientToken in helm/local.secrets-values.yaml."
                 },
                 "transportMode": {
                     "type": "string",
@@ -844,168 +814,46 @@
             }
         },
         {
-            "if": {
-                "properties": {
-                    "gateway": {
-                        "properties": {
-                            "auth": {
-                                "properties": {
-                                    "existingSecret": {
-                                        "maxLength": 0
-                                    }
+            "properties": {
+                "credentials": {
+                    "properties": {
+                        "internal": {
+                            "properties": {
+                                "gatewayClientToken": {
+                                    "minLength": 32,
+                                    "pattern": "^[^<>\\s]+$"
                                 },
-                                "required": [
-                                    "existingSecret"
-                                ]
-                            }
-                        },
-                        "required": [
-                            "auth"
-                        ]
-                    }
-                },
-                "required": [
-                    "gateway"
-                ]
-            },
-            "then": {
-                "properties": {
-                    "credentials": {
-                        "properties": {
-                            "internal": {
-                                "properties": {
-                                    "gatewayClientToken": {
-                                        "minLength": 32,
-                                        "pattern": "^[^<>\\s]+$"
-                                    }
-                                },
-                                "required": [
-                                    "gatewayClientToken"
-                                ]
-                            }
-                        },
-                        "required": [
-                            "internal"
-                        ]
-                    }
-                },
-                "required": [
-                    "credentials"
-                ]
-            }
-        },
-        {
-            "if": {
-                "properties": {
-                    "supervisor": {
-                        "properties": {
-                            "auth": {
-                                "properties": {
-                                    "createSecret": {
-                                        "const": true
-                                    }
-                                },
-                                "required": [
-                                    "createSecret"
-                                ]
-                            }
-                        },
-                        "required": [
-                            "auth"
-                        ]
-                    }
-                },
-                "required": [
-                    "supervisor"
-                ]
-            },
-            "then": {
-                "properties": {
-                    "credentials": {
-                        "properties": {
-                            "internal": {
-                                "properties": {
-                                    "supervisorServiceToken": {
-                                        "minLength": 1,
-                                        "pattern": "^[^<>\\s]+$"
-                                    }
-                                },
-                                "required": [
-                                    "supervisorServiceToken"
-                                ]
+                                "supervisorServiceToken": {
+                                    "minLength": 1,
+                                    "pattern": "^[^<>\\s]+$"
+                                }
                             },
-                            "github": {
-                                "properties": {
-                                    "pullRequestPat": {
-                                        "minLength": 1,
-                                        "pattern": "^[^<>\\s]+$"
-                                    }
-                                },
-                                "required": [
-                                    "pullRequestPat"
-                                ]
-                            }
+                            "required": [
+                                "gatewayClientToken",
+                                "supervisorServiceToken"
+                            ]
                         },
-                        "required": [
-                            "internal",
-                            "github"
-                        ]
-                    }
-                },
-                "required": [
-                    "credentials"
-                ]
-            }
-        },
-        {
-            "if": {
-                "properties": {
-                    "worker": {
-                        "properties": {
-                            "auth": {
-                                "properties": {
-                                    "createSecret": {
-                                        "const": true
-                                    }
-                                },
-                                "required": [
-                                    "createSecret"
-                                ]
-                            }
-                        },
-                        "required": [
-                            "auth"
-                        ]
-                    }
-                },
-                "required": [
-                    "worker"
-                ]
+                        "github": {
+                            "properties": {
+                                "pullRequestPat": {
+                                    "minLength": 1,
+                                    "pattern": "^[^<>\\s]+$"
+                                }
+                            },
+                            "required": [
+                                "pullRequestPat"
+                            ]
+                        }
+                    },
+                    "required": [
+                        "internal",
+                        "github"
+                    ]
+                }
             },
-            "then": {
-                "properties": {
-                    "credentials": {
-                        "properties": {
-                            "models": {
-                                "properties": {
-                                    "coderApiKey": {
-                                        "minLength": 1
-                                    }
-                                },
-                                "required": [
-                                    "coderApiKey"
-                                ]
-                            }
-                        },
-                        "required": [
-                            "models"
-                        ]
-                    }
-                },
-                "required": [
-                    "credentials"
-                ]
-            }
+            "required": [
+                "credentials"
+            ]
         }
     ]
 }

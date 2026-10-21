@@ -13,6 +13,13 @@ import yaml
 HELM_DIR = Path(__file__).resolve().parent
 USERNAME = "registry-test-user"
 TOKEN = 'registry-test-sentinel-"\\-only'
+AUTH_CREDENTIALS = {
+    "internal": {
+        "gatewayClientToken": "gateway-test-sentinel-at-least-32-characters",
+        "supervisorServiceToken": "supervisor-test-sentinel",
+    },
+    "github": {"pullRequestPat": "pr-test-sentinel"},
+}
 
 
 class RegistryValuesTests(unittest.TestCase):
@@ -82,7 +89,14 @@ class RegistryValuesTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("gpuCount", result.stderr)
 
-    def render(self, chart, values):
+    def render(self, chart, values, provide_auth=True):
+        values = json.loads(json.dumps(values))
+        if chart == "orchestrator" and provide_auth:
+            credentials = values.setdefault("credentials", {})
+            for group, defaults in AUTH_CREDENTIALS.items():
+                target = credentials.setdefault(group, {})
+                for key, value in defaults.items():
+                    target.setdefault(key, value)
         result = subprocess.run(
             ["helm", "template", "local", str(HELM_DIR / chart), "--values", "-"],
             input=yaml.safe_dump(values), text=True, capture_output=True, check=False,
@@ -245,9 +259,6 @@ class RegistryValuesTests(unittest.TestCase):
         documents = self.documents("orchestrator", {
             "credentials": credentials,
             "registry": {"create": True, "username": USERNAME},
-            "gateway": {"auth": {"existingSecret": ""}},
-            "supervisor": {"auth": {"createSecret": True}},
-            "worker": {"auth": {"createSecret": True}},
         })
         secrets = {document["metadata"]["name"]: document for document in documents
                    if document["kind"] == "Secret"}
@@ -256,6 +267,14 @@ class RegistryValuesTests(unittest.TestCase):
             "orchestrator-github-pr-auth", "orchestrator-gateway-auth",
             "orchestrator-coder-model-auth", "ghcr-read-packages-pull-secret",
         })
+        for name, key in (
+            ("orchestrator-openai-model-auth", "openai-api-key"),
+            ("orchestrator-supervisor-service-auth", "supervisor-auth-token"),
+            ("orchestrator-github-pr-auth", "pr-github-token"),
+            ("orchestrator-gateway-auth", "gateway-auth-token"),
+            ("orchestrator-coder-model-auth", "coder-api-key"),
+        ):
+            self.assertEqual(set(secrets[name]["data"]), {key})
         self.assertEqual(base64.b64decode(secrets["orchestrator-openai-model-auth"]["data"]["openai-api-key"]).decode(),
                          "openai-grouped-sentinel")
         self.assertEqual(base64.b64decode(secrets["orchestrator-supervisor-service-auth"]["data"]["supervisor-auth-token"]).decode(),
@@ -299,17 +318,17 @@ class RegistryValuesTests(unittest.TestCase):
 
     def test_examples_separate_credentials_from_behavior(self):
         credentials = yaml.safe_load((HELM_DIR / "example.secrets-values.yaml").read_text())
-        self.assertEqual(set(credentials), {"credentials"})
+        self.assertEqual(set(credentials), {"credentials", "management"})
         self.assertEqual(set(credentials["credentials"]), {"internal", "github", "models"})
+        self.assertEqual(set(credentials["management"]), {"repositories", "oidc"})
         self.assertNotIn("createSecret", str(credentials))
         self.assertNotIn("existingSecret", str(credentials))
 
         shared = yaml.safe_load((HELM_DIR / "example.values.yaml").read_text())
         self.assertEqual(shared["registry"], {"create": True, "username": "<your-github-username>"})
         orchestrator = yaml.safe_load((HELM_DIR / "orchestrator/example.values.yaml").read_text())
-        self.assertEqual(orchestrator["gateway"]["auth"]["existingSecret"], "")
-        self.assertTrue(orchestrator["supervisor"]["auth"]["createSecret"])
-        self.assertFalse(orchestrator["worker"]["auth"]["createSecret"])
+        for component in ("gateway", "supervisor", "worker"):
+            self.assertNotIn("auth", orchestrator.get(component, {}))
 
     def test_deploy_value_file_order_renders_secrets_and_references(self):
         shared_values = yaml.safe_load((HELM_DIR / "example.values.yaml").read_text())
@@ -369,6 +388,7 @@ class RegistryValuesTests(unittest.TestCase):
                     self.assertEqual(set(secrets), {
                         "orchestrator-openai-model-auth", "orchestrator-supervisor-service-auth",
                         "orchestrator-github-pr-auth", "orchestrator-gateway-auth",
+                        "orchestrator-coder-model-auth",
                         "ghcr-read-packages-pull-secret",
                     })
                     gateway = next(document for document in documents if document["kind"] == "Deployment"
@@ -394,9 +414,12 @@ class RegistryValuesTests(unittest.TestCase):
 
     def documents_from_value_files(self, chart, value_files):
         command = ["helm", "template", "local", str(HELM_DIR / chart)]
+        if chart == "orchestrator":
+            command.extend(("--values", "-"))
         for path in value_files:
             command.extend(("--values", str(path)))
-        result = subprocess.run(command, text=True, capture_output=True, check=False)
+        result = subprocess.run(command, input=yaml.safe_dump({"credentials": AUTH_CREDENTIALS}),
+                                text=True, capture_output=True, check=False)
         self.assertEqual(result.returncode, 0, "Layered dummy Helm render failed")
         return [document for document in yaml.safe_load_all(result.stdout) if document]
 
@@ -414,14 +437,72 @@ class RegistryValuesTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("values don't meet the specifications", result.stderr)
 
-    def test_worker_coder_secret_remains_external_by_default(self):
+    def test_removed_auth_configuration_is_rejected(self):
+        for component, fields in (
+            ("gateway", ("existingSecret",)),
+            ("supervisor", ("existingSecret", "pullRequestSecret", "createSecret")),
+            ("worker", ("existingSecret", "createSecret")),
+        ):
+            for field in fields:
+                for value in ((None, False, True) if field == "createSecret" else ("external-auth", "")):
+                    with self.subTest(component=component, field=field, value=value):
+                        result = self.render("orchestrator", {component: {"auth": {field: value}}})
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("auth", result.stderr)
+
+    def test_required_auth_credentials_fail_with_value_paths(self):
+        result = self.render("orchestrator", {}, provide_auth=False)
+        self.assertNotEqual(result.returncode, 0)
+        for group, defaults in AUTH_CREDENTIALS.items():
+            for key in defaults:
+                for invalid in ("", " ", "<replace-me>"):
+                    with self.subTest(group=group, key=key, invalid=invalid):
+                        credentials = json.loads(json.dumps(AUTH_CREDENTIALS))
+                        credentials[group][key] = invalid
+                        result = self.render("orchestrator", {"credentials": credentials}, provide_auth=False)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(key, result.stderr)
+                        self.assertNotIn("kind: Secret", result.stdout)
+
+    def test_removed_api_absent_from_values_schema_and_docs(self):
+        paths = [HELM_DIR / "orchestrator/values.schema.json",
+                 HELM_DIR.parent / "docs/operations/credential-separation.md"]
+        paths.extend(path for path in HELM_DIR.glob("**/*values.yaml")
+                     if "charts" not in path.parts and path.name != "local.secrets-values.yaml")
+        for path in paths:
+            contents = path.read_text()
+            for field in ("existingSecret", "pullRequestSecret", "createSecret", "repositoriesSecret"):
+                with self.subTest(path=path.relative_to(HELM_DIR.parent), field=field):
+                    self.assertNotIn(field, contents)
+
+    def test_optional_model_credentials_reject_invalid_values(self):
+        for key in ("openaiApiKey", "coderApiKey"):
+            for invalid in (" ", "<replace-me>"):
+                with self.subTest(key=key, invalid=invalid):
+                    result = self.render("orchestrator", {"credentials": {"models": {key: invalid}}})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(key, result.stderr)
+
+    def test_auth_resources_exist_with_optional_model_keys_empty(self):
         documents = self.documents("orchestrator", {})
-        self.assertFalse(any(document["kind"] == "Secret"
-                             and document["metadata"]["name"] == "orchestrator-coder-model-auth"
-                             for document in documents))
-        self.assertFalse(any(document["kind"] == "Secret"
-                             and document["metadata"]["name"] == "orchestrator-supervisor-auth"
-                             for document in documents))
+        secrets = {document["metadata"]["name"]: document for document in documents
+                   if document["kind"] == "Secret"}
+        self.assertEqual(set(secrets), {
+            "orchestrator-gateway-auth", "orchestrator-supervisor-service-auth",
+            "orchestrator-github-pr-auth", "orchestrator-coder-model-auth",
+            "orchestrator-openai-model-auth",
+        })
+        for name, key in (("orchestrator-coder-model-auth", "coder-api-key"),
+                          ("orchestrator-openai-model-auth", "openai-api-key")):
+            self.assertEqual(secrets[name]["data"], {key: ""})
+        for document in documents:
+            if document["kind"] not in ("Deployment", "Job"):
+                continue
+            for container in document["spec"]["template"]["spec"]["containers"]:
+                for entry in container.get("env", []):
+                    reference = entry.get("valueFrom", {}).get("secretKeyRef")
+                    if reference:
+                        self.assertIn(reference["key"], secrets[reference["name"]]["data"])
         worker = next(document for document in documents if document["kind"] == "Job")
         coder_key = next(entry for entry in worker["spec"]["template"]["spec"]["containers"][0]["env"]
                          if entry["name"] == "CODER_API_KEY")
@@ -441,9 +522,9 @@ class RegistryValuesTests(unittest.TestCase):
                     documents = self.documents(chart, values)
                     self.assertFalse(any(document.get("type") == "kubernetes.io/dockerconfigjson"
                                          for document in documents))
-                    self.assertFalse(any(document["kind"] == "Secret" and
+                    self.assertEqual(any(document["kind"] == "Secret" and
                                          document["metadata"]["name"] == "orchestrator-gateway-auth"
-                                         for document in documents))
+                                         for document in documents), chart == "orchestrator")
                     for document in documents:
                         if document["kind"] in ("Deployment", "Job"):
                             self.assertIn({"name": name},
@@ -482,7 +563,6 @@ class RegistryValuesTests(unittest.TestCase):
     def test_gateway_file_token_remains_separate(self):
         gateway_token = "gateway-only-sentinel-independent-32-characters"
         documents = self.documents("orchestrator", {
-            "gateway": {"auth": {"existingSecret": ""}},
             "credentials": {
                 "internal": {"gatewayClientToken": gateway_token},
                 "models": {"openaiApiKey": "model-key-sentinel"},
@@ -495,7 +575,6 @@ class RegistryValuesTests(unittest.TestCase):
         model_key = secrets["orchestrator-openai-model-auth"]["data"]["openai-api-key"]
         self.assertEqual(base64.b64decode(model_key).decode(), "model-key-sentinel")
         result = self.render("orchestrator", {
-            "gateway": {"auth": {"existingSecret": ""}},
             "credentials": {"internal": {"gatewayClientToken": "<replace-with-independent-token-32-characters>"}},
         })
         self.assertNotEqual(result.returncode, 0)
@@ -531,7 +610,7 @@ class RegistryValuesTests(unittest.TestCase):
             "enabled": True,
             "image": defaults["gateway"]["image"],
             "publicOrigin": "https://management.example.com",
-            "repositoriesSecret": "management-repositories",
+            "repositories": {"example/project": TOKEN},
             "oidc": {
                 "issuer": "https://identity.example.com",
                 "audience": "management",
@@ -541,6 +620,105 @@ class RegistryValuesTests(unittest.TestCase):
             "ingress": {"enabled": True, "host": "management.example.com",
                         "tlsTermination": "internal", "tlsSecretName": "management-tls", **ingress},
         }}
+
+    def test_management_managed_repository_credentials(self):
+        values = self.management_values()
+        repositories = {"example/project": TOKEN, "example/other": "other-sentinel"}
+        values["management"]["repositories"] = repositories
+        documents = self.documents("orchestrator", values)
+        secret = next(document for document in documents if document["kind"] == "Secret"
+                      and document["metadata"]["name"] == "orchestrator-management-repositories")
+        self.assertEqual(secret["type"], "Opaque")
+        self.assertEqual(secret["metadata"]["namespace"], "orchestrator")
+        self.assertEqual(json.loads(base64.b64decode(secret["data"]["repositories.json"])), repositories)
+        deployment = next(document for document in documents if document["kind"] == "Deployment"
+                          and document["metadata"]["name"] == "orchestrator-management")
+        pod = deployment["spec"]["template"]["spec"]
+        volume = next(volume for volume in pod["volumes"] if volume["name"] == "repositories")
+        self.assertEqual(volume["secret"]["secretName"], secret["metadata"]["name"])
+        self.assertEqual(volume["secret"]["items"], [{"key": "repositories.json", "path": "repositories.json"}])
+        environment = {entry["name"]: entry for entry in pod["containers"][0]["env"]}
+        self.assertEqual(environment["CODEFACTORY_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"], {
+            "name": "orchestrator-gateway-auth", "key": "gateway-auth-token",
+        })
+        for field in ("issuer", "audience", "jwksUrl", "allowedSubjects"):
+            with self.subTest(field=field):
+                original = values["management"]["oidc"][field]
+                values["management"]["oidc"][field] = [] if field == "allowedSubjects" else ""
+                result = self.render("orchestrator", values)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(field, result.stderr)
+                values["management"]["oidc"][field] = original
+
+    def test_management_external_repository_secret_is_rejected(self):
+        values = self.management_values()
+        values["management"]["repositoriesSecret"] = "external-repositories"
+        result = self.render("orchestrator", values)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("repositoriesSecret", result.stderr)
+
+    def test_management_invalid_managed_repository_credentials_fail(self):
+        for repositories in ({}, {"example/project": ""}, {"example/project": "has space"},
+                             {"example/project": "<placeholder>"}, {"invalid": TOKEN},
+                             {"../project": TOKEN}, {"example/..": TOKEN},
+                             {"example/project": 123}):
+            with self.subTest(repositories=repositories):
+                values = self.management_values()
+                values["management"]["repositories"] = repositories
+                result = self.render("orchestrator", values)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("values don't meet the specifications of the schema", result.stderr)
+
+    def test_management_secrets_file_layering_and_lint(self):
+        settings = self.management_values()["management"]
+        identity = settings.pop("oidc")
+        settings["oidc"] = {"issuer": "", "audience": "", "jwksUrl": "", "allowedSubjects": []}
+        private = {"management": {"repositories": {"example/project": TOKEN}, "oidc": identity}}
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for name, values in (("shared.yaml", {"credentials": AUTH_CREDENTIALS}), ("orchestrator.yaml", {"management": settings}),
+                                 ("secrets.yaml", private)):
+                path = Path(directory) / name
+                path.write_text(yaml.safe_dump(values))
+                paths.append(path)
+            documents = self.documents_from_value_files("orchestrator", paths)
+            deployment = next(document for document in documents if document["kind"] == "Deployment"
+                              and document["metadata"]["name"] == "orchestrator-management")
+            environment = {entry["name"]: entry.get("value") for entry in
+                           deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+            for name, field in (("MANAGEMENT_OIDC_ISSUER", "issuer"),
+                                ("MANAGEMENT_OIDC_AUDIENCE", "audience"),
+                                ("MANAGEMENT_OIDC_JWKS_URL", "jwksUrl")):
+                self.assertEqual(environment[name], identity[field])
+            self.assertEqual(environment["MANAGEMENT_ALLOWED_SUBJECTS"], "operator")
+            self.assertTrue(any(document["kind"] == "Secret" and document["metadata"]["name"]
+                                == "orchestrator-management-repositories" for document in documents))
+            self.documents_from_value_files("inference", [paths[0], paths[2]])
+            arguments = ["helm", "lint", str(HELM_DIR / "orchestrator")]
+            for path in paths:
+                arguments.extend(["--values", str(path)])
+            result = subprocess.run(arguments, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, "Synthetic layered Helm lint failed")
+
+    def test_management_managed_credentials_disabled(self):
+        documents = self.documents("orchestrator", {"management": {
+            "enabled": False, "repositories": {"example/project": TOKEN},
+        }})
+        self.assertFalse(any(document["kind"] == "Secret" and document["metadata"]["name"]
+                             == "orchestrator-management-repositories" for document in documents))
+
+    def test_management_invalid_oidc_settings_fail(self):
+        for field, value in (("issuer", "http://identity.example.com"),
+                             ("jwksUrl", "http://identity.example.com/jwks"),
+                             ("allowedSubjects", [""]), ("allowedSubjects", ["operator,other"]),
+                             ("allowedSubjects", ["operator", "operator"])):
+            with self.subTest(field=field, value=value):
+                values = self.management_values()
+                values["management"]["repositories"] = {"example/project": TOKEN}
+                values["management"]["oidc"][field] = value
+                result = self.render("orchestrator", values)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(field, result.stderr)
 
     def test_management_ingress_opt_in(self):
         disabled = self.management_values()

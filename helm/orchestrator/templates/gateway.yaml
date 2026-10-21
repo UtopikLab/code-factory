@@ -50,12 +50,12 @@ spec:
             - name: CODEFACTORY_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ default (printf "%s-gateway-auth" .Chart.Name) .Values.gateway.auth.existingSecret }}
+                  name: {{ .Chart.Name }}-gateway-auth
                   key: gateway-auth-token
             - name: SUPERVISOR_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.supervisor.auth.existingSecret }}
+                  name: {{ include "orchestrator.supervisorSecretName" . }}
                   key: supervisor-auth-token
             - name: GATEWAY_TRANSPORT_MODE
               value: {{ .Values.gateway.transportMode | quote }}

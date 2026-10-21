@@ -17,9 +17,10 @@ The disabled example in `helm/orchestrator/example.values.yaml` uses
 `management.example.com` with external TLS termination; it does not enable
 the workload or ingress. Before enabling both settings:
 
-- Supply a registry-verified, explicitly versioned management image, the
-  repository-credentials Secret, OIDC issuer/audience/JWKS URL and allowed
-  subjects, and the existing gateway credentials. No image or credentials
+- Supply a registry-verified, explicitly versioned management image. Set
+  `management.repositories`, OIDC issuer/audience/JWKS URL and allowed subjects,
+  and gateway credential values in `helm/local.secrets-values.yaml`; Helm creates
+  the repository and authentication Secrets. No image or credentials
   are supplied by this ingress change.
 - Set `management.publicOrigin` to the browser-visible HTTPS origin, without
   a path or trailing slash. Normally its hostname matches the ingress host;

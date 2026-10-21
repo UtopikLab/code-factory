@@ -48,24 +48,60 @@ chmod 600 helm/local.secrets-values.yaml
 `helm/local.values.yaml` contains shared, nonsecret settings for both charts,
 including whether each chart creates the GHCR pull Secret and the registry
 username. `helm/orchestrator/local.values.yaml` contains orchestrator-only
-deployment settings such as Secret ownership and environment routing. The
-credentials-only `helm/local.secrets-values.yaml` contains exactly the grouped
+deployment settings such as images and environment routing. The
+private `helm/local.secrets-values.yaml` contains the grouped
 `credentials.internal.*`, `credentials.github.*`, and `credentials.models.*`
-values shown in `helm/example.secrets-values.yaml`. Use a separate provider-issued
+values, plus management repository credentials and OIDC settings shown in
+`helm/example.secrets-values.yaml`. Use a separate provider-issued
 PAT for GHCR `read:packages` and repository PR operations; never reuse the GHCR
 PAT for repository access. Generate internal tokens independently.
 
 Replace placeholders with real values only in the ignored private credentials file.
 The gateway token must be independently generated, at least 32 characters, and
-also configured as `CODEFACTORY_AUTH_TOKEN` in source repositories. With the local
-orchestrator values example, Helm creates the gateway Secret named
-`orchestrator-gateway-auth` because `gateway.auth.existingSecret` is empty. It also
-creates `orchestrator-supervisor-service-auth` and `orchestrator-github-pr-auth`
-because `supervisor.auth.createSecret` is true. The coder key remains externally
-managed by default through `worker.auth.existingSecret`; set
-`worker.auth.createSecret: true` in the ordinary orchestrator values to have Helm
-create `orchestrator-coder-model-auth` from `credentials.models.coderApiKey`.
-The OpenAI key is stored in `orchestrator-openai-model-auth`.
+also configured as `CODEFACTORY_AUTH_TOKEN` in source repositories. Helm always
+creates and reconciles the purpose-separated authentication Secrets:
+`orchestrator-gateway-auth`, `orchestrator-supervisor-service-auth`,
+`orchestrator-github-pr-auth`, `orchestrator-coder-model-auth`, and
+`orchestrator-openai-model-auth`. Names are derived from the chart name, not the
+release name. Users supply only credential values, never auth Secret names or
+creation switches. `credentials.internal.gatewayClientToken`,
+`credentials.internal.supervisorServiceToken`, and `credentials.github.pullRequestPat`
+are required; empty, whitespace, or placeholder values fail validation.
+`credentials.models.openaiApiKey` and `credentials.models.coderApiKey` may be empty
+for unauthenticated model endpoints. Their Secrets and keys still exist; configure
+real provider-issued values whenever the endpoints require authentication.
+
+### Management Credentials And Identity
+
+When management is enabled, configure its credentials and identity in the same
+ignored `helm/local.secrets-values.yaml`, at the root (not under `orchestrator`):
+
+```yaml
+management:
+   repositories:
+      owner/repository: "<repository-specific-pat>"
+   oidc:
+      issuer: "https://<your-identity-provider>"
+      audience: "<your-management-audience>"
+      jwksUrl: "https://<your-identity-provider>/<jwks-path>"
+      allowedSubjects:
+         - "<authorized-operator-subject>"
+```
+
+Replace the repository key and all placeholders with real values in that file.
+An empty repository map, blank tokens, missing OIDC fields, or an empty authorized
+subject list are rejected when management is enabled. Keep `management.enabled`,
+the image, public origin, and ingress settings in the ordinary orchestrator values.
+Helm creates `orchestrator-management-repositories` using the chart's
+existing chart-name convention, with a `repositories.json` key containing the
+repository-name-to-token JSON map, and mounts it into management automatically.
+The OIDC fields become the existing management environment variables; authentication
+and subject authorization remain required. The private file is already applied
+last by `deploy.sh`; no script arguments or nested chart wrapper are needed.
+
+There is no external repository-Secret override. When management is disabled,
+its repository Secret is not rendered; OIDC setup and a populated repository map
+are required only when management is enabled.
 
 The GHCR Secret is named `ghcr-read-packages-pull-secret` in each chart namespace,
 and all workloads reference that name by default. The checked-in shared values
@@ -79,8 +115,11 @@ This is a breaking values and resource-name change. Flat registry, gateway,
 supervisor, and model-key aliases are rejected; there is no fallback or automatic
 resource migration. The existing private file is not rewritten by setup. Migrate
 its credentials locally into the grouped structure and move all nonsecret settings
-to the appropriate ordinary values file; remove old flat keys. Provision or rename
-externally managed Secrets before upgrading.
+to the appropriate ordinary values file; remove old flat keys and auth ownership
+settings. Existing same-name Secrets that are not owned by this Helm release may
+block an upgrade with an ownership conflict. Review ownership and arrange any
+migration separately before an authorized upgrade; this change does not adopt,
+delete, rename, or otherwise mutate cluster resources.
 
 When separately authorized, `./helm/deploy.sh` applies chart defaults first,
 `helm/local.values.yaml` to both charts, `helm/orchestrator/local.values.yaml` to
@@ -113,11 +152,11 @@ for work that outlives the submitting job. Expiry/revocation is not auto-refresh
 
 Before a separately authorized rollout:
 
-1. Provision a dedicated gateway-auth Secret through your secret manager. Set
-   `gateway.auth.existingSecret` to its name; the key is `gateway-auth-token`.
-   Alternatively set `existingSecret` empty and supply
-   `credentials.internal.gatewayClientToken` through your secure Helm mechanism. It
-   must be at least 32 characters. Do not dump
+1. Set `credentials.internal.gatewayClientToken` in
+   `helm/local.secrets-values.yaml`. Helm creates the dedicated gateway-auth Secret
+   with the key `gateway-auth-token`. The token must be at least 32 characters.
+   Also supply the independent supervisor token and PR PAT in the same file.
+   Do not dump
    rendered Secret manifests, enable shell tracing, or put secrets in CLI arguments.
 2. Choose `gateway.ingress.tlsTermination`: `internal` (default) uses Traefik
    `websecure` and requires a nonempty `gateway.ingress.tlsSecretName` for the

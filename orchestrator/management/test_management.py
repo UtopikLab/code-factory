@@ -1,3 +1,4 @@
+import base64
 import json
 import subprocess
 import sys
@@ -14,6 +15,8 @@ import yaml
 from app import create_app
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+
+from helm.test_registry import AUTH_CREDENTIALS
 
 
 @pytest.fixture
@@ -190,21 +193,27 @@ def test_adapter_to_real_gateway_contract(boundary, monkeypatch, tmp_path):
 
 def test_management_helm_opt_in_and_snapshot(tmp_path):
     chart = Path(__file__).resolve().parents[2] / "helm" / "orchestrator"
-    base = ["helm", "template", "test", str(chart)]
+    values = tmp_path / "management.yaml"
+    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS}))
+    base = ["helm", "template", "test", str(chart), "-f", str(values)]
     default = subprocess.run(base, text=True, capture_output=True, check=True).stdout
     assert "component: management" not in default
     assert subprocess.run([*base, "--set", "management.enabled=true"], capture_output=True, check=False).returncode != 0
-    values = tmp_path / "management.yaml"
-    values.write_text(yaml.safe_dump({"management": {"enabled": True, "image": "example/management:test",
-        "publicOrigin": "https://factory.example", "repositoriesSecret": "management-repositories",
+    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS,
+        "management": {"enabled": True, "image": "example/management:test",
+        "publicOrigin": "https://factory.example", "repositories": {"org/repo": "repository-test-secret"},
         "oidc": {"issuer": "https://identity.example", "audience": "management",
                  "jwksUrl": "https://identity.example/keys", "allowedSubjects": ["operator"]}}}))
-    rendered = subprocess.run([*base, "-f", str(values)], text=True, capture_output=True, check=True).stdout
+    rendered = subprocess.run(base, text=True, capture_output=True, check=True).stdout
     documents = [document for document in yaml.safe_load_all(rendered) if document]
     deployment = next(document for document in documents if document["kind"] == "Deployment" and document["metadata"]["name"].endswith("-management"))
     pod = deployment["spec"]["template"]["spec"]
     assert pod["automountServiceAccountToken"] is False
     assert pod["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
+    repositories = next(document for document in documents if document["kind"] == "Secret"
+                        and document["metadata"]["name"] == "orchestrator-management-repositories")
+    assert json.loads(base64.b64decode(repositories["data"]["repositories.json"])) == {"org/repo": "repository-test-secret"}
+    assert pod["volumes"][0]["secret"]["secretName"] == repositories["metadata"]["name"]
     assert not any(document["kind"] == "Ingress" and "management" in document["metadata"]["name"] for document in documents)
     snapshot = next(document for document in documents if document["kind"] == "ConfigMap" and "runtime-config.json" in document.get("data", {}))
     runtime = json.loads(snapshot["data"]["runtime-config.json"])

@@ -101,12 +101,12 @@ No tests or render checks are claimed as run for this review.
 - Native judge-model preparation runs in the supervisor before planning and evaluation. Its default follows the P40-1 router URL; the existing `worker.judgeNativeDownload` override is pinned in runtime configuration, not injected into workers.
 - The supervisor reconstructs the candidate diff from the pinned base revision, checks it matches the worker patch, and judges that reconstructed diff. PR creation requires an explicit base-branch allowlist, reviewer list, and supervisor-only publication credential. Reviewers are requested; no merge API is called.
 - The role catalog and schema are packaged read-only in a retained, content-addressed ConfigMap. Tasks pin the hash of catalog, schema, and non-secret runtime config; secrets and secret references are excluded from the hash. Unsupported versions, catalog/tool violations, or unavailable pinned ConfigMaps fail closed.
-- The chart defaults to a single `ReadWriteOnce` SQLite volume and co-locates gateway and supervisor pods for shared local-filesystem locking. Default repository access is deny-all; operators must configure explicit repositories, PR policy, and external credential Secrets before tasks can run.
+- The chart defaults to a single `ReadWriteOnce` SQLite volume and co-locates gateway and supervisor pods for shared local-filesystem locking. Default repository access is deny-all; operators must configure explicit repositories, PR policy, and credential values before tasks can run. Helm owns the authentication Secrets.
 
 ## Remaining Deployment Checks
 
 - Confirm the selected cluster storage class permits both pods to mount the same `ReadWriteOnce` claim on one node and supports SQLite locking/durability semantics. This chart has not been installed or exercised against the cluster.
-- Provision external `orchestrator-supervisor-auth` (`supervisor-auth-token`, `pr-github-token`) and `orchestrator-coder-inference-auth` (`coder-api-key`) Secrets with least-privilege GitHub scopes; confirm the task repository token supplied by workflows is read-only.
+- Set `credentials.internal.supervisorServiceToken`, `credentials.github.pullRequestPat`, and any required model API keys in `helm/local.secrets-values.yaml`. Helm creates separate supervisor-service, GitHub-PR, and model-auth Secrets; use least-privilege GitHub scopes and confirm the task repository token supplied by workflows is read-only.
 - Configure per-repository credentials, allowed base branches, reviewers, and the existing P40 endpoints/model IDs. Empty/default PR policy intentionally prevents publication.
 - Validate actual worker Job lifecycle/status across supervisor restart, the selected GPU router compatibility with JSON response formats, reviewer policy availability, and GitHub branch/PR permissions in a non-production environment.
 

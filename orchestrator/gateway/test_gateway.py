@@ -17,6 +17,13 @@ import pytest
 import server
 import yaml
 
+from helm.test_registry import AUTH_CREDENTIALS
+
+
+@pytest.fixture
+def helm_values():
+    return {"credentials": copy.deepcopy(AUTH_CREDENTIALS)}
+
 
 @pytest.fixture
 def task_gateway(monkeypatch, tmp_path):
@@ -659,11 +666,12 @@ def test_drain_manual_retry_uses_stable_run_key(monkeypatch, tmp_path, task_id, 
     assert request.get_header("X-repository-token") == "repo-test-only"
 
 
-def test_helm_credential_references_and_rbac():
+def test_helm_credential_references_and_rbac(helm_values):
     if not shutil.which("helm"):
         pytest.skip("helm unavailable")
     root = Path(__file__).resolve().parents[2]
-    render = subprocess.run(["helm", "template", "credential-check", str(root / "helm/orchestrator")], capture_output=True, text=True, check=True)
+    render = subprocess.run(["helm", "template", "credential-check", str(root / "helm/orchestrator"), "--values", "-"],
+                            input=yaml.safe_dump(helm_values), capture_output=True, text=True, check=True)
     documents = [document for document in yaml.safe_load_all(render.stdout) if document]
     role = next(document for document in documents if document["kind"] == "Role"
                 and document["metadata"]["name"] == "orchestrator-gateway")
@@ -692,9 +700,7 @@ def test_helm_credential_references_and_rbac():
                     assert pod["automountServiceAccountToken"] is True
     ingress = next(document for document in documents if document["kind"] == "Ingress")
     assert ingress["spec"]["tls"] and ingress["metadata"]["annotations"]["traefik.ingress.kubernetes.io/router.entrypoints"] == "websecure"
-    dedicated = subprocess.run(["helm", "template", "credential-check", str(root / "helm/orchestrator"), "--set", "gateway.auth.existingSecret=",
-                                "--set", "credentials.internal.gatewayClientToken=gateway-test-only-32-character-value"], capture_output=True, text=True, check=True)
-    secrets = [document for document in yaml.safe_load_all(dedicated.stdout) if document and document["kind"] == "Secret"]
+    secrets = [document for document in documents if document["kind"] == "Secret"]
     assert next(document for document in secrets if document["metadata"]["name"] == "orchestrator-gateway-auth")["data"].keys() == {"gateway-auth-token"}
     supervisor = next(document for document in documents if document["kind"] == "Deployment"
                       and document["metadata"]["name"] == "orchestrator-supervisor")
@@ -703,12 +709,12 @@ def test_helm_credential_references_and_rbac():
     assert supervisor_env["SUPERVISOR_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == "orchestrator-supervisor-service-auth"
 
 
-def test_helm_pins_nonsecret_catalog_runtime_and_p40_routes():
+def test_helm_pins_nonsecret_catalog_runtime_and_p40_routes(helm_values):
     if not shutil.which("helm"):
         pytest.skip("helm unavailable")
     chart = Path(__file__).resolve().parents[2] / "helm/orchestrator"
-    rendered = subprocess.run(["helm", "template", "runtime-check", str(chart)],
-                              capture_output=True, text=True, check=True)
+    rendered = subprocess.run(["helm", "template", "runtime-check", str(chart), "--values", "-"],
+                              input=yaml.safe_dump(helm_values), capture_output=True, text=True, check=True)
     documents = [document for document in yaml.safe_load_all(rendered.stdout) if document]
     catalog = next(document for document in documents if document["kind"] == "ConfigMap"
                    and document["metadata"]["name"].startswith("orchestrator-agent-catalog-"))
@@ -730,7 +736,7 @@ def test_helm_pins_nonsecret_catalog_runtime_and_p40_routes():
 
 @pytest.mark.parametrize("mode,secret,profile", [("internal", "gateway-test-tls", False), ("external", "", False),
                                                ("external", None, False), ("external", "", True)])
-def test_helm_ingress_tls_termination(mode, secret, profile):
+def test_helm_ingress_tls_termination(mode, secret, profile, helm_values):
     if not shutil.which("helm"):
         pytest.skip("helm unavailable")
     chart = Path(__file__).resolve().parents[2] / "helm/orchestrator"
@@ -740,11 +746,7 @@ def test_helm_ingress_tls_termination(mode, secret, profile):
     if profile:
         values = yaml.safe_load((chart / "example.values.yaml").read_text())
         origin = values["supervisor"]["config"]["acceptor-url"]
-        values["credentials"] = {
-            "internal": {"gatewayClientToken": "gateway-test-only-32-character-value",
-                         "supervisorServiceToken": "supervisor-test-only"},
-            "github": {"pullRequestPat": "pr-test-only"},
-        }
+    values.update(helm_values)
     rendered = subprocess.run(["helm", "template", "ingress-check", str(chart), "--values", "-"],
                               input=yaml.safe_dump(values), capture_output=True, text=True, check=True)
     documents = [document for document in yaml.safe_load_all(rendered.stdout) if document]
@@ -778,21 +780,25 @@ def test_helm_ingress_tls_termination(mode, secret, profile):
                                     "gateway.ingress.tlsTermination=null", "gateway.ingress.tlsSecretName=null",
                                     "gateway.ingress.externalTls=true",
                                     "gateway.taskCredentialTtlSeconds=0", "gateway.auth.existingSecret=", "gateway.auth.token=conflicting-test-only"])
-def test_helm_rejects_unsafe_credential_configuration(setting):
+def test_helm_rejects_unsafe_credential_configuration(setting, helm_values):
     if not shutil.which("helm"):
         pytest.skip("helm unavailable")
     chart = Path(__file__).resolve().parents[2] / "helm/orchestrator"
-    rendered = subprocess.run(["helm", "template", "credential-check", str(chart), "--set", setting],
-                              capture_output=True, text=True, check=False)
+    rendered = subprocess.run(["helm", "template", "credential-check", str(chart), "--values", "-", "--set", setting],
+                              input=yaml.safe_dump(helm_values), capture_output=True, text=True, check=False)
     assert rendered.returncode != 0
+    rejected_field = "/gateway/auth" if setting.startswith("gateway.auth.") else setting.split("=", 1)[0].split(".")[-1]
+    assert rejected_field in rendered.stderr
 
 
 @pytest.mark.parametrize("ttl", [None, 3600, 1, 604800])
-def test_helm_task_job_ttl_reaches_submitted_job(monkeypatch, ttl):
+def test_helm_task_job_ttl_reaches_submitted_job(monkeypatch, ttl, helm_values):
     if not shutil.which("helm"):
         pytest.skip("helm unavailable")
     chart = Path(__file__).resolve().parents[2] / "helm/orchestrator"
-    values = {} if ttl is None else {"gateway": {"taskJobTtlSecondsAfterFinished": ttl}}
+    values = helm_values
+    if ttl is not None:
+        values["gateway"] = {"taskJobTtlSecondsAfterFinished": ttl}
     rendered = subprocess.run(["helm", "template", "ttl-check", str(chart), "--values", "-"],
                               input=yaml.safe_dump(values), capture_output=True, text=True, check=True)
     documents = [document for document in yaml.safe_load_all(rendered.stdout) if document]
@@ -815,12 +821,13 @@ def test_helm_task_job_ttl_reaches_submitted_job(monkeypatch, ttl):
 
 
 @pytest.mark.parametrize("ttl", [0, -1, 604801, 1.5, "3600", True, None])
-def test_helm_rejects_invalid_task_job_ttl(ttl):
+def test_helm_rejects_invalid_task_job_ttl(ttl, helm_values):
     if not shutil.which("helm"):
         pytest.skip("helm unavailable")
     chart = Path(__file__).resolve().parents[2] / "helm/orchestrator"
+    helm_values["gateway"] = {"taskJobTtlSecondsAfterFinished": ttl}
     rendered = subprocess.run(["helm", "template", "ttl-check", str(chart), "--values", "-"],
-                              input=yaml.safe_dump({"gateway": {"taskJobTtlSecondsAfterFinished": ttl}}),
+                              input=yaml.safe_dump(helm_values),
                               capture_output=True, text=True, check=False)
     assert rendered.returncode != 0
     assert "taskJobTtlSecondsAfterFinished" in rendered.stderr

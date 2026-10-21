@@ -82,7 +82,7 @@ spec:
             - name: CODER_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.worker.auth.existingSecret }}
+                  name: {{ include "orchestrator.workerSecretName" . }}
                   key: coder-api-key
             - name: ACCEPTOR_URL
               valueFrom:

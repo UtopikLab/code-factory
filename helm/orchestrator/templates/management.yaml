@@ -46,7 +46,7 @@ spec:
             - name: CODEFACTORY_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ default (printf "%s-gateway-auth" .Chart.Name) .Values.gateway.auth.existingSecret }}
+                  name: {{ .Chart.Name }}-gateway-auth
                   key: gateway-auth-token
             - name: MANAGEMENT_GATEWAY_URL
               value: {{ default (index .Values.supervisor.config "acceptor-url") .Values.management.gatewayUrl | quote }}
@@ -91,7 +91,7 @@ spec:
       volumes:
         - name: repositories
           secret:
-            secretName: {{ .Values.management.repositoriesSecret }}
+            secretName: {{ .Chart.Name }}-management-repositories
             defaultMode: 0440
             items:
               - key: repositories.json

@@ -111,12 +111,12 @@ spec:
             - name: SUPERVISOR_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.supervisor.auth.existingSecret }}
+                  name: {{ include "orchestrator.supervisorSecretName" . }}
                   key: supervisor-auth-token
             - name: PR_GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.supervisor.auth.pullRequestSecret }}
+                  name: {{ include "orchestrator.pullRequestSecretName" . }}
                   key: pr-github-token
             - name: WORKER_JOB_TEMPLATE
               value: {{ printf "%s-worker" .Chart.Name | quote }}

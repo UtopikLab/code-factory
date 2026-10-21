@@ -1,3 +1,12 @@
+{{- define "orchestrator.supervisorSecretName" -}}
+{{- printf "%s-supervisor-service-auth" .Chart.Name -}}
+{{- end -}}
+{{- define "orchestrator.pullRequestSecretName" -}}
+{{- printf "%s-github-pr-auth" .Chart.Name -}}
+{{- end -}}
+{{- define "orchestrator.workerSecretName" -}}
+{{- printf "%s-coder-model-auth" .Chart.Name -}}
+{{- end -}}
 {{- define "orchestrator.agentRuntimeConfigJson" -}}
 {{- $coderUrl := default (index .Values.supervisor.config "coder-url") .Values.worker.coderUrl -}}
 {{- $coderNative := eq $coderUrl "http://llama-server-args-gpu0.inference.svc.cluster.local:8000/v1" -}}
