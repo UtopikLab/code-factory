@@ -257,9 +257,9 @@ class GitHub:
         self.client = client
         self.repo = repo
         self.base = "/repos/" + quote(repo, safe="/")
-        self.headers = {"Authorization": "Bearer " + os.environ.get("TASK_REPOSITORY_TOKEN", ""),
+        self.headers = {"Authorization": "Bearer " + os.environ.get("REPO_GITHUB_PAT", ""),
                         "Accept": "application/vnd.github+json"}
-        if not os.environ.get("TASK_REPOSITORY_TOKEN"):
+        if not os.environ.get("REPO_GITHUB_PAT"):
             raise TaskFailure("repository-credential-required")
         if os.environ.get("TASK_REPOSITORY", "").lower() != repo.lower():
             raise TaskFailure("repository-credential-binding-mismatch")
@@ -596,7 +596,7 @@ async def _run_worker(
     assigned_task_id: str | None,
 ) -> dict:
     _validate_gateway_url(acceptor_url)
-    gateway_token = os.environ.get("GATEWAY_AUTH_TOKEN", "")
+    gateway_token = os.environ.get("CODEFACTORY_AUTH_TOKEN", "")
     if not gateway_token or not os.environ.get("TASK_CALLBACK_TOKEN"):
         raise ValueError("gateway-auth-and-task-callback-required")
     _reject_secret_content(json.dumps(spawn_payload))
@@ -738,7 +738,7 @@ async def _report_result(
 # --------------------------------------------------------------------------- #
 
 def _reject_secret_content(content):
-    for name in ("TASK_REPOSITORY_TOKEN", "GATEWAY_AUTH_TOKEN", "TASK_CALLBACK_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY"):
+    for name in ("REPO_GITHUB_PAT", "CODEFACTORY_AUTH_TOKEN", "TASK_CALLBACK_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY"):
         if os.environ.get(name) and os.environ[name] in content:
             raise TaskFailure("secret-in-model-context")
 

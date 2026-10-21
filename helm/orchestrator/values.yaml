@@ -74,8 +74,7 @@ gateway:
   auth:
     existingSecret: "orchestrator-gateway-auth"
     token: ""
-  trustTlsProxy: false
-  trustedTlsProxyCidrs: []
+  transportMode: edge-tls
   ingress:
     host: "orchestrator.local"
     tlsTermination: internal

@@ -28,7 +28,7 @@ def task_gateway(monkeypatch, tmp_path):
     monkeypatch.setenv("TASK_DB_PATH", str(tmp_path / "tasks.sqlite3"))
     monkeypatch.setattr(server, "TOKEN", "test-token")
     monkeypatch.setattr(server, "ALLOWED_REPOS", {"org/repo", "org/other"})
-    monkeypatch.setenv("ALLOW_LOCAL_HTTP", "true")
+    monkeypatch.setenv("GATEWAY_TRANSPORT_MODE", "local-http")
     monkeypatch.setattr(server, "_validate_repository", Mock())
     monkeypatch.setattr(server.secrets, "token_urlsafe", Mock(return_value="callback-test-only"))
     stored = {}
@@ -75,7 +75,7 @@ def test_gateway_auth_has_no_global_github_fallback():
     output = subprocess.check_output([
         sys.executable, "-c", "import server; print(bool(server.TOKEN))",
     ], cwd=os.path.dirname(server.__file__),
-        env={**os.environ, "GITHUB_TOKEN": "legacy-test-only", "GATEWAY_AUTH_TOKEN": ""}, text=True)
+        env={**os.environ, "GITHUB_TOKEN": "legacy-test-only", "CODEFACTORY_AUTH_TOKEN": ""}, text=True)
     assert output.strip() == "False"
 
 
@@ -254,24 +254,56 @@ def test_credentials_rejected_in_payload(task_gateway, payload):
     task_gateway[0].assert_not_called()
 
 
-def test_intake_requires_https_even_with_forwarded_header_untrusted(task_gateway, monkeypatch):
-    monkeypatch.delenv("ALLOW_LOCAL_HTTP")
-    assert task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1] == {"error": "https-required"}
+def test_intake_requires_explicit_transport_mode(task_gateway, monkeypatch):
+    monkeypatch.delenv("GATEWAY_TRANSPORT_MODE")
+    assert task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1] == {"error": "transport-not-allowed"}
     task_gateway[0].assert_not_called()
 
 
-def test_forwarded_https_requires_trusted_proxy_source(monkeypatch):
-    monkeypatch.delenv("ALLOW_LOCAL_HTTP", raising=False)
-    monkeypatch.setenv("TRUST_TLS_PROXY", "true")
-    monkeypatch.setenv("TRUSTED_TLS_PROXY_CIDRS", "192.0.2.5/32")
+def test_edge_tls_intake_keeps_authentication_without_proxy_headers(task_gateway, monkeypatch):
+    monkeypatch.setenv("GATEWAY_TRANSPORT_MODE", "edge-tls")
+    assert task_request("POST", "/api/v1/tasks/spawn", issue_payload(), token="invalid")[0] == 401
+    task_gateway[0].assert_not_called()
+    code, result = task_request("POST", "/api/v1/tasks/spawn", issue_payload())
+    assert code == 202 and result["status"] == "running"
+    task_gateway[0].assert_called_once()
+
+
+@pytest.mark.parametrize("mode,address", [("local-http", "127.0.0.1"), ("edge-tls", "0.0.0.0")])
+def test_transport_server_binding(monkeypatch, mode, address):
+    monkeypatch.setenv("GATEWAY_TRANSPORT_MODE", mode)
+    factory = Mock()
+    monkeypatch.setattr(server, "ThreadingHTTPServer", factory)
+    assert server._create_server() == factory.return_value
+    factory.assert_called_once_with((address, 8000), server.Handler)
+
+
+@pytest.mark.parametrize("mode", ["", "unknown"])
+def test_transport_server_rejects_unknown_mode(monkeypatch, mode):
+    monkeypatch.setenv("GATEWAY_TRANSPORT_MODE", mode)
+    factory = Mock()
+    monkeypatch.setattr(server, "ThreadingHTTPServer", factory)
+    with pytest.raises(ValueError, match="gateway-transport-mode-required"):
+        server._create_server()
+    factory.assert_not_called()
+
+
+@pytest.mark.parametrize("mode,address,allowed", [
+    ("edge-tls", "192.0.2.6", True),
+    ("local-http", "127.0.0.1", True),
+    ("local-http", "::1", True),
+    ("local-http", "192.0.2.6", False),
+    ("unknown", "127.0.0.1", False),
+    ("", "127.0.0.1", False),
+])
+def test_transport_mode_does_not_trust_forwarded_headers(monkeypatch, mode, address, allowed):
+    monkeypatch.setenv("GATEWAY_TRANSPORT_MODE", mode)
     handler = server.Handler.__new__(server.Handler)
     handler.headers = {"X-Forwarded-Proto": "https"}
-    handler.client_address = ("192.0.2.6", 1234)
-    assert not handler._https_intake()
-    handler.client_address = ("192.0.2.5", 1234)
-    assert handler._https_intake()
+    handler.client_address = (address, 1234)
+    assert handler._transport_allowed() is allowed
     handler.headers = {}
-    assert not handler._https_intake()
+    assert handler._transport_allowed() is allowed
 
 
 @pytest.mark.parametrize("status,reason", [(401, "denied"), (403, "denied"), (404, "denied"), (503, "unavailable")])
@@ -318,16 +350,29 @@ def test_task_callback_cannot_report_another_repository_task(task_gateway, monke
     assert task_request("GET", f"/api/v1/tasks/{second}")[1]["status"] == "running"
 
 
-@pytest.mark.parametrize("url,accepted", [("https://intake.test/api/v1/tasks/spawn", True), ("http://intake.test/api/v1/tasks/spawn", False),
-                                           ("https://user:pass@intake.test/api/v1/tasks/spawn", False)])
+@pytest.mark.parametrize("url,accepted", [
+    ("https://intake.test", True),
+    ("https://intake.test/", True),
+    ("https://intake.test:8443/", True),
+    ("http://intake.test", False),
+    ("https://user:pass@intake.test", False),
+    ("https://intake.test/api/v1/tasks/spawn", False),
+    ("https://intake.test?key=value", False),
+    ("https://intake.test#fragment", False),
+    ("https:///", False),
+    ("https://intake.test\n", False),
+    ("https://intake.test\\other", False),
+])
 def test_drain_workflow_credential_headers_and_https(monkeypatch, tmp_path, capsys, url, accepted):
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load((root / ".github/workflows/drain.yaml").read_text())
     step = next(step for step in workflow["jobs"]["send-to-orchestrator"]["steps"] if step.get("shell") == "python")
-    assert step["env"]["REPOSITORY_TOKEN"] == "${{ secrets.TASK_REPOSITORY_TOKEN }}"
+    assert step["env"]["CODEFACTORY_URL"] == "${{ secrets.CODEFACTORY_URL }}"
+    assert step["env"]["CODEFACTORY_AUTH_TOKEN"] == "${{ secrets.CODEFACTORY_AUTH_TOKEN }}"
+    assert step["env"]["REPO_GITHUB_PAT"] == "${{ secrets.REPO_GITHUB_PAT }}"
     event = tmp_path / "event.json"
     event.write_text(json.dumps({"repository": {"full_name": "org/repo"}, "issue": {"number": 2, "title": "untrusted $()"}}))
-    for key, value in {"ORCHESTRATOR_URL": url, "ORCHESTRATOR_TOKEN": "gateway-test-only", "REPOSITORY_TOKEN": "repo-test-only",
+    for key, value in {"CODEFACTORY_URL": url, "CODEFACTORY_AUTH_TOKEN": "gateway-test-only", "REPO_GITHUB_PAT": "repo-test-only",
                        "GITHUB_TOKEN": "legacy-test-only", "REGISTRY_TOKEN": "registry-test-only", "GITHUB_EVENT_PATH": str(event),
                        "GITHUB_REPOSITORY": "org/repo"}.items():
         monkeypatch.setenv(key, value)
@@ -349,6 +394,7 @@ def test_drain_workflow_credential_headers_and_https(monkeypatch, tmp_path, caps
         return
     namespace = runpy.run_path(str(script_file))
     request = opener.open.call_args.args[0]
+    assert request.full_url == url.rstrip("/") + "/api/v1/tasks/spawn"
     assert request.get_header("Authorization") == "token gateway-test-only"
     assert request.get_header("X-repository-token") == "repo-test-only"
     assert json.loads(request.data) == {"repo": "org/repo", "issue_number": 2}
@@ -356,6 +402,38 @@ def test_drain_workflow_credential_headers_and_https(monkeypatch, tmp_path, caps
         namespace["NoRedirect"]().redirect_request(None, None, 307, "", {}, "https://different.test")
     output = capsys.readouterr().out
     assert all(value not in output + request.data.decode() for value in ("gateway-test-only", "repo-test-only", "registry-test-only", "legacy-test-only"))
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 409, 503])
+def test_drain_workflow_http_errors_report_only_status(monkeypatch, tmp_path, capsys, status):
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/drain.yaml").read_text())
+    step = next(step for step in workflow["jobs"]["send-to-orchestrator"]["steps"] if step.get("shell") == "python")
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"repository": {"full_name": "org/repo"}, "issue": {"number": 2}}))
+    for key, value in {
+        "CODEFACTORY_URL": "https://intake.test",
+        "CODEFACTORY_AUTH_TOKEN": "gateway-test-only",
+        "REPO_GITHUB_PAT": "repo-test-only",
+        "GITHUB_EVENT_PATH": str(event),
+        "GITHUB_REPOSITORY": "org/repo",
+    }.items():
+        monkeypatch.setenv(key, value)
+    body = io.BytesIO(b'{"error":"gateway-test-only repo-test-only"}')
+    error = server.urllib.error.HTTPError(
+        "https://intake.test", status, "gateway-test-only", {"X-Secret": "repo-test-only"}, body,
+    )
+    opener = Mock()
+    opener.open.side_effect = error
+    monkeypatch.setattr(server.urllib.request, "build_opener", Mock(return_value=opener))
+    script_file = tmp_path / "intake.py"
+    script_file.write_text(step["run"])
+    with pytest.raises(SystemExit) as raised:
+        runpy.run_path(str(script_file))
+    assert str(raised.value) == f"Task intake failed: HTTP {status}"
+    output = capsys.readouterr()
+    assert output.out == output.err == ""
+    assert body.tell() == 0
 
 
 def test_helm_credential_references_and_rbac():
@@ -379,13 +457,13 @@ def test_helm_credential_references_and_rbac():
         assert pod["imagePullSecrets"] == [{"name": "ghcr-secret"}]
         for container in pod["containers"]:
             env = {entry["name"]: entry for entry in container.get("env", [])}
-            assert not {"GITHUB_TOKEN", "TASK_REPOSITORY_TOKEN"} & env.keys()
+            assert not {"GITHUB_TOKEN", "REPO_GITHUB_PAT"} & env.keys()
             if container["name"] in ("gateway", "coder"):
-                assert env["GATEWAY_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+                assert env["CODEFACTORY_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"] == {
                     "name": "orchestrator-gateway-auth", "key": "gateway-auth-token",
                 }
             else:
-                assert "GATEWAY_AUTH_TOKEN" not in env
+                assert "CODEFACTORY_AUTH_TOKEN" not in env
                 assert pod["automountServiceAccountToken"] is False
     ingress = next(document for document in documents if document["kind"] == "Ingress")
     assert ingress["spec"]["tls"] and ingress["metadata"]["annotations"]["traefik.ingress.kubernetes.io/router.entrypoints"] == "websecure"
@@ -430,11 +508,12 @@ def test_helm_ingress_tls_termination(mode, secret, profile):
     gateway = next(document for document in documents if document["kind"] == "Deployment"
                    and document["metadata"]["name"] == "orchestrator-gateway")
     env = {entry["name"]: entry.get("value") for entry in gateway["spec"]["template"]["spec"]["containers"][0]["env"]}
-    assert env["TRUST_TLS_PROXY"] == "false"
-    assert env["TRUSTED_TLS_PROXY_CIDRS"] == ""
+    assert env["GATEWAY_TRANSPORT_MODE"] == "edge-tls"
+    assert not {"TRUST_TLS_PROXY", "TRUSTED_TLS_PROXY_CIDRS"} & env.keys()
 
 
-@pytest.mark.parametrize("setting", ["supervisor.config.acceptor-url=http://gateway", "gateway.trustTlsProxy=true",
+@pytest.mark.parametrize("setting", ["supervisor.config.acceptor-url=http://gateway", "gateway.transportMode=invalid",
+                                    "gateway.transportMode=local-http",
                                     "gateway.ingress.tlsTermination=invalid", "gateway.ingress.tlsSecretName=",
                                     "gateway.ingress.tlsTermination=null", "gateway.ingress.tlsSecretName=null",
                                     "gateway.ingress.externalTls=true",
@@ -827,7 +906,7 @@ def test_clone_job_passes_assigned_payload_to_one_worker(monkeypatch, ttl, expec
     assert (spec["parallelism"], spec["completions"], spec["backoffLimit"]) == (1, 1, 0)
     env = spec["template"]["spec"]["containers"][0]["env"]
     assert not any(entry["name"] == "GITHUB_TOKEN" for entry in env)
-    assert next(entry for entry in env if entry["name"] == "TASK_REPOSITORY_TOKEN")["valueFrom"]["secretKeyRef"] == {
+    assert next(entry for entry in env if entry["name"] == "REPO_GITHUB_PAT")["valueFrom"]["secretKeyRef"] == {
         "name": "task-credential-2", "key": "repository-token",
     }
     values = {entry["name"]: entry.get("value") for entry in env}

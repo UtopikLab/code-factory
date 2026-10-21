@@ -70,8 +70,8 @@ Use a comma-separated repo allowlist only if you want an additional restriction.
 The corresponding worker environment variables are `ALLOWED_REPOS`, `TASK_REPO_POLICIES`
 (JSON map), `CODER_URL`, `CODER_MODEL`, `JUDGE_URL`, `JUDGE_MODEL`, and
 `JUDGE_ACCEPT_THRESHOLD` (0.8 through 1). Coder URL defaults in Helm to the judge URL;
-the coder model uses the existing `worker-model` setting. `TASK_REPOSITORY_TOKEN`
-comes only from the assigned task Secret; `GATEWAY_AUTH_TOKEN` uses the dedicated
+the coder model uses the existing `worker-model` setting. `REPO_GITHUB_PAT`
+comes only from the assigned task Secret; `CODEFACTORY_AUTH_TOKEN` uses the dedicated
 gateway-auth Secret. `OPENAI_API_KEY` remains separate. Never include credentials in
 URLs, policy, issue text, or repository context. Configure `gateway.auth` and
 `supervisor.config.openai-api-key` separately.
@@ -201,21 +201,23 @@ Go to: **Repository Settings → Secrets and variables → Actions**
 
 Add three independent settings/secrets:
 
-### Secret 1: `ORCHESTRATOR_URL`
+### Secret 1: `CODEFACTORY_URL`
 ```
-https://orchestrator.local/api/v1/tasks/spawn
+https://gateway.example.com
 ```
 
-Use a reachable HTTPS URL with a trusted certificate, not the plain internal Service.
+Use a reachable HTTPS base URL with a trusted certificate, not the plain internal
+Service. An optional trailing slash is accepted. The workflow appends
+`/api/v1/tasks/spawn`; do not include that path in this setting.
 
-### Secret 2: `ORCHESTRATOR_TOKEN`
+### Secret 2: `CODEFACTORY_AUTH_TOKEN`
 ```
 <the-configured-gateway-authentication-token>
 ```
 
 This is a random dedicated gateway-authentication secret, not a GitHub PAT.
 
-### Secret 3: `TASK_REPOSITORY_TOKEN`
+### Secret 3: `REPO_GITHUB_PAT`
 
 Use a dedicated fine-grained PAT for this source repository with the permissions
 described above. The workflow requires it explicitly; no global or built-in
@@ -250,12 +252,12 @@ operator explicitly reconciles it; they do not automatically start a fresh attem
 ## Troubleshooting
 
 **Workflow fails with 401 Unauthorized:**
-- Check `ORCHESTRATOR_TOKEN` matches the dedicated gateway-auth Secret
+- Check `CODEFACTORY_AUTH_TOKEN` matches the dedicated gateway-auth Secret
 - Do not substitute a repository or registry credential
 
 **Workflow fails with 403 Forbidden:**
 - Repo name doesn't match `ALLOWED_REPOS` setting on orchestrator
-- Check repository identity, access preflight, credential expiry/revocation, and trusted HTTPS proxy configuration
+- Check repository identity, access preflight, credential expiry/revocation, and explicit gateway transport configuration
 
 **Workflow fails with connection refused:**
 - Orchestrator service is not running

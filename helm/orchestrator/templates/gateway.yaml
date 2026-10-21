@@ -47,15 +47,13 @@ spec:
             - name: task-state
               mountPath: /data/tasks
           env:
-            - name: GATEWAY_AUTH_TOKEN
+            - name: CODEFACTORY_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ default (printf "%s-gateway-auth" .Chart.Name) .Values.gateway.auth.existingSecret }}
                   key: gateway-auth-token
-            - name: TRUST_TLS_PROXY
-              value: {{ .Values.gateway.trustTlsProxy | quote }}
-            - name: TRUSTED_TLS_PROXY_CIDRS
-              value: {{ join "," .Values.gateway.trustedTlsProxyCidrs | quote }}
+            - name: GATEWAY_TRANSPORT_MODE
+              value: {{ .Values.gateway.transportMode | quote }}
             - name: TASK_CREDENTIAL_TTL_SECONDS
               value: {{ .Values.gateway.taskCredentialTtlSeconds | quote }}
             - name: TASK_JOB_TTL_SECONDS_AFTER_FINISHED

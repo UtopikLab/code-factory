@@ -131,31 +131,8 @@
         "gateway": {
             "type": "object",
             "required": [
-                "taskJobTtlSecondsAfterFinished"
-            ],
-            "allOf": [
-                {
-                    "if": {
-                        "properties": {
-                            "trustTlsProxy": {
-                                "const": true
-                            }
-                        },
-                        "required": [
-                            "trustTlsProxy"
-                        ]
-                    },
-                    "then": {
-                        "properties": {
-                            "trustedTlsProxyCidrs": {
-                                "minItems": 1
-                            }
-                        },
-                        "required": [
-                            "trustedTlsProxyCidrs"
-                        ]
-                    }
-                }
+                "taskJobTtlSecondsAfterFinished",
+                "transportMode"
             ],
             "properties": {
                 "auth": {
@@ -199,15 +176,12 @@
                         }
                     ]
                 },
-                "trustTlsProxy": {
-                    "type": "boolean"
-                },
-                "trustedTlsProxyCidrs": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "minLength": 1
-                    }
+                "transportMode": {
+                    "type": "string",
+                    "enum": [
+                        "edge-tls"
+                    ],
+                    "description": "TLS is enforced by deployment infrastructure; restrict access to the HTTP backend."
                 },
                 "ingress": {
                     "type": "object",

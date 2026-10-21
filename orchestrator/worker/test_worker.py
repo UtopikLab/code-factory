@@ -29,7 +29,7 @@ from worker import (
 
 @pytest.fixture(autouse=True)
 def gateway_auth(monkeypatch):
-    monkeypatch.setenv("GATEWAY_AUTH_TOKEN", "gateway-test-secret")
+    monkeypatch.setenv("CODEFACTORY_AUTH_TOKEN", "gateway-test-secret")
     monkeypatch.setenv("TASK_CALLBACK_TOKEN", "callback-test-secret")
 
 
@@ -264,6 +264,7 @@ def test_gateway_job_to_assigned_worker(monkeypatch, tmp_path, edit_key):
     monkeypatch.setattr(server, "ALLOWED_REPOS", {"org/repo"})
     monkeypatch.setattr(server, "TOKEN", "test-token")
     monkeypatch.setenv("ALLOW_LOCAL_HTTP", "true")
+    monkeypatch.setenv("GATEWAY_TRANSPORT_MODE", "local-http")
     monkeypatch.setattr(server, "_validate_repository", Mock())
     monkeypatch.setenv("TASK_DB_PATH", str(tmp_path / "tasks.sqlite3"))
     monkeypatch.setattr(server, "WORKER_JOB_TEMPLATE", "orchestrator-worker")
@@ -471,7 +472,7 @@ def test_judge_without_key_uses_heuristic(monkeypatch):
 
 def test_repository_client_has_no_global_token_fallback(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "legacy-test-only")
-    monkeypatch.delenv("TASK_REPOSITORY_TOKEN", raising=False)
+    monkeypatch.delenv("REPO_GITHUB_PAT", raising=False)
     with pytest.raises(worker.TaskFailure, match="repository-credential-required"):
         worker.GitHub(None, "org/repo")
 
@@ -481,7 +482,7 @@ def test_repository_client_has_no_global_token_fallback(monkeypatch):
                                                  (307, False, "github-api-failed"),
                                                  (200, True, "repository-credential-expired")])
 def test_github_assigned_credential_failure_and_redirects(monkeypatch, status, expired, reason):
-    monkeypatch.setenv("TASK_REPOSITORY_TOKEN", "repo-test-only")
+    monkeypatch.setenv("REPO_GITHUB_PAT", "repo-test-only")
     monkeypatch.setenv("TASK_REPOSITORY", "org/repo")
     monkeypatch.setenv("TASK_CREDENTIAL_EXPIRES_AT", "1" if expired else "9999999999")
     requests = []
@@ -499,7 +500,7 @@ def test_github_assigned_credential_failure_and_redirects(monkeypatch, status, e
 
 
 def test_github_credential_rejects_cross_repo_assignment(monkeypatch):
-    monkeypatch.setenv("TASK_REPOSITORY_TOKEN", "repo-test-only")
+    monkeypatch.setenv("REPO_GITHUB_PAT", "repo-test-only")
     monkeypatch.setenv("TASK_REPOSITORY", "org/other")
     with pytest.raises(worker.TaskFailure, match="repository-credential-binding-mismatch"):
         worker.GitHub(None, "org/repo")
@@ -511,7 +512,7 @@ def test_gateway_url_rejects_unsafe_origins(url):
         worker._validate_gateway_url(url)
 
 
-@pytest.mark.parametrize("name", ["TASK_REPOSITORY_TOKEN", "GATEWAY_AUTH_TOKEN", "TASK_CALLBACK_TOKEN", "OPENAI_API_KEY"])
+@pytest.mark.parametrize("name", ["REPO_GITHUB_PAT", "CODEFACTORY_AUTH_TOKEN", "TASK_CALLBACK_TOKEN", "OPENAI_API_KEY"])
 def test_model_input_rejects_all_assigned_secrets(monkeypatch, name):
     monkeypatch.setenv(name, "secret-test-only")
     with pytest.raises(worker.TaskFailure, match="secret-in-model-context"):
@@ -537,10 +538,11 @@ def test_report_does_not_forward_credentials_on_redirect(monkeypatch):
 
 @pytest.fixture
 def issue_pipeline(monkeypatch, tmp_path):
+    monkeypatch.setenv("GATEWAY_TRANSPORT_MODE", "edge-tls")
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "gateway"))
     import server
 
-    monkeypatch.setenv("TASK_REPOSITORY_TOKEN", "github-test-secret")
+    monkeypatch.setenv("REPO_GITHUB_PAT", "github-test-secret")
     monkeypatch.setenv("TASK_REPOSITORY", "org/repo")
     monkeypatch.setenv("TASK_CREDENTIAL_EXPIRES_AT", "9999999999")
     monkeypatch.setenv("ALLOW_LOCAL_HTTP", "true")

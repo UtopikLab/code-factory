@@ -11,8 +11,8 @@ for migration. The local private file is renamed without changing its contents.
 | Purpose | Source | Consumers |
 |---|---|---|
 | GHCR image pulls | Private Helm YAML or existing Kubernetes `imagePullSecrets` | Kubelet only; GHCR `read:packages` |
-| Gateway authentication | Dedicated Secret key `gateway-auth-token` | Gateway and assigned workers; source workflow secret `ORCHESTRATOR_TOKEN` |
-| Repository operations | Originating repository's `TASK_REPOSITORY_TOKEN` Actions secret | A single task's immutable Kubernetes Secret; assigned worker and terminal lifecycle sync |
+| Gateway authentication | Dedicated Secret key `gateway-auth-token` | Gateway and assigned workers; source workflow secret `CODEFACTORY_AUTH_TOKEN` |
+| Repository operations | Originating repository's `REPO_GITHUB_PAT` Actions secret | A single task's immutable Kubernetes Secret; assigned worker and terminal lifecycle sync |
 
 Use an independently generated gateway secret, not a GitHub or registry token.
 Existing image pins are untouched. No Azure Key Vault
@@ -47,7 +47,7 @@ supervisor:
 ```
 
 Replace every placeholder before deployment. The gateway token must be independently
-generated, at least 32 characters, and also configured as `ORCHESTRATOR_TOKEN` in
+generated, at least 32 characters, and also configured as `CODEFACTORY_AUTH_TOKEN` in
 the source repositories. It is not the registry or repository token. Alternatively,
 keep `gateway.auth.existingSecret: orchestrator-gateway-auth` and `token: ""` to
 use a separately provisioned Secret with key `gateway-auth-token`.
@@ -121,19 +121,33 @@ Before a separately authorized rollout:
    deliberate upstream rewrite. Independently set `supervisor.config.acceptor-url`
    to the public HTTPS origin with a trusted certificate. Workers must resolve
    and reach that origin; plain internal Service URLs are not accepted.
-3. Behind that TLS terminator, explicitly enable `gateway.trustTlsProxy` and set
-   `gateway.trustedTlsProxyCidrs` to the **actual immediate proxy source addresses**.
-   Restrict gateway port 8000 to that proxy using cluster network policy/firewalls;
-   ensure the proxy overwrites forwarded headers. Do not trust broad pod/client
-   ranges or externally supplied forwarded headers. Defaults reject intake until
-   this is configured. Only `ALLOW_LOCAL_HTTP=true` plus a loopback client/origin
-   permits HTTP for local tests; the chart does not enable this opt-in.
-4. Configure each source repository's three Actions secrets: `ORCHESTRATOR_URL`
-   (HTTPS URL ending `/api/v1/tasks/spawn`), `ORCHESTRATOR_TOKEN` (gateway auth),
-   and `TASK_REPOSITORY_TOKEN` (that repository's dedicated fine-grained PAT).
+3. Set `gateway.transportMode: edge-tls` (the chart default). TLS is enforced by
+   deployment infrastructure, not inferred by the application from proxy IPs or
+   forwarded headers. Restrict gateway port 8000 and direct Service/NodePort paths
+   using enforced NetworkPolicies/firewalls so credentials cannot bypass the TLS
+   edge. Chart selection alone does not install or verify that isolation. Gateway
+   authentication, per-task credentials and callback validation remain mandatory.
+4. Configure each source repository's three Actions secrets: `CODEFACTORY_URL`
+   (HTTPS base URL, without an endpoint path), `CODEFACTORY_AUTH_TOKEN` (gateway auth),
+   and `REPO_GITHUB_PAT` (that repository's dedicated fine-grained PAT).
    Use the canonical [drain workflow](../../.github/workflows/drain.yaml).
 
 ### External Reverse Proxy TLS Route
+
+The application supports two explicit `GATEWAY_TRANSPORT_MODE` values:
+
+- `edge-tls`: the gateway serves internal HTTP; an ingress, load balancer or external
+   reverse proxy enforces HTTPS and isolates the backend. No particular vendor,
+   proxy IP or `X-Forwarded-Proto` header is required or trusted by the application.
+- `local-http`: local development only; the server binds `127.0.0.1:8000` and
+   accepts intake only from loopback. The Kubernetes chart does not permit this mode.
+
+Unset or unknown modes fail startup. Direct gateway TLS termination is not
+implemented; deployments without an external reverse proxy can terminate TLS
+at their ingress instead. `gateway.ingress.tlsTermination: internal` describes
+TLS at the ingress, not at the Python server. Worker and drain clients still
+require verified HTTPS. Worker loopback tests use their separate
+`ALLOW_LOCAL_HTTP=true` opt-in; it does not configure gateway transport.
 
 The optional external TLS route is: external TLS reverse proxy -> HTTP ingress
 -> gateway. The reverse proxy is equipment outside this project's scope; the
@@ -145,6 +159,7 @@ For example, with a public HTTPS origin and an internal Host rewrite:
 
 ```yaml
 gateway:
+   transportMode: edge-tls
     ingress:
          tlsTermination: external
          host: orchestrator.local
@@ -191,41 +206,37 @@ that staged change before committing. Ignoring or untracking does not remove old
 values from commit history. Do not force-add local overrides.
 
 These are routing values, not a complete secure deployment configuration. They
-do not enable proxy trust. Keep Traefik's `web` entrypoint free of a global
+do not restrict backend network access. Keep Traefik's `web` entrypoint free of a global
 redirect to `websecure` for this route; credential-bearing clients reject
 redirects. Do not change the Ingress host to the public hostname while the proxy
-rewrites Host. Configure source workflows' `ORCHESTRATOR_URL` as
-the public HTTPS origin followed by `/api/v1/tasks/spawn`, for example
-`https://gateway.example.com/api/v1/tasks/spawn`.
+rewrites Host. Configure source workflows' `CODEFACTORY_URL` as
+the public HTTPS origin, for example `https://gateway.example.com`.
+An optional trailing slash is accepted; the workflow appends `/api/v1/tasks/spawn`.
 
 Before deploying external mode, verify all of the following:
 
-- Obtain the external proxy frontend VIP/IP for DNS and certificate checks, and
-   the actual proxy backend source IP as observed by Traefik. These can differ;
-   neither should be inferred from routing configuration. DNS must resolve the public
+- Obtain the external proxy frontend VIP/IP for DNS and certificate checks.
+   DNS must resolve the public
    name to the frontend from workers and submitters. Verify the frontend serves
    a certificate valid for the configured public hostname, including its chain in
    those clients' trust stores. Do not bypass verification or invent a certificate.
-- On the external proxy frontend, remove incoming `X-Forwarded-Proto` before
-   setting `X-Forwarded-Proto: https` only for verified TLS requests. Plain HTTP must
-   not reach this credential-bearing backend with a trusted HTTPS assertion.
-   The Host rewrite is separate and does not establish this policy.
-- Configure Traefik `entryPoints.web.forwardedHeaders.trustedIPs` with only the
-   verified external proxy source addresses; never enable forwarded-header insecure mode.
-   Confirm untrusted direct traffic cannot supply an accepted HTTPS assertion.
-- Establish the actual immediate Traefik peer addresses seen by the gateway
-   before setting `gateway.trustTlsProxy: true` and
-   `gateway.trustedTlsProxyCidrs`. The gateway checks its TCP peer, not the public
-   client or external proxy IP. Restrict gateway ingress to the verified proxy identity
-   using an enforced CNI/network boundary; do not infer a selector or trust a broad
-   pod CIDR from routing configuration. Validate spoof rejection and the deployed image's
-   proxy-check behavior before credential-bearing use.
+- Ensure the edge accepts credential-bearing requests only over HTTPS. HTTP
+   entrypoints must not forward task submissions to the backend. The Host rewrite
+   is a routing choice, not evidence of secure transport.
+- Restrict edge-to-ingress HTTP access to the edge and restrict gateway access to
+   the ingress using enforced network policy/firewall rules. Account for metrics
+   scraping and health probes, which may need separate paths. Verify both cluster
+   and LAN bypass attempts are denied before credential-bearing use. The gateway
+   does not itself detect or prevent a misconfigured network boundary in edge mode.
+- If other infrastructure components use forwarded headers, configure their trust
+   separately. Forwarded headers do not authorize gateway intake or establish TLS
+   inside the application.
 
 On 2026-10-21, a credential-free GET to `http://192.168.1.51/api/v1` with
 `Host: orchestrator.local` returned HTTP 404 while the live Ingress used only
 `websecure`. This supports the entrypoint mismatch; it is not authentication or
 end-to-end TLS acceptance evidence. The local chart change does not itself
-reconfigure the external reverse proxy, DNS, Traefik, gateway trust, or a running workload.
+reconfigure the external reverse proxy, DNS, ingress, network isolation, or a running workload.
 
 After correcting the public hostname on 2026-10-21, the local resolver returned
 `70.53.188.185` via `wan1.utopiklab.com`. OpenSSL verified the certificate chain

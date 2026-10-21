@@ -13,9 +13,9 @@ requests. Configure these Actions secrets independently:
 
 | Secret | Purpose |
 |---|---|
-| `ORCHESTRATOR_URL` | Trusted HTTPS task intake URL ending `/api/v1/tasks/spawn` |
-| `ORCHESTRATOR_TOKEN` | Dedicated gateway-authentication secret, not a GitHub PAT |
-| `TASK_REPOSITORY_TOKEN` | Fine-grained PAT scoped to this source repository |
+| `CODEFACTORY_URL` | Trusted HTTPS base URL, for example `https://gateway.example.com` |
+| `CODEFACTORY_AUTH_TOKEN` | Dedicated gateway-authentication secret, not a GitHub PAT |
+| `REPO_GITHUB_PAT` | Fine-grained PAT scoped to this source repository |
 
 The URL and gateway-auth secret may be shared among trusted callers. The repository
 credential must not be shared across source repositories. It needs Contents, Pull

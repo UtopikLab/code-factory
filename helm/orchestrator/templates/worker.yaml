@@ -64,7 +64,7 @@ spec:
             - name: loop-state
               mountPath: /data/loop-state
           env:
-            - name: GATEWAY_AUTH_TOKEN
+            - name: CODEFACTORY_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ default (printf "%s-gateway-auth" .Chart.Name) .Values.gateway.auth.existingSecret }}

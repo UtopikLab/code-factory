@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
 
-TOKEN = os.environ.get("GATEWAY_AUTH_TOKEN", "")
+TOKEN = os.environ.get("CODEFACTORY_AUTH_TOKEN", "")
 
 logger = logging.getLogger("gateway")
 # StreamHandler with flushLevel=DEBUG forces every record to flush immediately.
@@ -442,13 +442,13 @@ def _clone_job_from_template(template_job, namespace, job_name, task_id, payload
         coder = next(container for container in pod_spec.get("containers", []) if container["name"] == "coder")
         coder["env"] = [
             entry for entry in coder.get("env", [])
-            if entry["name"] not in ("ASSIGNED_TASK_ID", "ASSIGNED_TASK_PAYLOAD", "GITHUB_TOKEN", "TASK_REPOSITORY_TOKEN", "TASK_CALLBACK_TOKEN", "TASK_REPOSITORY", "TASK_CREDENTIAL_EXPIRES_AT")
+            if entry["name"] not in ("ASSIGNED_TASK_ID", "ASSIGNED_TASK_PAYLOAD", "GITHUB_TOKEN", "REPO_GITHUB_PAT", "TASK_CALLBACK_TOKEN", "TASK_REPOSITORY", "TASK_CREDENTIAL_EXPIRES_AT")
         ] + [
             {"name": "ASSIGNED_TASK_ID", "value": assigned_id},
             {"name": "ASSIGNED_TASK_PAYLOAD", "value": json.dumps(payload)},
             {"name": "TASK_REPOSITORY", "value": _identity(payload)[0]},
                         *[{"name": name, "valueFrom": {"secretKeyRef": {"name": "task-credential-" + assigned_id, "key": key}}}
-                            for name, key in (("TASK_REPOSITORY_TOKEN", "repository-token"), ("TASK_CALLBACK_TOKEN", "callback-token"), ("TASK_CREDENTIAL_EXPIRES_AT", "expires-at"))],
+                            for name, key in (("REPO_GITHUB_PAT", "repository-token"), ("TASK_CALLBACK_TOKEN", "callback-token"), ("TASK_CREDENTIAL_EXPIRES_AT", "expires-at"))],
         ]
         pod_template["spec"] = pod_spec
 
@@ -518,13 +518,11 @@ SCRAPE = Gauge(
 )
 
 class Handler(BaseHTTPRequestHandler):
-    def _https_intake(self):
-        address = ipaddress.ip_address(self.client_address[0])
-        if os.environ.get("ALLOW_LOCAL_HTTP") == "true" and address.is_loopback:
+    def _transport_allowed(self):
+        mode = os.environ.get("GATEWAY_TRANSPORT_MODE", "")
+        if mode == "edge-tls":
             return True
-        trusted = os.environ.get("TRUST_TLS_PROXY") == "true" and self.headers.get("X-Forwarded-Proto") == "https"
-        ranges = os.environ.get("TRUSTED_TLS_PROXY_CIDRS", "").split(",")
-        return trusted and any(address in ipaddress.ip_network(value.strip()) for value in ranges if value.strip())
+        return mode == "local-http" and ipaddress.ip_address(self.client_address[0]).is_loopback
 
     def _metric_path(self):
         path = urlsplit(self.path).path
@@ -664,8 +662,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("issue-mismatch")
         if not _repo_allowed(repo):
             raise PermissionError("repo-not-allowed")
-        if not self._https_intake():
-            raise CredentialError("https-required")
+        if not self._transport_allowed():
+            raise CredentialError("transport-not-allowed")
         _validate_repository(repo, issue, token)
         task_id = "issue-" + hashlib.sha256(f"{repo.lower()}#{issue}".encode()).hexdigest()[:32] if issue else uuid.uuid4().hex
         assigned = copy.deepcopy(payload)
@@ -777,8 +775,16 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         logger.info("%s request", self.command)
 
+def _create_server():
+    mode = os.environ.get("GATEWAY_TRANSPORT_MODE", "")
+    if mode not in ("edge-tls", "local-http"):
+        raise ValueError("gateway-transport-mode-required")
+    address = "127.0.0.1" if mode == "local-http" else "0.0.0.0"
+    return ThreadingHTTPServer((address, 8000), Handler)
+
+
 if __name__ == "__main__":
-    logger.info("gateway starting on 0.0.0.0:8000")
+    server = _create_server()
+    logger.info("gateway starting in %s mode", os.environ["GATEWAY_TRANSPORT_MODE"])
     logger.info("ALLOWED_REPOS=%r", ALLOWED_REPOS)
-    server = ThreadingHTTPServer(("0.0.0.0", 8000), Handler)
     server.serve_forever()

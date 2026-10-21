@@ -32,24 +32,27 @@ jobs:
       - name: POST task to orchestrator
         if: steps.issue-state.outputs.skip != 'true'
         env:
-          ORCHESTRATOR_URL: ${{ secrets.ORCHESTRATOR_URL }}
-          ORCHESTRATOR_TOKEN: ${{ secrets.ORCHESTRATOR_TOKEN }}
-          REPOSITORY_TOKEN: ${{ secrets.TASK_REPOSITORY_TOKEN }}
+          CODEFACTORY_URL: ${{ secrets.CODEFACTORY_URL }}
+          CODEFACTORY_AUTH_TOKEN: ${{ secrets.CODEFACTORY_AUTH_TOKEN }}
+          REPO_GITHUB_PAT: ${{ secrets.REPO_GITHUB_PAT }}
         shell: python
         run: |
           import json
           import os
           import re
+          import urllib.error
           import urllib.request
           from urllib.parse import urlsplit
 
-          url = os.environ["ORCHESTRATOR_URL"]
-          gateway_token = os.environ["ORCHESTRATOR_TOKEN"]
-          repository_token = os.environ["REPOSITORY_TOKEN"]
+          url = os.environ["CODEFACTORY_URL"]
+          gateway_token = os.environ["CODEFACTORY_AUTH_TOKEN"]
+          repository_token = os.environ["REPO_GITHUB_PAT"]
           parsed = urlsplit(url)
           if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
-                  or parsed.query or parsed.fragment or parsed.path != "/api/v1/tasks/spawn"):
-              raise SystemExit("ORCHESTRATOR_URL must be an HTTPS task intake URL")
+                  or parsed.query or parsed.fragment or parsed.path not in ("", "/")
+                  or "\\" in url or any(ord(character) <= 32 for character in url)):
+              raise SystemExit("CODEFACTORY_URL must be an HTTPS base URL without a path, query or fragment")
+          url = parsed._replace(path="/api/v1/tasks/spawn").geturl()
           if not gateway_token or not repository_token or gateway_token == repository_token:
               raise SystemExit("Distinct gateway and source-repository secrets are required")
           with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as event_file:
@@ -77,6 +80,8 @@ jobs:
               task_id = result.get("task_id", "")
               if not re.fullmatch(r"issue-[a-f0-9]{32}", task_id) or result.get("status") not in ("running", "completed"):
                   raise ValueError("Invalid task acknowledgement")
+          except urllib.error.HTTPError as error:
+              raise SystemExit("Task intake failed: HTTP " + str(error.code)) from None
           except (OSError, ValueError, TypeError, AttributeError):
               raise SystemExit("Task intake failed; check transport, access and gateway task state") from None
           print("Task accepted: " + task_id)
