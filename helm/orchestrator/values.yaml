@@ -16,7 +16,7 @@ registry:
 # Supervisor (code-factory-supervisor) Deployment — the resident LangGraph loop.
 # Shared values for both the supervisor and task-acceptor resources.
 supervisor:
-  image: "ghcr.io/utopiklab/code-factory-supervisor:bfb56cbc23ed5901dd4a5936473a66a1a82912f4"
+  image: "ghcr.io/utopiklab/code-factory-supervisor:e863bedf3321541f1997f6591500d0dc784d1c26"
   imagePullPolicy: Always
   replicas: 1
   labels:
@@ -51,7 +51,7 @@ supervisor:
 # (the worker Job image + resource config).
 worker:
   name: worker
-  image: "ghcr.io/utopiklab/code-factory-worker:bfb56cbc23ed5901dd4a5936473a66a1a82912f4"
+  image: "ghcr.io/utopiklab/code-factory-worker:e863bedf3321541f1997f6591500d0dc784d1c26"
   imagePullPolicy: Always
   labels:
     app: orchestrator
@@ -80,7 +80,7 @@ gateway:
     host: "orchestrator.local"
     tlsSecretName: "orchestrator-gateway-tls"
   taskCredentialTtlSeconds: 86400
-  image: "ghcr.io/utopiklab/code-factory-gateway:bfb56cbc23ed5901dd4a5936473a66a1a82912f4"
+  image: "ghcr.io/utopiklab/code-factory-gateway:e863bedf3321541f1997f6591500d0dc784d1c26"
   imagePullPolicy: Always
   replicas: 1
   persistence:

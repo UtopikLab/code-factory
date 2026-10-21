@@ -11,9 +11,17 @@ env:
   SUPERVISOR_IMAGE_NAME: utopiklab/code-factory-supervisor
   WORKER_IMAGE_NAME: utopiklab/code-factory-worker
   GATEWAY_IMAGE_NAME: utopiklab/code-factory-gateway
-  IMAGE_TAG: ${{ github.sha }}
 
 jobs:
+  set-image-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Set image tag
+        id: tag
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -58,7 +66,7 @@ jobs:
         run: pytest orchestrator/ -v
 
   build-supervisor:
-    needs: [lint, test]
+    needs: [lint, test, set-image-tag]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -86,11 +94,11 @@ jobs:
           context: ./orchestrator/supervisor
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: |
-            ${{ env.REGISTRY }}/${{ env.SUPERVISOR_IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/${{ env.SUPERVISOR_IMAGE_NAME }}:${{ needs.set-image-tag.outputs.tag }}
             ${{ env.REGISTRY }}/${{ env.SUPERVISOR_IMAGE_NAME }}:latest
 
   build-worker:
-    needs: [lint, test]
+    needs: [lint, test, set-image-tag]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -118,11 +126,11 @@ jobs:
           context: ./orchestrator/worker
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: |
-            ${{ env.REGISTRY }}/${{ env.WORKER_IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/${{ env.WORKER_IMAGE_NAME }}:${{ needs.set-image-tag.outputs.tag }}
             ${{ env.REGISTRY }}/${{ env.WORKER_IMAGE_NAME }}:latest
 
   build-gateway:
-    needs: [lint, test]
+    needs: [lint, test, set-image-tag]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -150,5 +158,5 @@ jobs:
           context: ./orchestrator/gateway
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: |
-            ${{ env.REGISTRY }}/${{ env.GATEWAY_IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ env.REGISTRY }}/${{ env.GATEWAY_IMAGE_NAME }}:${{ needs.set-image-tag.outputs.tag }}
             ${{ env.REGISTRY }}/${{ env.GATEWAY_IMAGE_NAME }}:latest

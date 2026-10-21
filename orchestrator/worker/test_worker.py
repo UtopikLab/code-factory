@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 import httpx
 import pytest
 import worker
+from prometheus_client import CollectorRegistry
 from worker import (
     CodeEditor,
     _extract_edits,
@@ -30,6 +31,33 @@ from worker import (
 def gateway_auth(monkeypatch):
     monkeypatch.setenv("GATEWAY_AUTH_TOKEN", "gateway-test-secret")
     monkeypatch.setenv("TASK_CALLBACK_TOKEN", "callback-test-secret")
+
+
+@pytest.mark.parametrize("status", ["success", "failed", "completed"])
+def test_record_worker_metrics_with_string_status(monkeypatch, status):
+    registry = CollectorRegistry()
+    for name in ("TASKS", "CODE_CHANGES", "EVAL_SCORE", "JOB_DURATION", "LAST_STATUS"):
+        original = getattr(worker, name)
+        metric = type(original)(
+            original._name,
+            original._documentation,
+            labelnames=original._labelnames,
+            registry=registry,
+        )
+        monkeypatch.setattr(worker, name, metric)
+    monkeypatch.setattr(worker.time, "monotonic", lambda: 110.0)
+
+    asyncio.run(worker._record_worker_metrics(
+        "metrics-task", {"status": status, "score": 0.75}, changed=2, job_start=100.0,
+    ))
+
+    assert registry.get_sample_value("worker_last_status", {"status": status}) == 1
+    assert registry.get_sample_value("worker_tasks_total", {"status": status}) == 1
+    assert registry.get_sample_value("worker_code_changes_total") == 2
+    assert registry.get_sample_value("worker_evaluation_score") == 0.75
+    assert registry.get_sample_value("worker_job_duration_seconds_count") == 1
+    assert registry.get_sample_value("worker_job_duration_seconds_sum") == 10.0
+
 
 # --------------------------------------------------------------------------- #
 # Edit extraction
