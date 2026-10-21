@@ -31,7 +31,8 @@ def boundary(tmp_path):
                                    "coder_model": "configured-coder", "judge_model": "configured-judge",
                                    "coder_native_download": True, "judge_native_download": False,
                                    "reviewers": "private", "coder_url": "https://secret@example.com"}))
-    settings = {"MANAGEMENT_OIDC_ISSUER": "https://identity.example", "MANAGEMENT_OIDC_AUDIENCE": "management",
+    settings = {"MANAGEMENT_AUTH_MODE": "oidc",
+                "MANAGEMENT_OIDC_ISSUER": "https://identity.example", "MANAGEMENT_OIDC_AUDIENCE": "management",
                 "MANAGEMENT_OIDC_JWKS_URL": "https://identity.example/keys", "MANAGEMENT_ALLOWED_SUBJECTS": "operator",
                 "MANAGEMENT_PUBLIC_ORIGIN": "https://factory.example", "MANAGEMENT_REPOSITORIES_FILE": str(credentials),
                 "MANAGEMENT_RUNTIME_CONFIG_FILE": str(runtime), "MANAGEMENT_GATEWAY_URL": "https://gateway.example",
@@ -46,6 +47,37 @@ def boundary(tmp_path):
     client.headers.update({"Authorization": "Bearer " + token(), "Origin": "https://factory.example",
                            "X-Management-Request": "1"})
     return client, upstream, token, settings
+
+
+def test_admin_login_without_oidc(boundary, tmp_path):
+    _, upstream, _, settings = boundary
+    settings.update({"MANAGEMENT_AUTH_MODE": "admin", "MANAGEMENT_ADMIN_PASSWORD": "admin-test-password-only"})
+    for key in list(settings):
+        if key.startswith("MANAGEMENT_OIDC_") or key == "MANAGEMENT_ALLOWED_SUBJECTS":
+            del settings[key]
+    (tmp_path / "index.html").write_text("<html>Management</html>")
+    settings["MANAGEMENT_STATIC_DIR"] = str(tmp_path)
+    client = TestClient(create_app(settings, httpx.MockTransport(upstream)))
+    for path in ("/", "/management/api/session", "/management/api/tasks"):
+        response = client.get(path)
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"].startswith("Basic ")
+        assert client.get(path, auth=("admin", "wrong-password")).status_code == 401
+        assert client.get(path, auth=("other", "admin-test-password-only")).status_code == 401
+    client.auth = ("admin", "admin-test-password-only")
+    assert client.get("/").status_code == 200
+    assert client.get("/management/api/session").json() == {"subject": "admin"}
+    assert "admin-test-password-only" not in client.get("/management/api/session").text
+    assert client.post("/management/api/tasks", json={}).status_code == 403
+    response = client.post("/management/api/tasks", json={"repo": "org/repo", "issue_number": 7},
+                           headers={"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"})
+    assert response.status_code == 202
+    assert upstream.call_args.args[0].headers["Authorization"] == "token gateway-test-secret"
+    for password in ("", "too-short"):
+        settings["MANAGEMENT_ADMIN_PASSWORD"] = password
+        assert TestClient(create_app(settings)).get("/management/api/session").status_code == 503
+    settings["MANAGEMENT_AUTH_MODE"] = "unknown"
+    assert TestClient(create_app(settings)).get("/management/api/session").status_code == 503
 
 
 def test_secure_defaults_and_all_routes_require_identity(boundary):
@@ -200,7 +232,7 @@ def test_management_helm_opt_in_and_snapshot(tmp_path):
     assert "component: management" not in default
     assert subprocess.run([*base, "--set", "management.enabled=true"], capture_output=True, check=False).returncode != 0
     values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS,
-        "management": {"enabled": True, "image": "example/management:test",
+        "management": {"enabled": True, "authMode": "oidc", "image": "example/management:test",
         "publicOrigin": "https://factory.example", "repositories": {"org/repo": "repository-test-secret"},
         "oidc": {"issuer": "https://identity.example", "audience": "management",
                  "jwksUrl": "https://identity.example/keys", "allowedSubjects": ["operator"]}}}))

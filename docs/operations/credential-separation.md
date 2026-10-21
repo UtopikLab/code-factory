@@ -51,7 +51,7 @@ username. `helm/orchestrator/local.values.yaml` contains orchestrator-only
 deployment settings such as images and environment routing. The
 private `helm/local.secrets-values.yaml` contains the grouped
 `credentials.internal.*`, `credentials.github.*`, and `credentials.models.*`
-values, plus management repository credentials and OIDC settings shown in
+values, plus management repository credentials and admin or OIDC settings shown in
 `helm/example.secrets-values.yaml`. Use a separate provider-issued
 PAT for GHCR `read:packages` and repository PR operations; never reuse the GHCR
 PAT for repository access. Generate internal tokens independently.
@@ -78,30 +78,43 @@ ignored `helm/local.secrets-values.yaml`, at the root (not under `orchestrator`)
 
 ```yaml
 management:
+   admin:
+      username: admin
+      password: "<independent-admin-password-at-least-16-characters>"
    repositories:
       owner/repository: "<repository-specific-pat>"
-   oidc:
-      issuer: "https://<your-identity-provider>"
-      audience: "<your-management-audience>"
-      jwksUrl: "https://<your-identity-provider>/<jwks-path>"
-      allowedSubjects:
-         - "<authorized-operator-subject>"
 ```
 
 Replace the repository key and all placeholders with real values in that file.
-An empty repository map, blank tokens, missing OIDC fields, or an empty authorized
-subject list are rejected when management is enabled. Keep `management.enabled`,
+Management defaults to `authMode: admin`, requiring no OIDC provider. Opening its
+URL prompts for the admin username and password using browser HTTP Basic authentication.
+The password must contain at least 16 non-whitespace characters and must be unique;
+there is no built-in password. Helm creates `orchestrator-management-admin` and
+passes the password through a Secret reference, never a ConfigMap. Use HTTPS at the
+ingress or external TLS proxy and restrict direct backend access. This mode provides
+one administrator, not user registration, password recovery, or browser logout;
+close the browser session to clear cached Basic credentials. Public exposure also
+requires proxy-level login rate limiting. No credentials are stored in browser storage.
+
+To use an existing identity provider instead, explicitly set `management.authMode: oidc`
+in the ordinary orchestrator values, and populate `management.oidc.issuer`, `audience`,
+`jwksUrl`, and `allowedSubjects` in the private values file. Admin password authentication
+is disabled in OIDC mode; invalid OIDC tokens never fall back to the admin account.
+
+An empty repository map or blank repository tokens are rejected when management is enabled.
+Missing OIDC fields or an empty authorized subject list are rejected only in OIDC mode.
+Keep `management.enabled`,
 the image, public origin, and ingress settings in the ordinary orchestrator values.
 Helm creates `orchestrator-management-repositories` using the chart's
 existing chart-name convention, with a `repositories.json` key containing the
 repository-name-to-token JSON map, and mounts it into management automatically.
-The OIDC fields become the existing management environment variables; authentication
+In OIDC mode, the OIDC fields become the management environment variables; authentication
 and subject authorization remain required. The private file is already applied
 last by `deploy.sh`; no script arguments or nested chart wrapper are needed.
 
 There is no external repository-Secret override. When management is disabled,
-its repository Secret is not rendered; OIDC setup and a populated repository map
-are required only when management is enabled.
+its repository and admin Secrets are not rendered. A populated repository map and
+the selected authentication mode's settings are required only when management is enabled.
 
 The GHCR Secret is named `ghcr-read-packages-pull-secret` in each chart namespace,
 and all workloads reference that name by default. The checked-in shared values

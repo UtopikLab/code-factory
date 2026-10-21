@@ -10,6 +10,25 @@
                 "enabled": {
                     "type": "boolean"
                 },
+                "authMode": {
+                    "enum": [
+                        "admin",
+                        "oidc"
+                    ]
+                },
+                "admin": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "username": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_.-]+$"
+                        },
+                        "password": {
+                            "type": "string"
+                        }
+                    }
+                },
                 "image": {
                     "type": "string"
                 },
@@ -104,9 +123,67 @@
                 "required": [
                     "image",
                     "publicOrigin",
-                    "oidc",
+                    "authMode",
                     "repositories"
                 ],
+                "if": {
+                    "properties": {
+                        "authMode": {
+                            "const": "admin"
+                        }
+                    }
+                },
+                "then": {
+                    "required": [
+                        "admin"
+                    ],
+                    "properties": {
+                        "admin": {
+                            "required": [
+                                "username",
+                                "password"
+                            ],
+                            "properties": {
+                                "username": {
+                                    "minLength": 1
+                                },
+                                "password": {
+                                    "minLength": 16,
+                                    "pattern": "^[^<>\\s]+$"
+                                }
+                            }
+                        }
+                    }
+                },
+                "else": {
+                    "required": [
+                        "oidc"
+                    ],
+                    "properties": {
+                        "oidc": {
+                            "required": [
+                                "issuer",
+                                "audience",
+                                "jwksUrl",
+                                "allowedSubjects"
+                            ],
+                            "properties": {
+                                "issuer": {
+                                    "pattern": "^https://[^@?#]+$"
+                                },
+                                "audience": {
+                                    "minLength": 1
+                                },
+                                "jwksUrl": {
+                                    "pattern": "^https://[^@#]+$"
+                                },
+                                "allowedSubjects": {
+                                    "minItems": 1
+                                }
+                            }
+                        }
+                    }
+                },
                 "properties": {
                     "repositories": {
                         "minProperties": 1,
@@ -156,28 +233,6 @@
                                         "minLength": 1
                                     }
                                 }
-                            }
-                        }
-                    },
-                    "oidc": {
-                        "required": [
-                            "issuer",
-                            "audience",
-                            "jwksUrl",
-                            "allowedSubjects"
-                        ],
-                        "properties": {
-                            "issuer": {
-                                "pattern": "^https://[^@?#]+$"
-                            },
-                            "audience": {
-                                "minLength": 1
-                            },
-                            "jwksUrl": {
-                                "pattern": "^https://[^@#]+$"
-                            },
-                            "allowedSubjects": {
-                                "minItems": 1
                             }
                         }
                     }

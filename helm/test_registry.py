@@ -320,7 +320,7 @@ class RegistryValuesTests(unittest.TestCase):
         credentials = yaml.safe_load((HELM_DIR / "example.secrets-values.yaml").read_text())
         self.assertEqual(set(credentials), {"credentials", "management"})
         self.assertEqual(set(credentials["credentials"]), {"internal", "github", "models"})
-        self.assertEqual(set(credentials["management"]), {"repositories", "oidc"})
+        self.assertEqual(set(credentials["management"]), {"admin", "repositories", "oidc"})
         self.assertNotIn("createSecret", str(credentials))
         self.assertNotIn("existingSecret", str(credentials))
 
@@ -608,6 +608,7 @@ class RegistryValuesTests(unittest.TestCase):
         defaults = yaml.safe_load((HELM_DIR / "orchestrator/values.yaml").read_text())
         return {"management": {
             "enabled": True,
+            "authMode": "oidc",
             "image": defaults["gateway"]["image"],
             "publicOrigin": "https://management.example.com",
             "repositories": {"example/project": TOKEN},
@@ -620,6 +621,37 @@ class RegistryValuesTests(unittest.TestCase):
             "ingress": {"enabled": True, "host": "management.example.com",
                         "tlsTermination": "internal", "tlsSecretName": "management-tls", **ingress},
         }}
+
+    def test_management_admin_without_oidc(self):
+        values = self.management_values()
+        settings = values["management"]
+        del settings["authMode"]
+        del settings["oidc"]
+        settings["admin"] = {"username": "admin", "password": "admin-password-test-sentinel"}
+        documents = self.documents("orchestrator", values)
+        secret = next(document for document in documents if document["kind"] == "Secret"
+                      and document["metadata"]["name"] == "orchestrator-management-admin")
+        self.assertEqual(base64.b64decode(secret["data"]["password"]).decode(), settings["admin"]["password"])
+        deployment = next(document for document in documents if document["kind"] == "Deployment"
+                          and document["metadata"]["name"] == "orchestrator-management")
+        environment = {entry["name"]: entry for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual(environment["MANAGEMENT_AUTH_MODE"]["value"], "admin")
+        self.assertEqual(environment["MANAGEMENT_ADMIN_USERNAME"]["value"], "admin")
+        self.assertEqual(environment["MANAGEMENT_ADMIN_PASSWORD"]["valueFrom"]["secretKeyRef"], {
+            "name": secret["metadata"]["name"], "key": "password",
+        })
+        self.assertNotIn("MANAGEMENT_OIDC_ISSUER", environment)
+        self.assertNotIn(settings["admin"]["password"], yaml.safe_dump(deployment))
+        for password in ("", "short", "<replace-password>"):
+            settings["admin"]["password"] = password
+            result = self.render("orchestrator", values)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("password", result.stderr)
+        settings["authMode"] = "none"
+        self.assertNotEqual(self.render("orchestrator", values).returncode, 0)
+        oidc_documents = self.documents("orchestrator", self.management_values())
+        self.assertFalse(any(document["kind"] == "Secret" and document["metadata"]["name"]
+                             == "orchestrator-management-admin" for document in oidc_documents))
 
     def test_management_managed_repository_credentials(self):
         values = self.management_values()

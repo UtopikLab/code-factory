@@ -52,6 +52,17 @@ spec:
               value: {{ default (index .Values.supervisor.config "acceptor-url") .Values.management.gatewayUrl | quote }}
             - name: MANAGEMENT_PUBLIC_ORIGIN
               value: {{ .Values.management.publicOrigin | quote }}
+            - name: MANAGEMENT_AUTH_MODE
+              value: {{ .Values.management.authMode | quote }}
+            {{- if eq .Values.management.authMode "admin" }}
+            - name: MANAGEMENT_ADMIN_USERNAME
+              value: {{ .Values.management.admin.username | quote }}
+            - name: MANAGEMENT_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Chart.Name }}-management-admin
+                  key: password
+            {{- else }}
             - name: MANAGEMENT_OIDC_ISSUER
               value: {{ .Values.management.oidc.issuer | quote }}
             - name: MANAGEMENT_OIDC_AUDIENCE
@@ -60,6 +71,7 @@ spec:
               value: {{ .Values.management.oidc.jwksUrl | quote }}
             - name: MANAGEMENT_ALLOWED_SUBJECTS
               value: {{ join "," .Values.management.oidc.allowedSubjects | quote }}
+            {{- end }}
             - name: MANAGEMENT_REPOSITORIES_FILE
               value: /etc/repositories/repositories.json
             - name: MANAGEMENT_RUNTIME_CONFIG_FILE

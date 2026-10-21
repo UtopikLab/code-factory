@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import secrets
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
@@ -10,6 +11,7 @@ import jwt
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPBasic
 
 TASK_FIELDS = ("task_id", "repo", "issue_number", "status", "lifecycle", "credential_cleanup",
                "retry_of", "retry_task_id", "attempts", "config_version", "config_hash")
@@ -25,11 +27,27 @@ def create_app(settings=None, transport=None, signing_keys=None):
     jwks_url = settings.get("MANAGEMENT_OIDC_JWKS_URL", "")
     subjects = set(filter(None, settings.get("MANAGEMENT_ALLOWED_SUBJECTS", "").split(",")))
     origin = settings.get("MANAGEMENT_PUBLIC_ORIGIN", "")
+    auth_mode = settings.get("MANAGEMENT_AUTH_MODE", "admin")
+    admin_username = settings.get("MANAGEMENT_ADMIN_USERNAME", "admin")
+    admin_password = settings.get("MANAGEMENT_ADMIN_PASSWORD", "")
+    basic = HTTPBasic(auto_error=False, realm="Code Factory Admin")
     keys = signing_keys
     if keys is None and jwks_url.startswith("https://"):
         keys = jwt.PyJWKClient(jwks_url, timeout=5)
 
-    def identity(request: Request):
+    async def identity(request: Request):
+        if auth_mode == "admin":
+            if not origin or not admin_username or len(admin_password) < 16:
+                raise HTTPException(503, "admin-not-configured")
+            credentials = await basic(request)
+            if credentials is not None:
+                username_valid = secrets.compare_digest(credentials.username.encode(), admin_username.encode())
+                password_valid = secrets.compare_digest(credentials.password.encode(), admin_password.encode())
+                if username_valid and password_valid:
+                    return admin_username
+            raise HTTPException(401, "identity-required", headers={"WWW-Authenticate": 'Basic realm="Code Factory Admin"'})
+        if auth_mode != "oidc":
+            raise HTTPException(503, "identity-not-configured")
         if not (issuer.startswith("https://") and audience and keys and subjects and origin):
             raise HTTPException(503, "identity-not-configured")
         authorization = request.headers.get("authorization", "")

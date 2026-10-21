@@ -144,6 +144,10 @@ agentCatalog:
 
 management:
   enabled: false
+  authMode: admin
+  admin:
+    username: admin
+    password: ""
   image: "ghcr.io/utopiklab/code-factory-management:latest"
   imagePullPolicy: IfNotPresent
   publicOrigin: ""
