@@ -16,7 +16,13 @@ from app import create_app
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
-from helm.test_registry import AUTH_CREDENTIALS
+AUTH_CREDENTIALS = {
+    "internal": {
+        "gatewayClientToken": "gateway-test-sentinel-at-least-32-characters",
+        "supervisorServiceToken": "supervisor-test-sentinel",
+    },
+    "github": {"pullRequestPat": "pr-test-sentinel"},
+}
 
 
 @pytest.fixture
