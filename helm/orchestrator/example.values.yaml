@@ -2,7 +2,7 @@ gateway:
   transportMode: edge-tls
   ingress:
     tlsTermination: external
-    host: orchestrator.local
+    host: code-factory.local
     tlsSecretName: ""
 supervisor:
   config:

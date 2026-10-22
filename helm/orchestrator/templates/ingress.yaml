@@ -69,6 +69,16 @@ spec:
     - host: {{ .Values.management.ingress.host | quote }}
       http:
         paths:
+          {{- $gatewayUrl := default (index .Values.supervisor.config "acceptor-url") .Values.management.gatewayUrl }}
+          {{- if eq (trimSuffix "/" $gatewayUrl) (trimSuffix "/" .Values.management.publicOrigin) }}
+          - path: /api/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Chart.Name }}-orchestrator-gateway
+                port:
+                  number: 8000
+          {{- end }}
           - path: /
             pathType: Prefix
             backend:

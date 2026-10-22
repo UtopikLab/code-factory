@@ -44,7 +44,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("worker")
 
-DEFAULT_ACCEPTOR_URL = "https://orchestrator.local"
+DEFAULT_ACCEPTOR_URL = "https://code-factory.local"
 HTTP_TIMEOUT = 30.0
 NATIVE_MODEL_TIMEOUT = 1800.0
 POLL_TIMEOUT = 1800.0

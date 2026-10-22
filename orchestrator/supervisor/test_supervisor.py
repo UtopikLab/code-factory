@@ -75,6 +75,69 @@ def test_durable_claim_recovery_and_eight_total_attempt_cap(tmp_path):
         db.close()
 
 
+@pytest.mark.parametrize("runtime,expected_host", [
+    (None, "current.example.com"),
+    ({"acceptor_url": "https://pinned.example.com"}, "pinned.example.com"),
+])
+def test_completion_url_uses_pinned_runtime_or_current_fallback(monkeypatch, runtime, expected_host):
+    monkeypatch.setenv("SUPERVISOR_AUTH_TOKEN", "supervisor-test-only")
+    monkeypatch.setenv("ACCEPTOR_URL", "https://current.example.com")
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def urlopen(request, timeout):
+        requests.append(request)
+        assert timeout == 30
+        return Response()
+
+    supervisor_module._candidate_workflow.complete_via_gateway(
+        "task", "failed", runtime, {"error": "test-failure"}, urlopen)
+    assert requests[0].full_url == f"https://{expected_host}/api/v1/supervisor/tasks/task"
+    assert requests[0].method == "POST"
+
+
+def test_catalog_failure_consumes_eight_attempts_then_waits_for_lease(monkeypatch, tmp_path):
+    path = str(tmp_path / "tasks.sqlite3")
+    db = task_database(path)
+    db.execute("INSERT INTO tasks(task_id,status,payload) VALUES(?,?,?)", ("task", "queued", "{}"))
+    db.close()
+    monkeypatch.setattr(supervisor_module, "task_database", lambda: task_database(path))
+
+    def deny_catalog(_task):
+        raise RuntimeError("kubernetes-api-http-403")
+
+    completions = []
+
+    def fail_completion(task_id, status, runtime, **_details):
+        completions.append((task_id, status, runtime))
+        raise supervisor_module.urllib.error.URLError("Name or service not known")
+
+    monkeypatch.setattr(supervisor_module, "_load_pinned_catalog", deny_catalog)
+    monkeypatch.setattr(supervisor_module, "_complete_via_gateway", fail_completion)
+    loop = supervisor_module.SupervisorLoop()
+    for _attempt in range(8):
+        assert asyncio.run(loop.process_next_durable_task()) is True
+    assert asyncio.run(loop.process_next_durable_task()) is False
+    assert completions == [("task", "failed", None)]
+    db = task_database(path)
+    try:
+        task = db.execute("SELECT * FROM tasks WHERE task_id='task'").fetchone()
+        assert task["attempts"] == 8
+        assert task["status"] == "running"
+        assert task["claim_owner"] and task["claimed_at"]
+    finally:
+        db.close()
+
+
 def test_pinned_catalog_is_schema_validated_and_role_tools_are_bounded(monkeypatch):
     chart = Path(__file__).resolve().parents[2] / "helm/orchestrator/files"
     content = (chart / "agent-catalog.yaml").read_text()

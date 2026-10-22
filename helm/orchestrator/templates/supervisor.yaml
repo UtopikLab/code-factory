@@ -154,6 +154,9 @@ metadata:
   name: {{ .Chart.Name }}-supervisor
   namespace: {{ .Values.namespace }}
 rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "create"]

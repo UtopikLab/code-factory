@@ -42,7 +42,7 @@ supervisor:
   config:
     # Reachable HTTPS origin for the coder-worker's ACCEPTOR_URL, independent of
     # gateway.ingress.host when an external TLS proxy rewrites Host.
-    acceptor-url: "https://orchestrator.local"
+    acceptor-url: "https://code-factory.local"
     allowed-base-branches: ""
     reviewers: ""
     judge-url: "http://llama-server-args-gpu1.inference.svc.cluster.local:8000/v1"
@@ -91,7 +91,7 @@ worker:
 gateway:
   transportMode: edge-tls
   ingress:
-    host: "orchestrator.local"
+    host: "code-factory.local"
     tlsTermination: internal
     tlsSecretName: "orchestrator-gateway-tls"
   taskCredentialTtlSeconds: 86400

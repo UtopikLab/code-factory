@@ -288,6 +288,31 @@ def test_adapter_to_real_gateway_contract(boundary, monkeypatch, tmp_path, auth_
         thread.join()
 
 
+@pytest.mark.parametrize("command", ["template", "lint"])
+@pytest.mark.parametrize("gateway_url,shared", [("", True), ("https://factory.example/", True),
+                                               ("https://gateway.example", False)])
+def test_management_helm_shared_origin_routes_gateway(tmp_path, command, gateway_url, shared):
+    chart = Path(__file__).resolve().parents[2] / "helm" / "orchestrator"
+    values = tmp_path / "management.yaml"
+    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS,
+        "supervisor": {"config": {"acceptor-url": "https://factory.example"}},
+        "management": {"enabled": True, "publicOrigin": "https://factory.example",
+                       "gatewayUrl": gateway_url, "admin": {"password": "abcdefg!"},
+                       "ingress": {"enabled": True, "host": "factory.example",
+                                   "tlsTermination": "external"}}}))
+    arguments = ["helm", command, *(["test"] if command == "template" else []), str(chart), "-f", str(values)]
+    rendered = subprocess.run(arguments, text=True, capture_output=True, check=True).stdout
+    if command == "lint":
+        return
+    ingress = next(document for document in yaml.safe_load_all(rendered) if document
+                   and document["kind"] == "Ingress" and document["metadata"]["name"].endswith("-management-ingress"))
+    paths = {path["path"]: path["backend"]["service"] for path in ingress["spec"]["rules"][0]["http"]["paths"]}
+    assert paths["/"] == {"name": "orchestrator-management", "port": {"number": 8081}}
+    assert ("/api/v1" in paths) is shared
+    if shared:
+        assert paths["/api/v1"] == {"name": "orchestrator-orchestrator-gateway", "port": {"number": 8000}}
+
+
 def test_management_helm_opt_in_and_snapshot(tmp_path):
     chart = Path(__file__).resolve().parents[2] / "helm" / "orchestrator"
     values = tmp_path / "management.yaml"

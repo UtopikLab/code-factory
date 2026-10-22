@@ -747,7 +747,7 @@ def test_helm_ingress_tls_termination(mode, secret, profile, helm_values):
         pytest.skip("helm unavailable")
     chart = Path(__file__).resolve().parents[2] / "helm/orchestrator"
     origin = "https://gateway.example.com"
-    values = {"gateway": {"ingress": {"host": "orchestrator.local", "tlsTermination": mode, "tlsSecretName": secret}},
+    values = {"gateway": {"ingress": {"host": "code-factory.local", "tlsTermination": mode, "tlsSecretName": secret}},
               "supervisor": {"config": {"acceptor-url": origin}}}
     if profile:
         values = yaml.safe_load((chart / "example.values.yaml").read_text())
@@ -757,12 +757,12 @@ def test_helm_ingress_tls_termination(mode, secret, profile, helm_values):
                               input=yaml.safe_dump(values), capture_output=True, text=True, check=True)
     documents = [document for document in yaml.safe_load_all(rendered.stdout) if document]
     ingress = next(document for document in documents if document["kind"] == "Ingress")
-    assert ingress["spec"]["rules"][0]["host"] == "orchestrator.local"
+    assert ingress["spec"]["rules"][0]["host"] == "code-factory.local"
     annotations = ingress["metadata"]["annotations"]
     if mode == "internal":
         assert annotations["traefik.ingress.kubernetes.io/router.entrypoints"] == "websecure"
         assert annotations["traefik.ingress.kubernetes.io/router.tls"] == "true"
-        assert ingress["spec"]["tls"] == [{"hosts": ["orchestrator.local"], "secretName": secret}]
+        assert ingress["spec"]["tls"] == [{"hosts": ["code-factory.local"], "secretName": secret}]
     else:
         assert annotations["traefik.ingress.kubernetes.io/router.entrypoints"] == "web"
         assert "traefik.ingress.kubernetes.io/router.tls" not in annotations

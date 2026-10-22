@@ -222,7 +222,7 @@ The optional external TLS route is: external TLS reverse proxy -> HTTP ingress
 -> gateway. The reverse proxy is equipment outside this project's scope; the
 project does not manage its configuration. Set the Ingress host to the Host
 received by Traefik. If the external proxy deliberately rewrites Host to
-`orchestrator.local`, keep that internal routing host even though the public
+`code-factory.local`, keep that internal routing host even though the public
 hostname differs. Without a rewrite, use the public hostname instead.
 For example, with a public HTTPS origin and an internal Host rewrite:
 
@@ -231,7 +231,7 @@ gateway:
    transportMode: edge-tls
     ingress:
          tlsTermination: external
-         host: orchestrator.local
+         host: code-factory.local
          tlsSecretName: ""
 supervisor:
     config:
@@ -303,14 +303,14 @@ Before deploying external mode, verify all of the following:
    inside the application.
 
 On 2026-10-21, a credential-free GET to `http://192.168.1.51/api/v1` with
-`Host: orchestrator.local` returned HTTP 404 while the live Ingress used only
+`Host: code-factory.local` returned HTTP 404 while the live Ingress used only
 `websecure`. This supports the entrypoint mismatch; it is not authentication or
 end-to-end TLS acceptance evidence. The local chart change does not itself
 reconfigure the external reverse proxy, DNS, ingress, network isolation, or a running workload.
 
 After correcting the public hostname on 2026-10-21, the local resolver returned
 `70.53.188.185` via `wan1.utopiklab.com`. OpenSSL verified the certificate chain
-and hostname for `orchestrator.utopiklab.com`: issuer Let's Encrypt `YR1`, SAN
+and hostname for `code-factory.local`: issuer Let's Encrypt `YR1`, SAN
 `*.utopiklab.com`, valid 2026-10-12 through 2027-01-10. A credential-free HTTPS
 GET to `/healthz` returned HTTP 404 with successful certificate verification and
 no redirect. The Ingress only routes `/api/v1`, so this response does not establish

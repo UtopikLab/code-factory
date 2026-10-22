@@ -23,6 +23,58 @@ AUTH_CREDENTIALS = {
 
 
 class RegistryValuesTests(unittest.TestCase):
+    def test_supervisor_catalog_rbac_is_namespace_scoped_get_only(self):
+        for namespace in ("orchestrator", "custom-tasks"):
+            with self.subTest(namespace=namespace):
+                documents = self.documents("orchestrator", {
+                    "namespace": namespace,
+                })
+                role = next(document for document in documents if document["kind"] == "Role"
+                            and document["metadata"]["name"] == "orchestrator-supervisor")
+                self.assertEqual(role["rules"], [{
+                    "apiGroups": [""], "resources": ["configmaps"], "verbs": ["get"],
+                }, {
+                    "apiGroups": ["batch"], "resources": ["jobs"],
+                    "verbs": ["get", "list", "create"],
+                }])
+                self.assertEqual(role["metadata"]["namespace"], namespace)
+                binding = next(document for document in documents if document["kind"] == "RoleBinding"
+                               and document["metadata"]["name"] == "orchestrator-supervisor")
+                self.assertEqual(binding["metadata"]["namespace"], namespace)
+                self.assertEqual(binding["subjects"], [{
+                    "kind": "ServiceAccount", "name": "orchestrator-supervisor", "namespace": namespace,
+                }])
+                self.assertEqual(binding["roleRef"], {
+                    "apiGroup": "rbac.authorization.k8s.io", "kind": "Role",
+                    "name": role["metadata"]["name"],
+                })
+
+    def test_inference_hpa_cpu_target_and_downscale_stabilization(self):
+        documents = self.documents("inference", {})
+        deployments = [document for document in documents if document["kind"] == "Deployment"]
+        autoscalers = [document for document in documents
+                       if document["kind"] == "HorizontalPodAutoscaler"]
+        self.assertEqual(len(autoscalers), len(deployments))
+        for autoscaler, deployment in zip(autoscalers, deployments):
+            self.assertEqual(autoscaler["apiVersion"], "autoscaling/v2")
+            spec = autoscaler["spec"]
+            self.assertEqual(spec["minReplicas"], 1)
+            self.assertEqual(spec["maxReplicas"], 1)
+            self.assertEqual(spec["scaleTargetRef"], {
+                "apiVersion": "apps/v1", "kind": "Deployment",
+                "name": deployment["metadata"]["name"],
+            })
+            self.assertEqual(spec["behavior"], {
+                "scaleDown": {"stabilizationWindowSeconds": 300},
+            })
+            self.assertEqual(spec["metrics"], [{
+                "type": "Resource", "resource": {
+                    "name": "cpu",
+                    "target": {"type": "Utilization", "averageUtilization": 70},
+                },
+            }])
+            self.assertNotIn("utilizationPercentiles", spec)
+
     def test_inference_native_router_and_cache(self):
         values = yaml.safe_load((HELM_DIR / "inference/values.yaml").read_text())["inference"]
         documents = self.documents("inference", {})
@@ -599,7 +651,7 @@ class RegistryValuesTests(unittest.TestCase):
         }
         documents = self.documents("orchestrator", values)
         ingress = next(document for document in documents if document["kind"] == "Ingress")
-        self.assertEqual(ingress["spec"]["rules"][0]["host"], "orchestrator.local")
+        self.assertEqual(ingress["spec"]["rules"][0]["host"], "code-factory.local")
         self.assertNotIn("tls", ingress["spec"])
         self.assertEqual(ingress["metadata"]["annotations"][
             "traefik.ingress.kubernetes.io/router.entrypoints"], "web")

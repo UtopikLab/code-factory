@@ -2,7 +2,101 @@
 
 **Status:** Partial recovery; gateway HTTPS intake remains blocked (2026-10-21).
 
-## Optional Management UI Ingress: Not Deployed
+## Supervisor Catalog Permission And Callback DNS: Prepared, Not Deployed
+
+Read-only checks on 2026-10-22 confirmed task
+`issue-2e2948ebe051a6f6e47ce755478b7a47` is `running` at attempt 8, pinned to
+`orchestrator-agent-catalog-2d50f5f5368d` in namespace `orchestrator`.
+`kubectl auth can-i get configmap/orchestrator-agent-catalog-2d50f5f5368d -n orchestrator --as=system:serviceaccount:orchestrator:orchestrator-supervisor`
+returned `no`; a GET from the supervisor pod returned HTTP 403 Forbidden for
+that same service account, resource and namespace. The live and checked-in
+supervisor Roles had only job permissions, not a stale catalog allowlist.
+
+The chart now grants the supervisor namespace-scoped ConfigMap `get` access
+through its existing Role and RoleBinding, without a manual catalog hash inventory.
+This deliberately allows reading any ConfigMap whose name the supervisor knows
+in its namespace, not only catalogs. The chart's ConfigMaps contain configuration,
+not credentials; credentials use Secrets. No ConfigMap list/watch/write, Secret
+read, or cluster-scoped permissions are added. Existing namespace-wide Job
+permissions are unchanged.
+
+Catalog names still use the first 12 hash characters; catalog/runtime/schema
+content changes produce new names, and Helm keeps historical immutable ConfigMaps.
+Tasks continue loading their pinned catalogs by name with content-hash validation;
+no runtime pinning, stored catalogs, or task records are changed.
+
+The supervisor pod's current `ACCEPTOR_URL` and this task's pinned runtime both
+use `https://code-factory.local`. Pod DNS returned errno -2 for that hostname;
+`code-factory.utopiklab.com` and the actual internal gateway Service resolved.
+A TLS-verified, unauthenticated GET to the public HTTPS task-list endpoint
+returned HTTP 401, as did the internal gateway. This proves reachability, not
+authenticated callback success. The ignored local values now also set
+`supervisor.config.acceptor-url: https://code-factory.utopiklab.com`, preserving
+the HTTPS schema policy. No application TLS or authentication checks changed.
+
+Callback selection matters: before a catalog loads, terminal completion falls
+back to the pod's `ACCEPTOR_URL`; after it loads, the pinned runtime's
+`acceptor_url` takes precedence. Changing management's URL or generating a new
+catalog does not repair old task snapshots. Even after the prepared RBAC and
+URL changes are applied, this task still needs an approved compatibility plan:
+restore DNS/routing with a valid TLS certificate for its old HTTPS origin, or
+design and validate an explicit stored-task migration/recovery. Do not edit
+catalog contents in place: their content hash is verified. Do not silently
+rewrite task pins or retry this exhausted task.
+
+Live log markers show eight catalog failures from 00:32:58.619 to 00:32:58.694,
+then failed terminal persistence at 00:32:58.707. Nonterminal failures requeue
+immediately, so the loop consumes eight attempts rapidly. Failed terminal
+persistence leaves the task `running` with its claim; subsequent recovery waits
+for the default 900-second lease (plus idle polling), not an endless 10 ms loop.
+Regression tests cover callback precedence and this exact failure sequence;
+retry behavior is unchanged.
+
+No live resources, privileges, task records or deployments were changed.
+After explicit approval and review of unrelated pending chart changes, the
+orchestrator-only upgrade command is:
+
+```bash
+helm upgrade orchestrator helm/orchestrator -n orchestrator \
+  -f helm/orchestrator/local.values.yaml -f helm/local.secrets-values.yaml
+```
+
+This command was not executed. If a shared nonsecret values file is used, layer
+it before the orchestrator-local file, matching the deployment script. Do not
+use `helm/deploy.sh` for this narrow action: it also deploys inference and deletes
+Jobs/pods. An upgrade is not by itself a stored-task compatibility fix; the worker
+Job may also expose existing immutable-field constraints. Do not delete it as
+part of this incident without separate approval.
+
+## Management Task Listing: Gateway URL Correction Prepared
+
+Read-only checks on 2026-10-22 reproduced authenticated
+`GET /management/api/tasks?limit=25&offset=0` directly against management:
+HTTP 502 with `{"detail":"gateway-unavailable"}`. Its configured gateway URL
+is `https://code-factory.local`; the application's HTTPX client fails with
+`ConnectError` caused by DNS `gaierror` (errno -2). This is the currently verified
+failure, not the upstream 401 observed earlier.
+
+From the same management pod, using the existing gateway token without exposing
+it, both the internal gateway Service and the TLS-verified public endpoint
+`https://code-factory.utopiklab.com/api/v1/tasks?limit=25&offset=0` return HTTP 200
+with the task-list response shape. The local, ignored override
+`helm/orchestrator/local.values.yaml` now explicitly sets `management.gatewayUrl`
+to `https://code-factory.utopiklab.com`. This URL correction is not deployed;
+applying it requires approval. No application authentication or TLS checks were
+weakened. Non-loopback HTTP gateway URLs are rejected by both the management
+application and the chart schema, so the internal HTTP Service is not a valid
+configuration-only alternative under the current policy.
+
+Live Ingress metadata now shows `code-factory.local` on Traefik `web`, with
+`/api/v1` routed to the gateway and `/` to management. Thus the earlier shared
+Ingress routing change is already present live and does not fix the current DNS
+failure. Preserve it; this URL correction does not require another routing change.
+An unauthenticated request to the exact public HTTP management path returns
+HTTP 401 with a Basic challenge. Credentials were not sent over public HTTP;
+operators should use the HTTPS management origin.
+
+## Optional Management UI Ingress
 
 The orchestrator chart renders a management Ingress only when both
 `management.enabled` and `management.ingress.enabled` are true. Both default
@@ -10,9 +104,23 @@ to false; the default ingress host and TLS secret name are empty.
 The route is `/` with `pathType: Prefix` to the existing
 `orchestrator-management` Service on port 8081, covering the UI, assets, and
 same-origin `/management/api/*` endpoints without path rewriting.
-The gateway's `/api/v1` route is unchanged.
+When the effective `management.gatewayUrl` (falling back to
+`supervisor.config.acceptor-url`) matches `management.publicOrigin`, ignoring
+a trailing slash, this Ingress also routes `/api/v1` to the gateway on port 8000.
+This routes shared-origin task listing to the gateway when the external proxy
+selects the management Ingress host and entrypoint. Previously that Ingress only
+had `/` pointing to management on port 8081. Management sends gateway requests
+with `Authorization: token ...`; management's Basic/OIDC authentication rejects
+that scheme, whereas the gateway accepts it with the matching gateway token.
+An upstream 401 is translated by management into HTTP 502.
+The gateway Ingress already has its own `/api/v1` route: without evidence of the
+live proxy's selected host, entrypoint, and backend, misrouting remains a proposed
+cause of the observed 401, not an established incident root cause.
+Separate gateway origins retain their existing routing.
+The external proxy must forward these requests to this Ingress; the chart does
+not configure that proxy. See the current observations above for live routing.
 
-Use a dedicated management host, distinct from `gateway.ingress.host`.
+A dedicated management host, distinct from `gateway.ingress.host`, is also supported.
 The disabled example in `helm/orchestrator/example.values.yaml` uses
 `management.example.com` with external TLS termination; it does not enable
 the workload or ingress. Before enabling both settings:
@@ -35,8 +143,9 @@ the workload or ingress. Before enabling both settings:
   Provision DNS/proxy routing and confirm the existing Traefik entrypoints
   before deployment. This change does not install a controller or certificates.
 
-Only local Helm rendering/tests were performed; no live management ingress,
-DNS, TLS, image availability, or cluster readiness is asserted.
+The original ingress preparation used only local Helm rendering/tests. The
+read-only observations above establish the current task-listing failure and
+working HTTPS gateway endpoint, not overall deployment readiness.
 
 ## Requester-Selected Native Models: Prepared, Not Deployed
 
@@ -142,7 +251,7 @@ available; host containerd was intentionally not used for validation.
 - Live remediation used individual `kubectl patch deployment` operations and
   bounded `kubectl rollout status` checks, not a Helm release upgrade. The deploy
   script was not run: it upgrades both releases and deletes the seed worker Job.
-- HTTPS verification for `orchestrator.local` failed hostname validation. The
+- HTTPS verification for `code-factory.local` failed hostname validation. The
   referenced `orchestrator-gateway-tls` Secret is absent; no cert-manager CRDs,
   Traefik certificate resolver, or reusable ingress TLS certificate was found.
   The only TLS Secret found was the Kubernetes serving certificate, not an

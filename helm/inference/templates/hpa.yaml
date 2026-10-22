@@ -31,10 +31,14 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: {{ $cfg.name }}
-  # Use utilizationPercentiles (v2 API); target the 70th percentile CPU.
   behavior:
-    stabilize:
+    scaleDown:
       stabilizationWindowSeconds: 300
-  utilizationPercentiles:
-    - 70
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
 {{- end }}
