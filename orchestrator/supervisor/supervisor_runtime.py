@@ -95,7 +95,7 @@ class SupervisorLoop:
                     db.execute("UPDATE tasks SET status='queued', result=NULL, claim_owner=NULL, claimed_at=NULL WHERE task_id=? AND claim_owner=?",
                                (task_id, owner))
                 return True
-            if not supervisor.os.environ.get("PR_GITHUB_TOKEN"):
+            if not supervisor.os.environ.get("PR_GITHUB_TOKEN") and json.loads(task["payload"]).get("repository_auth") != "github-app":
                 raise RuntimeError("pr-publication-credential-required")
             current = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
             pr_url = supervisor._publish_candidate(current, candidate, runtime)

@@ -2,3 +2,4 @@
 # /metrics (prometheus_client). The HTTP acceptor itself needs no pip installs,
 # but prometheus_client is required for the cfe_-prefixed metrics exported on :9000.
 prometheus-client>=0.21,<0.23
+PyJWT[crypto]>=2.10.1,<3

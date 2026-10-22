@@ -46,12 +46,37 @@ spec:
           volumeMounts:
             - name: task-state
               mountPath: /data/tasks
+            {{- if eq .Values.githubAuth.mode "github-app" }}
+            - name: github-app-key
+              mountPath: /etc/github-app
+              readOnly: true
+            {{- end }}
           env:
+            - name: GITHUB_AUTH_MODE
+              value: {{ .Values.githubAuth.mode | quote }}
+            {{- if eq .Values.githubAuth.mode "github-app" }}
+            - name: GITHUB_OIDC_AUDIENCE
+              value: {{ .Values.githubAuth.audience | quote }}
+            - name: GITHUB_APP_ID
+              value: {{ .Values.githubAuth.appId | quote }}
+            - name: GITHUB_APP_PRIVATE_KEY_FILE
+              value: /etc/github-app/private-key.pem
+            - name: GITHUB_REPOSITORY_POLICIES
+              value: {{ .Values.githubAuth.repositories | toJson | quote }}
+            {{- if .Values.management.enabled }}
+            - name: MANAGEMENT_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.githubAuth.managementServiceSecret.name }}
+                  key: {{ .Values.githubAuth.managementServiceSecret.key }}
+            {{- end }}
+            {{- else }}
             - name: CODEFACTORY_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ .Chart.Name }}-gateway-auth
                   key: gateway-auth-token
+                {{- end }}
             - name: SUPERVISOR_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -85,6 +110,15 @@ spec:
               port: gateway
             periodSeconds: 15
       volumes:
+        {{- if eq .Values.githubAuth.mode "github-app" }}
+        - name: github-app-key
+          secret:
+            secretName: {{ .Values.githubAuth.privateKeySecret.name }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.githubAuth.privateKeySecret.key }}
+                path: private-key.pem
+        {{- end }}
         - name: task-state
           persistentVolumeClaim:
             claimName: {{ default (printf "%s-task-state" .Chart.Name) .Values.gateway.persistence.existingClaim }}

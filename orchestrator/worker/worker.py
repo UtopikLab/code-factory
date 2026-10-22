@@ -250,6 +250,8 @@ class GitHub:
         self.client = client
         self.repo = repo
         self.base = "/repos/" + quote(repo, safe="/")
+        self.app_mode = os.environ.get("REPO_GITHUB_PAT") == "github-app"
+        self.expires_at = 0
         self.headers = {"Authorization": "Bearer " + os.environ.get("REPO_GITHUB_PAT", ""),
                         "Accept": "application/vnd.github+json"}
         if not os.environ.get("REPO_GITHUB_PAT"):
@@ -260,7 +262,9 @@ class GitHub:
     async def call(self, method, path, body=None, optional=False):
         if method != "GET":
             raise TaskFailure("worker-github-read-only")
-        if float(os.environ.get("TASK_CREDENTIAL_EXPIRES_AT", "0")) <= time.time():
+        if self.app_mode and self.expires_at <= time.time() + 60:
+            await self.refresh()
+        if not self.app_mode and float(os.environ.get("TASK_CREDENTIAL_EXPIRES_AT", "0")) <= time.time():
             raise TaskFailure("repository-credential-expired")
         async with self.client.stream(method, "https://api.github.com" + self.base + path,
                                       headers=self.headers, json=body, follow_redirects=False) as response:
@@ -276,6 +280,33 @@ class GitHub:
                 if len(data) > 1048576:
                     raise TaskFailure("github-response-too-large")
             return json.loads(data) if data else None
+
+    async def refresh(self):
+        task_id = os.environ.get("ASSIGNED_TASK_ID", "")
+        callback = os.environ.get("TASK_CALLBACK_TOKEN", "")
+        base = os.environ.get("ACCEPTOR_URL", "")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,63}", task_id) or not callback or not base.startswith("https://"):
+            raise TaskFailure("repository-broker-not-configured")
+        try:
+            async with self.client.stream("POST", base.rstrip("/") + "/api/v1/tasks/" + task_id + "/credentials",
+                                          headers={"X-Task-Token": callback}, json={}, follow_redirects=False) as response:
+                if response.status_code != 200:
+                    raise ValueError()
+                data = bytearray()
+                async for chunk in response.aiter_bytes():
+                    data.extend(chunk)
+                    if len(data) > 8192:
+                        raise ValueError()
+                credential = json.loads(data)
+                token, expires = credential["token"], credential["expires_at"]
+                if (credential["repo"].lower() != self.repo.lower() or not isinstance(token, str)
+                        or not token or len(token) > 4096 or any(char.isspace() for char in token)
+                        or not time.time() + 60 < expires <= time.time() + 3660):
+                    raise ValueError()
+                self.headers["Authorization"] = "Bearer " + token
+                self.expires_at = expires
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+            raise TaskFailure("repository-broker-unavailable") from None
 
 
 async def _snapshot(github, editor, sha):

@@ -28,6 +28,65 @@ from supervisor import (
 )
 
 
+def test_app_publication_refreshes_scoped_token_and_preserves_runtime(monkeypatch):
+    monkeypatch.setenv("SUPERVISOR_AUTH_TOKEN", "supervisor-test-only")
+    now = [1000]
+    monkeypatch.setattr(supervisor_module._candidate_workflow.time, "time", lambda: now[0])
+    requests = []
+    publications = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, limit):
+            assert limit == 8193
+            return json.dumps({"repo": "org/repo", "token": "renewal-" + str(len(requests)),
+                               "expires_at": now[0] + 3600}).encode()
+
+    class Opener:
+        def open(self, request, timeout):
+            requests.append(request)
+            assert request.full_url == "https://pinned.test/api/v1/supervisor/tasks/task/credentials"
+            assert request.get_header("Authorization") == "token supervisor-test-only"
+            assert timeout == 30
+            return Response()
+
+    def github(method, repo, path, body, *, token):
+        publications.append(token)
+        return {"ok": True}
+
+    client = supervisor_module._candidate_workflow.AppGitHub(
+        {"repo": "org/repo", "task_id": "task"}, {"acceptor_url": "https://pinned.test"}, github, Opener())
+    assert client("POST", "org/repo", "/pulls") == {"ok": True}
+    client("GET", "org/repo", "/pulls")
+    assert len(requests) == 1
+    now[0] += 3550
+    client("POST", "org/repo", "/pulls")
+    assert publications == ["renewal-1", "renewal-1", "renewal-2"]
+    with pytest.raises(RuntimeError, match="^repository-mismatch$"):
+        client("POST", "other/repo", "/pulls")
+    assert len(requests) == 2
+
+
+def test_app_publication_broker_failure_is_redacted(monkeypatch):
+    monkeypatch.setenv("SUPERVISOR_AUTH_TOKEN", "supervisor-test-only")
+
+    class Opener:
+        def open(self, *_args, **_kwargs):
+            raise OSError("sensitive-response-token")
+
+    client = supervisor_module._candidate_workflow.AppGitHub(
+        {"repo": "org/repo", "task_id": "task"}, {"acceptor_url": "https://pinned.test"}, None, Opener())
+    with pytest.raises(RuntimeError, match="^github-app-broker-unavailable$"):
+        client("POST", "org/repo", "/pulls")
+
+
 def test_supervisor_never_uses_legacy_global_token(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "legacy-test-only")
     monkeypatch.delenv("SUPERVISOR_MOCK_MODE", raising=False)

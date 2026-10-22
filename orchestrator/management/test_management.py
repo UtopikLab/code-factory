@@ -87,6 +87,26 @@ def test_admin_login_without_oidc(boundary, tmp_path):
     assert TestClient(create_app(settings)).get("/management/api/session").status_code == 503
 
 
+def test_app_submission_uses_policy_not_repository_pat_mapping(boundary):
+    _, upstream, _, settings = boundary
+    settings.update({"GITHUB_AUTH_MODE": "github-app", "MANAGEMENT_SERVICE_TOKEN": "management-service-only",
+                     "GITHUB_REPOSITORY_POLICIES": json.dumps([{"repository": "org/repo"}]),
+                     "MANAGEMENT_REPOSITORIES_FILE": "/not-present"})
+    settings.update({"MANAGEMENT_AUTH_MODE": "admin", "MANAGEMENT_ADMIN_PASSWORD": "admin-test-password-only"})
+    client = TestClient(create_app(settings, httpx.MockTransport(upstream)))
+    client.auth = ("admin", "admin-test-password-only")
+    assert client.get("/management/api/repositories").json() == {"repositories": ["org/repo"]}
+    response = client.post("/management/api/tasks", json={"repo": "org/repo", "issue_number": 7},
+                           headers={"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"})
+    assert response.status_code == 202
+    request = upstream.call_args.args[0]
+    assert request.headers["Authorization"] == "token management-service-only"
+    assert "X-Repository-Token" not in request.headers
+    assert "repository-test-secret" not in request.content.decode()
+    assert client.post("/management/api/tasks", json={"repo": "other/repo", "issue_number": 7},
+                       headers={"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"}).status_code == 403
+
+
 @pytest.mark.parametrize("password", ["abcdefg!", "elevenchar!"])
 def test_admin_password_accepts_eight_characters_with_special_character(boundary, password):
     _, _, _, settings = boundary

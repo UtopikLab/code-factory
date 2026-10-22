@@ -85,6 +85,127 @@ def issue_payload(repo="org/repo"):
     return {"name": "drain", "ref": "refs/heads/main", "payload": {"repo": repo, "issue_number": 2}}
 
 
+def test_app_tasks_refresh_without_persisted_installation_token(task_gateway, monkeypatch):
+    monkeypatch.setenv("GITHUB_AUTH_MODE", "github-app")
+    monkeypatch.setenv("MANAGEMENT_SERVICE_TOKEN", "test-token")
+    app = Mock()
+    app.policy.return_value = {"repository": "org/repo"}
+    app.mint.return_value = {"token": "ephemeral-installation-only", "expires_at": 9999999999, "repo": "org/repo"}
+    monkeypatch.setattr(server, "_github_app", lambda: app)
+    status, task = task_request("POST", "/api/v1/tasks/spawn", issue_payload())
+    assert status == 202
+    task_id = task["task_id"]
+    db = server._task_db()
+    row = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+    assert "ephemeral-installation-only" not in str(dict(row))
+    db.close()
+    stored = server._k8s_request("GET", server._secret_path("task-credential-" + task_id))
+    assert base64.b64decode(stored["data"]["repository-token"]) == b"github-app"
+    endpoint = "/api/v1/tasks/" + task_id + "/credentials"
+    assert task_request("POST", endpoint, {}, callback="wrong")[0] == 403
+    assert task_request("POST", endpoint, {})[0] == 200
+    app.mint.assert_called_with("org/repo", write=False)
+    app.mint.return_value["token"] = "renewed-installation"
+    assert task_request("POST", endpoint, {})[1]["token"] == "renewed-installation"
+    assert task_request("POST", "/api/v1/supervisor/tasks/" + task_id + "/credentials", {}, token="wrong")[0] == 401
+    assert task_request("POST", "/api/v1/supervisor/tasks/" + task_id + "/credentials", {}, token="supervisor-test-token")[0] == 200
+    app.mint.assert_called_with("org/repo", write=True)
+    assert task_request("POST", "/api/v1/tasks/" + task_id,
+                        {"task_id": task_id, "repo": "org/repo", "issue_number": 2, "status": "failed"})[0] == 200
+    assert task_request("POST", endpoint, {})[0] == 403
+
+
+def test_actions_retry_cannot_cross_repository(task_gateway, monkeypatch):
+    _, task = task_request("POST", "/api/v1/tasks/spawn", issue_payload())
+    monkeypatch.setenv("GITHUB_AUTH_MODE", "github-app")
+    monkeypatch.setattr(server.Handler, "_authorized", lambda handler: setattr(handler, "actions_repo", "other/repo") or True)
+    assert task_request("POST", "/api/v1/tasks/" + task["task_id"] + "/retry", {"retry_key": "run-1"})[0] == 403
+
+
+def test_app_chart_lint_render_and_schema(helm_values):
+    if not shutil.which("helm"):
+        pytest.skip("helm unavailable")
+    chart = Path(__file__).resolve().parents[2] / "helm/orchestrator"
+    values = {"credentials": {"internal": {"supervisorServiceToken": "independent-supervisor-test-only"}},
+              "githubAuth": {"mode": "github-app", "audience": "https://gateway.test/tasks", "appId": "12",
+              "privateKeySecret": {"name": "app-key", "key": "private-key.pem"},
+              "managementServiceSecret": {"name": "management-service", "key": "token"},
+              "repositories": [{"repository": "org/repo", "repository_id": "123", "repository_owner_id": "456",
+              "installation_id": "789", "bindings": [{"workflow_ref": "org/repo/.github/workflows/drain.yaml@refs/heads/main",
+              "ref": "refs/heads/main", "sub": "repo:org/repo:ref:refs/heads/main", "event_name": "issues"}]}]},
+              "management": {"enabled": True, "publicOrigin": "https://management.test",
+                             "admin": {"password": "independent-admin-test!"}}}
+    for mode_values in (helm_values, values):
+        lint = subprocess.run(["helm", "lint", str(chart), "--strict", "--values", "-"],
+                              input=yaml.safe_dump(mode_values), capture_output=True, text=True, check=False)
+        assert lint.returncode == 0, lint.stdout + lint.stderr
+    rendered = subprocess.run(["helm", "template", "app-check", str(chart), "--values", "-"],
+                              input=yaml.safe_dump(values), capture_output=True, text=True, check=True)
+    documents = [document for document in yaml.safe_load_all(rendered.stdout) if document]
+    deployments = {document["metadata"]["name"]: document for document in documents if document["kind"] == "Deployment"}
+    gateway = deployments["orchestrator-gateway"]["spec"]["template"]["spec"]
+    assert next(volume for volume in gateway["volumes"] if volume["name"] == "github-app-key")["secret"]["secretName"] == "app-key"
+    for name, deployment in deployments.items():
+        pod = deployment["spec"]["template"]["spec"]
+        if name != "orchestrator-gateway":
+            assert "app-key" not in json.dumps(pod)
+        for container in pod["containers"]:
+            environment = {item["name"]: item for item in container.get("env", [])}
+            assert "PR_GITHUB_TOKEN" not in environment
+            assert "CODEFACTORY_AUTH_TOKEN" not in environment
+    secrets = {document["metadata"]["name"] for document in documents if document["kind"] == "Secret"}
+    assert not secrets.intersection({"orchestrator-github-pr-auth", "orchestrator-gateway-auth", "orchestrator-management-repositories"})
+    role = next(document for document in documents if document["kind"] == "Role" and document["metadata"]["name"] == "orchestrator-supervisor")
+    assert next(rule for rule in role["rules"] if "configmaps" in rule["resources"])["verbs"] == ["get"]
+    for setting in ("githubAuth.audience=", "githubAuth.appId=", "githubAuth.repositories=[]",
+                    "githubAuth.privateKeySecret.name=", "githubAuth.managementServiceSecret.name="):
+        invalid = subprocess.run(["helm", "template", "app-check", str(chart), "--values", "-", "--set", setting],
+                                 input=yaml.safe_dump(values), capture_output=True, text=True, check=False)
+        assert invalid.returncode != 0
+
+
+def test_drain_workflow_uses_runner_oidc_without_pat(monkeypatch, tmp_path, capsys):
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/drain.yaml").read_text())
+    assert workflow["permissions"]["id-token"] == "write"
+    step = next(step for step in workflow["jobs"]["send-to-orchestrator"]["steps"] if step.get("shell") == "python")
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"repository": {"full_name": "org/repo"}, "issue": {"number": 2}}))
+    for key, value in {"CODEFACTORY_URL": "https://gateway.test", "CODEFACTORY_AUTH_MODE": "github-app",
+                       "CODEFACTORY_OIDC_AUDIENCE": "https://gateway.test/tasks", "GITHUB_EVENT_NAME": "issues",
+                       "GITHUB_EVENT_PATH": str(event), "GITHUB_REPOSITORY": "org/repo",
+                       "ACTIONS_ID_TOKEN_REQUEST_URL": "https://runner.actions.githubusercontent.com/token?api-version=2",
+                       "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "runner-test-only"}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("CODEFACTORY_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("REPO_GITHUB_PAT", raising=False)
+    requests = []
+
+    def opened(request, timeout):
+        requests.append(request)
+        response = Mock(status=200 if len(requests) == 1 else 202)
+        response.read.return_value = json.dumps({"value": "identity-test-only"} if len(requests) == 1 else
+                                                {"task_id": "issue-" + "a" * 32, "status": "queued"}).encode()
+        context = Mock()
+        context.__enter__ = Mock(return_value=response)
+        context.__exit__ = Mock(return_value=False)
+        return context
+
+    opener = Mock()
+    opener.open.side_effect = opened
+    monkeypatch.setattr(server.urllib.request, "build_opener", Mock(return_value=opener))
+    script = tmp_path / "intake.py"
+    script.write_text(step["run"])
+    runpy.run_path(str(script))
+    assert "audience=https%3A%2F%2Fgateway.test%2Ftasks" in requests[0].full_url
+    assert requests[0].get_header("Authorization") == "Bearer runner-test-only"
+    assert requests[1].get_header("Authorization") == "Bearer identity-test-only"
+    assert requests[1].get_header("X-repository-token") is None
+    output = capsys.readouterr()
+    assert "identity-test-only" not in output.out + output.err
+    assert "runner-test-only" not in output.out + output.err
+
+
 def test_task_list_is_bounded_filtered_and_sanitized(task_gateway):
     first = task_request("POST", "/api/v1/tasks/spawn", issue_payload())[1]["task_id"]
     second = task_request("POST", "/api/v1/tasks/spawn", issue_payload("org/other"))[1]["task_id"]
@@ -559,6 +680,7 @@ def test_task_callback_cannot_report_another_repository_task(task_gateway, monke
     ("https://intake.test\\other", False),
 ])
 def test_drain_workflow_credential_headers_and_https(monkeypatch, tmp_path, capsys, url, accepted):
+    monkeypatch.setenv("CODEFACTORY_AUTH_MODE", "legacy")
     monkeypatch.setenv("GITHUB_EVENT_NAME", "issues")
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load((root / ".github/workflows/drain.yaml").read_text())
@@ -601,7 +723,21 @@ def test_drain_workflow_credential_headers_and_https(monkeypatch, tmp_path, caps
 
 
 @pytest.mark.parametrize("status", [401, 403, 404, 409, 503])
-def test_drain_workflow_http_errors_report_only_status(monkeypatch, tmp_path, capsys, status):
+@pytest.mark.parametrize("response_body,detail", [
+    (b'{"error":"gateway-test-only repo-test-only"}', ""),
+    (b'{"error":"retry-already-created","task_id":"issue-' + b'a' * 32 + b'"}',
+     ": retry-already-created task_id=issue-" + "a" * 32),
+    (b'{"error":"retry-requires-failed-task"}', ": retry-requires-failed-task"),
+    (b'{"error":"retry-requires-lifecycle-sync"}', ": retry-requires-lifecycle-sync"),
+    (b'{"error":"issue-task-active"}', ": issue-task-active"),
+    (b'{"status":"failed","replayed":true}', ": failed-task-replay"),
+    (b'{"error":[],"task_id":"repo-test-only"}', ""),
+    (b'[]', ""),
+    (b'not json gateway-test-only', ""),
+    (b'x' * 1048577, ""),
+])
+def test_drain_workflow_http_errors_report_only_safe_details(monkeypatch, tmp_path, capsys, status, response_body, detail):
+    monkeypatch.setenv("CODEFACTORY_AUTH_MODE", "legacy")
     monkeypatch.setenv("GITHUB_EVENT_NAME", "issues")
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load((root / ".github/workflows/drain.yaml").read_text())
@@ -616,7 +752,7 @@ def test_drain_workflow_http_errors_report_only_status(monkeypatch, tmp_path, ca
         "GITHUB_REPOSITORY": "org/repo",
     }.items():
         monkeypatch.setenv(key, value)
-    body = io.BytesIO(b'{"error":"gateway-test-only repo-test-only"}')
+    body = io.BytesIO(response_body)
     error = server.urllib.error.HTTPError(
         "https://intake.test", status, "gateway-test-only", {"X-Secret": "repo-test-only"}, body,
     )
@@ -627,14 +763,15 @@ def test_drain_workflow_http_errors_report_only_status(monkeypatch, tmp_path, ca
     script_file.write_text(step["run"])
     with pytest.raises(SystemExit) as raised:
         runpy.run_path(str(script_file))
-    assert str(raised.value) == f"Task intake failed: HTTP {status}"
+    assert str(raised.value) == f"Task intake failed: HTTP {status}" + (detail if status == 409 else "")
     output = capsys.readouterr()
     assert output.out == output.err == ""
-    assert body.tell() == 0
+    assert body.tell() == (min(len(response_body), 1048577) if status == 409 else 0)
 
 
 @pytest.mark.parametrize("task_id,valid", [("issue-" + "a" * 32, True), ("../../another/path", False), ("", False)])
 def test_drain_manual_retry_uses_stable_run_key(monkeypatch, tmp_path, task_id, valid):
+    monkeypatch.setenv("CODEFACTORY_AUTH_MODE", "legacy")
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load((root / ".github/workflows/drain.yaml").read_text())
     step = next(step for step in workflow["jobs"]["send-to-orchestrator"]["steps"] if step.get("shell") == "python")

@@ -78,6 +78,19 @@ def create_app(settings=None, transport=None, signing_keys=None):
         return response
 
     def repositories():
+        if settings.get("GITHUB_AUTH_MODE", "legacy") == "github-app":
+            try:
+                policies = json.loads(settings.get("GITHUB_REPOSITORY_POLICIES", "[]"))
+                if not isinstance(policies, list) or not policies:
+                    raise ValueError()
+                names = [policy["repository"] for policy in policies]
+                if any(not isinstance(repo, str) or not REPOSITORY.fullmatch(repo) for repo in names):
+                    raise ValueError()
+                return dict.fromkeys(names)
+            except (ValueError, KeyError, TypeError):
+                raise HTTPException(503, "repository-policy-not-configured") from None
+        if settings.get("GITHUB_AUTH_MODE", "legacy") != "legacy":
+            raise HTTPException(503, "repository-policy-not-configured")
         if not settings.get("MANAGEMENT_REPOSITORIES_FILE"):
             return {}
         try:
@@ -94,7 +107,7 @@ def create_app(settings=None, transport=None, signing_keys=None):
 
     async def gateway(method, path, *, params=None, payload=None, repository_token=None):
         base = settings.get("MANAGEMENT_GATEWAY_URL", "")
-        token = settings.get("CODEFACTORY_AUTH_TOKEN", "")
+        token = settings.get("MANAGEMENT_SERVICE_TOKEN" if settings.get("GITHUB_AUTH_MODE") == "github-app" else "CODEFACTORY_AUTH_TOKEN", "")
         parsed = urlsplit(base)
         local = parsed.hostname in ("127.0.0.1", "localhost", "::1")
         if (not token or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment

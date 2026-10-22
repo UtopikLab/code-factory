@@ -34,6 +34,58 @@ def gateway_auth(monkeypatch):
     monkeypatch.delenv("JUDGE_NATIVE_DOWNLOAD", raising=False)
 
 
+def test_app_repository_credentials_refresh_and_stay_read_only(monkeypatch):
+    monkeypatch.setenv("REPO_GITHUB_PAT", "github-app")
+    monkeypatch.setenv("TASK_REPOSITORY", "org/repo")
+    monkeypatch.setenv("ASSIGNED_TASK_ID", "task-123")
+    monkeypatch.setenv("ACCEPTOR_URL", "https://gateway.test")
+    now = [1000]
+    monkeypatch.setattr(worker.time, "time", lambda: now[0])
+    refreshes = []
+
+    def transport(request):
+        if request.url.host == "gateway.test":
+            assert request.headers["X-Task-Token"] == "callback-test-secret"
+            assert "Authorization" not in request.headers
+            refreshes.append(request)
+            return httpx.Response(200, json={"repo": "org/repo", "token": "renewal-" + str(len(refreshes)),
+                                             "expires_at": now[0] + 3600})
+        assert request.headers["Authorization"] == "Bearer renewal-" + str(len(refreshes))
+        return httpx.Response(200, json={"ok": True})
+
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            github = worker.GitHub(client, "org/repo")
+            await github.call("GET", "/contents")
+            await github.call("GET", "/contents")
+            assert len(refreshes) == 1
+            now[0] += 3550
+            await github.call("GET", "/contents")
+            assert len(refreshes) == 2
+            with pytest.raises(worker.TaskFailure, match="read-only"):
+                await github.call("POST", "/contents")
+    asyncio.run(check())
+
+
+def test_app_broker_redirect_is_not_followed(monkeypatch):
+    monkeypatch.setenv("REPO_GITHUB_PAT", "github-app")
+    monkeypatch.setenv("TASK_REPOSITORY", "org/repo")
+    monkeypatch.setenv("ASSIGNED_TASK_ID", "task-123")
+    monkeypatch.setenv("ACCEPTOR_URL", "https://gateway.test")
+    calls = []
+
+    def transport(request):
+        calls.append(request)
+        return httpx.Response(307, headers={"Location": "https://attacker.test"})
+
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            with pytest.raises(worker.TaskFailure, match="^repository-broker-unavailable$"):
+                await worker.GitHub(client, "org/repo").call("GET", "/contents")
+    asyncio.run(check())
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("initial", [None, "incomplete", "downloading", "unloaded", "loaded"])
 def test_native_model_preparation(monkeypatch, initial):
     model = "owner/new-model-GGUF:Q4_K_M"

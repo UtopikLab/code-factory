@@ -6,9 +6,47 @@ import difflib
 import json
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 from pathlib import PurePosixPath
+
+
+class AppGitHub:
+    def __init__(self, task, runtime, github_request, opener):
+        self.task, self.runtime = task, runtime or {}
+        self.github_request, self.opener = github_request, opener
+        self.token, self.expires_at = "", 0
+
+    def __call__(self, method, repo, path, body=None):
+        if repo.lower() != self.task["repo"].lower():
+            raise RuntimeError("repository-mismatch")
+        if self.expires_at <= time.time() + 60:
+            self.refresh()
+        return self.github_request(method, repo, path, body, token=self.token)
+
+    def refresh(self):
+        try:
+            base = self.runtime.get("acceptor_url", os.environ.get("ACCEPTOR_URL", ""))
+            token = os.environ.get("SUPERVISOR_AUTH_TOKEN", "")
+            if not base.startswith("https://") or not token:
+                raise ValueError()
+            request = urllib.request.Request(base.rstrip("/") + "/api/v1/supervisor/tasks/" + self.task["task_id"] + "/credentials",
+                                             data=b"{}", method="POST", headers={"Authorization": "token " + token,
+                                             "Content-Type": "application/json"})
+            with self.opener.open(request, timeout=30) as response:
+                raw = response.read(8193)
+                if response.status != 200 or len(raw) > 8192:
+                    raise ValueError()
+                credential = json.loads(raw)
+            token, expires = credential["token"], credential["expires_at"]
+            if (credential["repo"].lower() != self.task["repo"].lower() or not isinstance(token, str) or not token
+                    or len(token) > 4096 or any(char.isspace() for char in token)
+                    or not time.time() + 60 < expires <= time.time() + 3660):
+                raise ValueError()
+            self.token, self.expires_at = token, expires
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            raise RuntimeError("github-app-broker-unavailable") from None
 
 
 def verified_candidate_patch(task, candidate, github_request):

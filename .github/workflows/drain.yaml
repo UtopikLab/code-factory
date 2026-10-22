@@ -11,6 +11,7 @@ on:
         type: string
 
 permissions:
+  id-token: write
   contents: read
   issues: read
 
@@ -40,6 +41,8 @@ jobs:
         if: steps.issue-state.outputs.skip != 'true'
         env:
           CODEFACTORY_URL: ${{ secrets.CODEFACTORY_URL }}
+          CODEFACTORY_AUTH_MODE: ${{ vars.CODEFACTORY_AUTH_MODE || 'legacy' }}
+          CODEFACTORY_OIDC_AUDIENCE: ${{ vars.CODEFACTORY_OIDC_AUDIENCE }}
           CODEFACTORY_AUTH_TOKEN: ${{ secrets.CODEFACTORY_AUTH_TOKEN }}
           REPO_GITHUB_PAT: ${{ secrets.REPO_GITHUB_PAT }}
           RETRY_TASK_ID: ${{ inputs.retry_task_id }}
@@ -50,18 +53,21 @@ jobs:
           import re
           import urllib.error
           import urllib.request
-          from urllib.parse import urlsplit
+          from urllib.parse import parse_qsl, urlencode, urlsplit
 
           url = os.environ["CODEFACTORY_URL"]
-          gateway_token = os.environ["CODEFACTORY_AUTH_TOKEN"]
-          repository_token = os.environ["REPO_GITHUB_PAT"]
+          gateway_token = os.environ.get("CODEFACTORY_AUTH_TOKEN", "")
+          repository_token = os.environ.get("REPO_GITHUB_PAT", "")
+          auth_mode = os.environ.get("CODEFACTORY_AUTH_MODE", "legacy")
           parsed = urlsplit(url)
           if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
                   or parsed.query or parsed.fragment or parsed.path not in ("", "/")
                   or "\\" in url or any(ord(character) <= 32 for character in url)):
               raise SystemExit("CODEFACTORY_URL must be an HTTPS base URL without a path, query or fragment")
           url = parsed._replace(path="/api/v1/tasks/spawn").geturl()
-          if not gateway_token or not repository_token or gateway_token == repository_token:
+          if auth_mode not in ("legacy", "github-app"):
+              raise SystemExit("Unsupported CODEFACTORY_AUTH_MODE")
+          if auth_mode == "legacy" and (not gateway_token or not repository_token or gateway_token == repository_token):
               raise SystemExit("Distinct gateway and source-repository secrets are required")
           with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as event_file:
               event = json.load(event_file)
@@ -82,11 +88,33 @@ jobs:
               def redirect_request(self, req, fp, code, msg, headers, newurl):
                   raise ValueError("Intake redirect rejected")
 
-          request = urllib.request.Request(url, method="POST", data=json.dumps(payload).encode(), headers={
-              "Authorization": "token " + gateway_token,
-              "X-Repository-Token": repository_token,
-              "Content-Type": "application/json",
-          })
+          headers = {"Content-Type": "application/json"}
+          if auth_mode == "github-app":
+              try:
+                  audience = os.environ["CODEFACTORY_OIDC_AUDIENCE"]
+                  identity_url = urlsplit(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"])
+                  runner_token = os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+                  if (not audience or not runner_token or identity_url.scheme != "https"
+                          or not identity_url.hostname or not identity_url.hostname.endswith(".actions.githubusercontent.com")
+                          or identity_url.username or identity_url.password or identity_url.fragment
+                          or identity_url.port not in (None, 443)):
+                      raise ValueError()
+                  query = [(key, value) for key, value in parse_qsl(identity_url.query) if key != "audience"]
+                  identity_url = identity_url._replace(query=urlencode(query + [("audience", audience)])).geturl()
+                  identity_request = urllib.request.Request(identity_url, headers={"Authorization": "Bearer " + runner_token})
+                  with urllib.request.build_opener(NoRedirect()).open(identity_request, timeout=15) as response:
+                      raw = response.read(32769)
+                      if response.status != 200 or len(raw) > 32768:
+                          raise ValueError()
+                      identity_token = json.loads(raw)["value"]
+                  if not isinstance(identity_token, str) or not identity_token or len(identity_token) > 16384 or any(character.isspace() for character in identity_token):
+                      raise ValueError()
+                  headers["Authorization"] = "Bearer " + identity_token
+              except (KeyError, OSError, ValueError, TypeError, AttributeError):
+                  raise SystemExit("GitHub Actions identity unavailable") from None
+          else:
+              headers.update({"Authorization": "token " + gateway_token, "X-Repository-Token": repository_token})
+          request = urllib.request.Request(url, method="POST", data=json.dumps(payload).encode(), headers=headers)
           try:
               with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
                   raw = response.read(1048577)
@@ -97,7 +125,27 @@ jobs:
                   if not re.fullmatch(r"issue-[a-f0-9]{32}", task_id) or result.get("status") not in ("queued", "running", "completed"):
                       raise ValueError("Invalid task acknowledgement")
           except urllib.error.HTTPError as error:
-              raise SystemExit("Task intake failed: HTTP " + str(error.code)) from None
+              message = "Task intake failed: HTTP " + str(error.code)
+              if error.code == 409:
+                try:
+                  raw = error.read(1048577)
+                  conflict = json.loads(raw) if len(raw) <= 1048576 else {}
+                  reasons = {
+                    "retry-already-created", "retry-requires-failed-task",
+                    "retry-requires-lifecycle-sync", "issue-task-active",
+                  }
+                  if isinstance(conflict, dict):
+                    reason = conflict.get("error")
+                    if isinstance(reason, str) and reason in reasons:
+                      message += ": " + reason
+                    elif conflict.get("status") == "failed" and conflict.get("replayed") is True:
+                      message += ": failed-task-replay"
+                    conflict_task = conflict.get("task_id")
+                    if isinstance(conflict_task, str) and re.fullmatch(r"issue-[a-f0-9]{32}", conflict_task):
+                      message += " task_id=" + conflict_task
+                except (OSError, ValueError, TypeError):
+                  pass
+              raise SystemExit(message) from None
           except (OSError, ValueError, TypeError, AttributeError):
               raise SystemExit("Task intake failed; check transport, access and gateway task state") from None
           print("Task accepted: " + task_id)

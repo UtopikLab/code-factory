@@ -6,7 +6,108 @@ through a separately authorized process, audit its consumers and activity, and
 replace each consumer with a credential for its actual purpose. Do not reuse it
 for migration. The local private file is renamed without changing its contents.
 
-## Three Independent Credentials
+## Optional GitHub Actions OIDC And GitHub App Mode
+
+The default remains `githubAuth.mode: legacy`. The PAT-based sections below
+describe that mode. Explicitly selecting `github-app` replaces source-repository
+PATs and shared workflow gateway tokens with Actions identity at submission and
+renewable, repository-scoped installation tokens for execution. It does not
+replace GHCR image credentials, model credentials, supervisor internal auth, or
+management's existing admin/OIDC login. No external setup or live App verification
+has been performed by this implementation.
+
+Before a separately authorized rollout, an operator must:
+
+1. Create a GitHub App with repository Contents and Pull requests read/write and
+    Issues read permissions (Metadata read is implicit). Install it using **Only
+    select repositories** on each authorized owner; all-repository installations
+    are intentionally rejected. Organization approval and branch rules still apply.
+2. Provision the App PEM private key in a separately managed Kubernetes Secret in
+    the orchestrator namespace. Configure only its name/key below, never the PEM
+    in tracked values. Only the gateway mounts this Secret; neither management,
+    supervisor, workers, nor task records receive the private key. Restrict Secret
+    RBAC, backups, and namespace workload creation; enable encryption at rest.
+3. Obtain and independently verify the immutable repository ID, owner ID, App ID,
+    and installation ID. Configure exact trusted branch/workflow/subject/event
+    tuples. Do not trust a repository solely because GitHub signed its JWT.
+4. For management, provision a separate random service-token Secret shared only
+    by management and gateway, at least 32 characters with no whitespace and
+    distinct from gateway/supervisor credentials. Preserve the existing management
+    login configuration. Leave `management.repositories: {}` in App mode.
+5. In each source repository configure `CODEFACTORY_URL` as its HTTPS gateway
+    base URL, repository variable `CODEFACTORY_AUTH_MODE=github-app`, and variable
+    `CODEFACTORY_OIDC_AUDIENCE` exactly matching the gateway audience. Install the
+    canonical drain workflow through a separately authorized change. App mode
+    needs neither `REPO_GITHUB_PAT` nor `CODEFACTORY_AUTH_TOKEN`; legacy secrets
+    are not used as fallback if OIDC fails. Workflow `id-token: write` is required.
+
+Example nonsecret orchestrator override (replace all example IDs and names):
+
+```yaml
+githubAuth:
+   mode: github-app
+   audience: https://gateway.example.com/tasks
+   appId: "100001"
+   privateKeySecret:
+      name: code-factory-github-app
+      key: private-key.pem
+   managementServiceSecret:
+      name: code-factory-management-service
+      key: token
+   repositories:
+      - repository: owner/repository
+         repository_id: "100002"
+         repository_owner_id: "100003"
+         installation_id: "100004"
+         bindings:
+            - workflow_ref: owner/repository/.github/workflows/drain.yaml@refs/heads/main
+               ref: refs/heads/main
+               sub: repo:owner/repository:ref:refs/heads/main
+               event_name: issues
+            - workflow_ref: owner/repository/.github/workflows/drain.yaml@refs/heads/main
+               ref: refs/heads/main
+               sub: repo:owner/repository:ref:refs/heads/main
+               event_name: workflow_dispatch
+management:
+   repositories: {}
+```
+
+Retain the independent `credentials.internal.supervisorServiceToken` and existing
+model/registry configuration. Gateway and PR PAT values are not required or
+mounted in App mode. The management-service Secret is required only if management
+is enabled. Existing PAT-backed queued tasks are not migrated by switching modes;
+plan their completion or migration separately, without automatic retries.
+
+The gateway verifies RS256 signatures using PyJWT/cryptography against the fixed
+GitHub issuer and fixed JWKS URL, with a five-minute key cache and no redirect or
+token-directed key lookup. Audience, required integer time claims, a maximum
+ten-minute token lifetime, immutable IDs, and an exact configured
+`workflow_ref`/`ref`/`sub`/event tuple must all match. Fork/PR/environment subjects
+are not accepted by these branch-only policies. Protect trusted branches and
+workflow changes; anyone allowed to execute the trusted workflow can submit work
+for its configured repository. Retry authorization is bound to the original stored
+repository, with existing retry/deduplication semantics retained.
+
+Task Secrets contain an App-mode marker and a task callback credential, not an
+installation token. Delayed workers request fresh read-only tokens using that
+task credential; supervisor publication uses its separate internal credential for
+write-scoped tokens. Both renew in memory before expiration. The gateway checks
+the active task, stored repository, retained Secret UID, policy, installation
+owner/App identity, exact repository grant, and returned permissions. Completed,
+failed, or cleaned-up tasks cannot renew. Already-issued installation tokens can
+remain valid until their GitHub expiry; cleanup is not remote token revocation.
+Workers remain read-only and cannot request supervisor write grants.
+
+Verified HTTPS connectivity is required from workflows, workers, and supervisor
+to the gateway and from the control plane to GitHub identity/API endpoints.
+Continue enforcing the TLS edge and backend isolation described below. The chart
+does not install network isolation or externally create/install the App. Catalog
+and runtime hashes, pinned worker configuration, and namespace-scoped get-only
+catalog RBAC remain unchanged. Offline signed-JWT, mocked App/broker, and Helm
+checks do not establish live installation permissions, TLS reachability, or
+successful end-to-end PR publication.
+
+## Three Independent Credentials (Legacy Mode)
 
 | Purpose | Source | Consumers |
 |---|---|---|

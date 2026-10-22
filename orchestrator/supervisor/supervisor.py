@@ -97,8 +97,8 @@ def _dispatch_task(task, runtime):
     return _runtime_dispatch_task(task, runtime, _k8s_request)
 
 
-def _github_request(method: str, repo: str, path: str, body: dict | None = None):
-    token = os.environ.get("PR_GITHUB_TOKEN", "")
+def _github_request(method: str, repo: str, path: str, body: dict | None = None, *, token=None):
+    token = os.environ.get("PR_GITHUB_TOKEN", "") if token is None else token
     if not token:
         raise RuntimeError("pr-publication-credential-required")
     request = urllib.request.Request("https://api.github.com/repos/" + repo + path,
@@ -125,7 +125,17 @@ class RejectRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _verified_candidate_patch(task, candidate):
-    return _candidate_workflow.verified_candidate_patch(task, candidate, _github_request)
+    return _candidate_workflow.verified_candidate_patch(task, candidate, _task_github(task))
+
+
+def _task_github(task, runtime=None):
+    try:
+        payload = task["payload"]
+    except (KeyError, IndexError):
+        return _github_request
+    if json.loads(payload).get("repository_auth") != "github-app":
+        return _github_request
+    return _candidate_workflow.AppGitHub(task, runtime, _github_request, urllib.request.build_opener(RejectRedirect()))
 
 
 async def _judge_candidate(task, candidate, runtime=None):
@@ -137,7 +147,7 @@ async def _plan_task(task, catalog, runtime=None):
 
 
 def _publish_candidate(task, candidate, runtime=None):
-    return _candidate_workflow.publish_candidate(task, candidate, runtime, _github_request)
+    return _candidate_workflow.publish_candidate(task, candidate, runtime, _task_github(task, runtime))
 
 
 def _complete_via_gateway(task_id: str, status: str, runtime=None, **details):

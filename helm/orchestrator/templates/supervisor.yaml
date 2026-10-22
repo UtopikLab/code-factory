@@ -113,11 +113,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "orchestrator.supervisorSecretName" . }}
                   key: supervisor-auth-token
+            {{- if eq .Values.githubAuth.mode "legacy" }}
             - name: PR_GITHUB_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "orchestrator.pullRequestSecretName" . }}
                   key: pr-github-token
+                {{- end }}
             - name: WORKER_JOB_TEMPLATE
               value: {{ printf "%s-worker" .Chart.Name | quote }}
             - name: TASK_JOB_TTL_SECONDS_AFTER_FINISHED
