@@ -18,8 +18,8 @@ beforeEach(() => {
         calls.push([url, options])
         const body = url.endsWith('/github/session') ? { connected, configured: true }
             : url.endsWith('/session') ? { subject: 'operator' } : url.endsWith('/repositories') ? { repositories }
-            : options?.method === 'POST' ? task : url.includes('/tasks/task-1') ? { ...task, status: 'completed', pr_url: 'https://github.com/org/repo/pull/8' }
-                : url.includes('/config') ? { version: '1', hash: 'abc', models: [{ role: 'coder', model: 'verified-model', native_download: true, availability: 'unknown' }], agents: [] } : taskResponse
+                : options?.method === 'POST' ? task : url.includes('/tasks/task-1') ? { ...task, status: 'completed', pr_url: 'https://github.com/org/repo/pull/8' }
+                    : url.includes('/config') ? { version: '1', hash: 'abc', models: [{ role: 'coder', model: 'verified-model', native_download: true, availability: 'unknown' }], agents: [] } : taskResponse
         return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
     }))
 })

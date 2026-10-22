@@ -22,7 +22,7 @@ githubAuth:
   workflowPolicy:
     ref: refs/heads/main
     workflow: .github/workflows/drain.yaml
-    events: [issues, workflow_dispatch]
+    events: [ issues, workflow_dispatch ]
   repositories: []
 
 # Set raw values OR external Secret references in helm/local.secrets-values.yaml.

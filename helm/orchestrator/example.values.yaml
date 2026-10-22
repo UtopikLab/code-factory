@@ -7,7 +7,7 @@ githubAuth:
   workflowPolicy:
     ref: refs/heads/main
     workflow: .github/workflows/drain.yaml
-    events: [issues, workflow_dispatch]
+    events: [ issues, workflow_dispatch ]
   repositories: []
 
 gateway:
@@ -16,7 +16,7 @@ gateway:
     tlsTermination: external
     host: code-factory.local
     tlsSecretName: ""
-    
+
 supervisor:
   config:
     acceptor-url: https://gateway.example.com
