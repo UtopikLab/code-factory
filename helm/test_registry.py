@@ -15,11 +15,10 @@ USERNAME = "registry-test-user"
 TOKEN = 'registry-test-sentinel-"\\-only'
 AUTH_CREDENTIALS = {
     "internal": {
-        "gatewayClientToken": "gateway-test-sentinel-at-least-32-characters",
         "supervisorServiceToken": "supervisor-test-sentinel",
     },
-    "github": {"pullRequestPat": "pr-test-sentinel"},
 }
+APP_VALUES = yaml.safe_load((HELM_DIR / "orchestrator/example.values.yaml").read_text())["githubAuth"]
 
 
 class RegistryValuesTests(unittest.TestCase):
@@ -143,6 +142,8 @@ class RegistryValuesTests(unittest.TestCase):
 
     def render(self, chart, values, provide_auth=True):
         values = json.loads(json.dumps(values))
+        if chart == "orchestrator":
+            values.setdefault("githubAuth", APP_VALUES)
         if chart == "orchestrator" and provide_auth:
             credentials = values.setdefault("credentials", {})
             for group, defaults in AUTH_CREDENTIALS.items():
@@ -275,12 +276,10 @@ class RegistryValuesTests(unittest.TestCase):
             "registry": {"create": True, "username": USERNAME},
             "credentials": {
                 "internal": {
-                    "gatewayClientToken": "gateway-shared-dummy-token-32-characters",
                     "supervisorServiceToken": "supervisor-shared-dummy",
                 },
                 "github": {
                     "ghcrReadPackagesPat": "ghcr-shared-dummy",
-                    "pullRequestPat": "pr-shared-dummy",
                 },
                 "models": {
                     "openaiApiKey": "openai-shared-dummy",
@@ -296,12 +295,10 @@ class RegistryValuesTests(unittest.TestCase):
     def test_grouped_credentials_route_to_expected_consumers(self):
         credentials = {
             "internal": {
-                "gatewayClientToken": "gateway-grouped-sentinel-token-32-characters",
                 "supervisorServiceToken": "supervisor-grouped-sentinel",
             },
             "github": {
                 "ghcrReadPackagesPat": "ghcr-grouped-sentinel",
-                "pullRequestPat": "pr-grouped-sentinel",
             },
             "models": {
                 "openaiApiKey": "openai-grouped-sentinel",
@@ -316,14 +313,11 @@ class RegistryValuesTests(unittest.TestCase):
                    if document["kind"] == "Secret"}
         self.assertEqual(set(secrets), {
             "orchestrator-openai-model-auth", "orchestrator-supervisor-service-auth",
-            "orchestrator-github-pr-auth", "orchestrator-gateway-auth",
             "orchestrator-coder-model-auth", "ghcr-read-packages-pull-secret",
         })
         for name, key in (
             ("orchestrator-openai-model-auth", "openai-api-key"),
             ("orchestrator-supervisor-service-auth", "supervisor-auth-token"),
-            ("orchestrator-github-pr-auth", "pr-github-token"),
-            ("orchestrator-gateway-auth", "gateway-auth-token"),
             ("orchestrator-coder-model-auth", "coder-api-key"),
         ):
             self.assertEqual(set(secrets[name]["data"]), {key})
@@ -331,8 +325,6 @@ class RegistryValuesTests(unittest.TestCase):
                          "openai-grouped-sentinel")
         self.assertEqual(base64.b64decode(secrets["orchestrator-supervisor-service-auth"]["data"]["supervisor-auth-token"]).decode(),
                          "supervisor-grouped-sentinel")
-        self.assertEqual(base64.b64decode(secrets["orchestrator-github-pr-auth"]["data"]["pr-github-token"]).decode(),
-                         "pr-grouped-sentinel")
         self.assertEqual(base64.b64decode(secrets["orchestrator-coder-model-auth"]["data"]["coder-api-key"]).decode(),
                          "coder-grouped-sentinel")
         docker_config = json.loads(base64.b64decode(secrets["ghcr-read-packages-pull-secret"]["data"][".dockerconfigjson"]))
@@ -341,11 +333,8 @@ class RegistryValuesTests(unittest.TestCase):
         gateway = next(document for document in documents if document["kind"] == "Deployment"
                        and document["metadata"]["name"] == "orchestrator-gateway")
         gateway_env = {entry["name"]: entry for entry in gateway["spec"]["template"]["spec"]["containers"][0]["env"]}
-        self.assertEqual(gateway_env["CODEFACTORY_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"], {
-            "name": "orchestrator-gateway-auth", "key": "gateway-auth-token",
-        })
-        self.assertEqual(base64.b64decode(secrets["orchestrator-gateway-auth"]["data"]["gateway-auth-token"]).decode(),
-                         "gateway-grouped-sentinel-token-32-characters")
+        self.assertNotIn("CODEFACTORY_AUTH_TOKEN", gateway_env)
+        self.assertEqual(gateway_env["GITHUB_APP_ID"]["value"], APP_VALUES["appId"])
         self.assertEqual(gateway_env["SUPERVISOR_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"], {
             "name": "orchestrator-supervisor-service-auth", "key": "supervisor-auth-token",
         })
@@ -356,7 +345,6 @@ class RegistryValuesTests(unittest.TestCase):
         for name, secret_name, key in (
             ("OPENAI_API_KEY", "orchestrator-openai-model-auth", "openai-api-key"),
             ("SUPERVISOR_AUTH_TOKEN", "orchestrator-supervisor-service-auth", "supervisor-auth-token"),
-            ("PR_GITHUB_TOKEN", "orchestrator-github-pr-auth", "pr-github-token"),
         ):
             self.assertEqual(supervisor_env[name]["valueFrom"]["secretKeyRef"], {
                 "name": secret_name, "key": key,
@@ -372,7 +360,7 @@ class RegistryValuesTests(unittest.TestCase):
         credentials = yaml.safe_load((HELM_DIR / "example.secrets-values.yaml").read_text())
         self.assertEqual(set(credentials), {"credentials", "management"})
         self.assertEqual(set(credentials["credentials"]), {"internal", "github", "models"})
-        self.assertEqual(set(credentials["management"]), {"admin", "repositories", "oidc"})
+        self.assertEqual(set(credentials["management"]), {"admin", "oidc"})
         self.assertNotIn("createSecret", str(credentials))
         self.assertNotIn("existingSecret", str(credentials))
 
@@ -389,12 +377,10 @@ class RegistryValuesTests(unittest.TestCase):
             (HELM_DIR / "orchestrator/example.values.yaml").read_text())
         secret_values = {"credentials": {
             "internal": {
-                "gatewayClientToken": "gateway-layered-dummy-token-at-least-32-chars",
                 "supervisorServiceToken": "supervisor-layered-dummy",
             },
             "github": {
                 "ghcrReadPackagesPat": "ghcr-layered-dummy",
-                "pullRequestPat": "pr-layered-dummy",
             },
             "models": {
                 "openaiApiKey": "openai-layered-dummy",
@@ -439,7 +425,6 @@ class RegistryValuesTests(unittest.TestCase):
                                if document["kind"] == "Secret"}
                     self.assertEqual(set(secrets), {
                         "orchestrator-openai-model-auth", "orchestrator-supervisor-service-auth",
-                        "orchestrator-github-pr-auth", "orchestrator-gateway-auth",
                         "orchestrator-coder-model-auth",
                         "ghcr-read-packages-pull-secret",
                     })
@@ -447,9 +432,7 @@ class RegistryValuesTests(unittest.TestCase):
                                    and document["metadata"]["name"] == "orchestrator-gateway")
                     gateway_env = {entry["name"]: entry for entry in
                                    gateway["spec"]["template"]["spec"]["containers"][0]["env"]}
-                    self.assertEqual(gateway_env["CODEFACTORY_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"], {
-                        "name": "orchestrator-gateway-auth", "key": "gateway-auth-token",
-                    })
+                    self.assertNotIn("CODEFACTORY_AUTH_TOKEN", gateway_env)
                     supervisor = next(document for document in documents if document["kind"] == "Deployment"
                                       and document["metadata"]["name"] == "orchestrator-supervisor")
                     supervisor_env = {entry["name"]: entry for entry in
@@ -470,7 +453,7 @@ class RegistryValuesTests(unittest.TestCase):
             command.extend(("--values", "-"))
         for path in value_files:
             command.extend(("--values", str(path)))
-        result = subprocess.run(command, input=yaml.safe_dump({"credentials": AUTH_CREDENTIALS}),
+        result = subprocess.run(command, input=yaml.safe_dump({"credentials": AUTH_CREDENTIALS, "githubAuth": APP_VALUES}),
                                 text=True, capture_output=True, check=False)
         self.assertEqual(result.returncode, 0, "Layered dummy Helm render failed")
         return [document for document in yaml.safe_load_all(result.stdout) if document]
@@ -482,6 +465,11 @@ class RegistryValuesTests(unittest.TestCase):
             {"supervisor": {"auth": {"supervisor-auth-token": "old-service-token"}}},
             {"supervisor": {"auth": {"pr-github-token": "old-pr-token"}}},
             {"supervisor": {"config": {"openai-api-key": "old-model-key"}}},
+            {"githubAuth": {**APP_VALUES, "mode": "github-app"}},
+            {"githubAuth": {**APP_VALUES, "mode": "legacy"}},
+            {"credentials": {"internal": {"gatewayClientToken": "old-token"}}},
+            {"credentials": {"github": {"pullRequestPat": "old-token"}}},
+            {"management": {"repositories": {}}},
         )
         for values in legacy_values:
             with self.subTest(values=values):
@@ -540,8 +528,7 @@ class RegistryValuesTests(unittest.TestCase):
         secrets = {document["metadata"]["name"]: document for document in documents
                    if document["kind"] == "Secret"}
         self.assertEqual(set(secrets), {
-            "orchestrator-gateway-auth", "orchestrator-supervisor-service-auth",
-            "orchestrator-github-pr-auth", "orchestrator-coder-model-auth",
+            "orchestrator-supervisor-service-auth", "orchestrator-coder-model-auth",
             "orchestrator-openai-model-auth",
         })
         for name, key in (("orchestrator-coder-model-auth", "coder-api-key"),
@@ -575,7 +562,7 @@ class RegistryValuesTests(unittest.TestCase):
                     self.assertFalse(any(document.get("type") == "kubernetes.io/dockerconfigjson"
                                          for document in documents))
                     self.assertEqual(any(document["kind"] == "Secret" and
-                                         document["metadata"]["name"] == "orchestrator-gateway-auth"
+                                         document["metadata"]["name"] == "orchestrator-supervisor-service-auth"
                                          for document in documents), chart == "orchestrator")
                     for document in documents:
                         if document["kind"] in ("Deployment", "Job"):
@@ -612,18 +599,22 @@ class RegistryValuesTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("requires", result.stderr)
 
-    def test_gateway_file_token_remains_separate(self):
-        gateway_token = "gateway-only-sentinel-independent-32-characters"
+    def test_management_service_token_remains_separate(self):
         documents = self.documents("orchestrator", {
+            "management": {"enabled": True, "publicOrigin": "https://management.test",
+                           "admin": {"password": "independent-admin-test!"}},
             "credentials": {
-                "internal": {"gatewayClientToken": gateway_token},
                 "models": {"openaiApiKey": "model-key-sentinel"},
             },
         })
         secrets = {document["metadata"]["name"]: document for document in documents
                    if document["kind"] == "Secret"}
-        token = secrets["orchestrator-gateway-auth"]["data"]["gateway-auth-token"]
-        self.assertEqual(base64.b64decode(token).decode(), gateway_token)
+        self.assertNotIn("orchestrator-gateway-auth", secrets)
+        for deployment in (document for document in documents if document["kind"] == "Deployment"
+                   and document["metadata"]["name"] in ("orchestrator-gateway", "orchestrator-management")):
+            environment = {entry["name"]: entry for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+            self.assertEqual(environment["MANAGEMENT_SERVICE_TOKEN"]["valueFrom"]["secretKeyRef"],
+                     {"name": APP_VALUES["managementServiceSecret"]["name"], "key": "token"})
         model_key = secrets["orchestrator-openai-model-auth"]["data"]["openai-api-key"]
         self.assertEqual(base64.b64decode(model_key).decode(), "model-key-sentinel")
         result = self.render("orchestrator", {
@@ -644,10 +635,8 @@ class RegistryValuesTests(unittest.TestCase):
         self.assertEqual(values["management"]["ingress"]["host"], "management.example.com")
         values["credentials"] = {
             "internal": {
-                "gatewayClientToken": "gateway-proxy-example-dummy-token-32-chars",
                 "supervisorServiceToken": "supervisor-proxy-example-dummy",
             },
-            "github": {"pullRequestPat": "pr-proxy-example-dummy"},
         }
         documents = self.documents("orchestrator", values)
         ingress = next(document for document in documents if document["kind"] == "Ingress")
@@ -663,7 +652,6 @@ class RegistryValuesTests(unittest.TestCase):
             "authMode": "oidc",
             "image": defaults["gateway"]["image"],
             "publicOrigin": "https://management.example.com",
-            "repositories": {"example/project": TOKEN},
             "oidc": {
                 "issuer": "https://identity.example.com",
                 "audience": "management",
@@ -707,24 +695,18 @@ class RegistryValuesTests(unittest.TestCase):
 
     def test_management_managed_repository_credentials(self):
         values = self.management_values()
-        repositories = {"example/project": TOKEN, "example/other": "other-sentinel"}
-        values["management"]["repositories"] = repositories
         documents = self.documents("orchestrator", values)
-        secret = next(document for document in documents if document["kind"] == "Secret"
-                      and document["metadata"]["name"] == "orchestrator-management-repositories")
-        self.assertEqual(secret["type"], "Opaque")
-        self.assertEqual(secret["metadata"]["namespace"], "orchestrator")
-        self.assertEqual(json.loads(base64.b64decode(secret["data"]["repositories.json"])), repositories)
+        self.assertFalse(any(document["kind"] == "Secret" and document["metadata"]["name"]
+                             == "orchestrator-management-repositories" for document in documents))
         deployment = next(document for document in documents if document["kind"] == "Deployment"
                           and document["metadata"]["name"] == "orchestrator-management")
         pod = deployment["spec"]["template"]["spec"]
-        volume = next(volume for volume in pod["volumes"] if volume["name"] == "repositories")
-        self.assertEqual(volume["secret"]["secretName"], secret["metadata"]["name"])
-        self.assertEqual(volume["secret"]["items"], [{"key": "repositories.json", "path": "repositories.json"}])
+        self.assertNotIn("repositories", {volume["name"] for volume in pod["volumes"]})
         environment = {entry["name"]: entry for entry in pod["containers"][0]["env"]}
-        self.assertEqual(environment["CODEFACTORY_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"], {
-            "name": "orchestrator-gateway-auth", "key": "gateway-auth-token",
+        self.assertEqual(environment["MANAGEMENT_SERVICE_TOKEN"]["valueFrom"]["secretKeyRef"], {
+            "name": APP_VALUES["managementServiceSecret"]["name"], "key": "token",
         })
+        self.assertEqual(json.loads(environment["GITHUB_REPOSITORY_POLICIES"]["value"]), APP_VALUES["repositories"])
         for field in ("issuer", "audience", "jwksUrl", "allowedSubjects"):
             with self.subTest(field=field):
                 original = values["management"]["oidc"][field]
@@ -746,15 +728,13 @@ class RegistryValuesTests(unittest.TestCase):
         values["management"].update({
             "authMode": "admin",
             "admin": {"username": "admin", "password": "admin-password-test-sentinel"},
-            "repositories": {},
         })
         documents = self.documents("orchestrator", values)
-        secret = next(document for document in documents if document["kind"] == "Secret"
-                      and document["metadata"]["name"] == "orchestrator-management-repositories")
-        self.assertEqual(json.loads(base64.b64decode(secret["data"]["repositories.json"])), {})
+        self.assertFalse(any(document["kind"] == "Secret" and document["metadata"]["name"]
+                     == "orchestrator-management-repositories" for document in documents))
 
     def test_management_invalid_managed_repository_credentials_fail(self):
-        for repositories in ({"example/project": ""}, {"example/project": "has space"},
+        for repositories in ({}, {"example/project": ""}, {"example/project": "has space"},
                              {"example/project": "<placeholder>"}, {"invalid": TOKEN},
                              {"../project": TOKEN}, {"example/..": TOKEN},
                              {"example/project": 123}):
@@ -769,10 +749,10 @@ class RegistryValuesTests(unittest.TestCase):
         settings = self.management_values()["management"]
         identity = settings.pop("oidc")
         settings["oidc"] = {"issuer": "", "audience": "", "jwksUrl": "", "allowedSubjects": []}
-        private = {"management": {"repositories": {"example/project": TOKEN}, "oidc": identity}}
+        private = {"management": {"oidc": identity}}
         with tempfile.TemporaryDirectory() as directory:
             paths = []
-            for name, values in (("shared.yaml", {"credentials": AUTH_CREDENTIALS}), ("orchestrator.yaml", {"management": settings}),
+            for name, values in (("shared.yaml", {"credentials": AUTH_CREDENTIALS}), ("orchestrator.yaml", {"management": settings, "githubAuth": APP_VALUES}),
                                  ("secrets.yaml", private)):
                 path = Path(directory) / name
                 path.write_text(yaml.safe_dump(values))
@@ -787,7 +767,7 @@ class RegistryValuesTests(unittest.TestCase):
                                 ("MANAGEMENT_OIDC_JWKS_URL", "jwksUrl")):
                 self.assertEqual(environment[name], identity[field])
             self.assertEqual(environment["MANAGEMENT_ALLOWED_SUBJECTS"], "operator")
-            self.assertTrue(any(document["kind"] == "Secret" and document["metadata"]["name"]
+            self.assertFalse(any(document["kind"] == "Secret" and document["metadata"]["name"]
                                 == "orchestrator-management-repositories" for document in documents))
             self.documents_from_value_files("inference", [paths[0], paths[2]])
             arguments = ["helm", "lint", str(HELM_DIR / "orchestrator")]
@@ -798,7 +778,7 @@ class RegistryValuesTests(unittest.TestCase):
 
     def test_management_managed_credentials_disabled(self):
         documents = self.documents("orchestrator", {"management": {
-            "enabled": False, "repositories": {"example/project": TOKEN},
+            "enabled": False,
         }})
         self.assertFalse(any(document["kind"] == "Secret" and document["metadata"]["name"]
                              == "orchestrator-management-repositories" for document in documents))
@@ -810,7 +790,6 @@ class RegistryValuesTests(unittest.TestCase):
                              ("allowedSubjects", ["operator", "operator"])):
             with self.subTest(field=field, value=value):
                 values = self.management_values()
-                values["management"]["repositories"] = {"example/project": TOKEN}
                 values["management"]["oidc"][field] = value
                 result = self.render("orchestrator", values)
                 self.assertNotEqual(result.returncode, 0)

@@ -19,11 +19,10 @@ from fastapi.testclient import TestClient
 
 AUTH_CREDENTIALS = {
     "internal": {
-        "gatewayClientToken": "gateway-test-sentinel-at-least-32-characters",
         "supervisorServiceToken": "supervisor-test-sentinel",
     },
-    "github": {"pullRequestPat": "pr-test-sentinel"},
 }
+APP_VALUES = yaml.safe_load((Path(__file__).resolve().parents[2] / "helm/orchestrator/example.values.yaml").read_text())["githubAuth"]
 
 
 @pytest.fixture
@@ -31,8 +30,6 @@ def boundary(tmp_path):
     private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     keys = Mock()
     keys.get_signing_key_from_jwt.return_value = SimpleNamespace(key=private.public_key())
-    credentials = tmp_path / "repositories.json"
-    credentials.write_text(json.dumps({"org/repo": "repository-test-secret"}))
     runtime = tmp_path / "runtime.json"
     runtime.write_text(json.dumps({"version": "1", "catalog": "roles:\n  coder:\n    id: coder\n    endpoint_alias: coder\n    max_files: 8\n    tools: [repository_read]\n",
                                    "coder_model": "configured-coder", "judge_model": "configured-judge",
@@ -41,9 +38,10 @@ def boundary(tmp_path):
     settings = {"MANAGEMENT_AUTH_MODE": "oidc",
                 "MANAGEMENT_OIDC_ISSUER": "https://identity.example", "MANAGEMENT_OIDC_AUDIENCE": "management",
                 "MANAGEMENT_OIDC_JWKS_URL": "https://identity.example/keys", "MANAGEMENT_ALLOWED_SUBJECTS": "operator",
-                "MANAGEMENT_PUBLIC_ORIGIN": "https://factory.example", "MANAGEMENT_REPOSITORIES_FILE": str(credentials),
+                "MANAGEMENT_PUBLIC_ORIGIN": "https://factory.example",
+                "GITHUB_REPOSITORY_POLICIES": json.dumps([{"repository": "org/repo"}]),
                 "MANAGEMENT_RUNTIME_CONFIG_FILE": str(runtime), "MANAGEMENT_GATEWAY_URL": "https://gateway.example",
-                "CODEFACTORY_AUTH_TOKEN": "gateway-test-secret"}
+                "MANAGEMENT_SERVICE_TOKEN": "management-service-test-only-at-least-32-characters"}
     upstream = Mock(return_value=httpx.Response(202, json={"task_id": "task-1", "status": "queued"}))
     client = TestClient(create_app(settings, httpx.MockTransport(upstream), keys))
 
@@ -79,7 +77,7 @@ def test_admin_login_without_oidc(boundary, tmp_path):
     response = client.post("/management/api/tasks", json={"repo": "org/repo", "issue_number": 7},
                            headers={"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"})
     assert response.status_code == 202
-    assert upstream.call_args.args[0].headers["Authorization"] == "token gateway-test-secret"
+    assert upstream.call_args.args[0].headers["Authorization"] == "token management-service-test-only-at-least-32-characters"
     for password in ("", "short!", "abcdefgh", "abcdefgh ", "abcdefg<", "abcdef! "):
         settings["MANAGEMENT_ADMIN_PASSWORD"] = password
         assert TestClient(create_app(settings)).get("/management/api/session").status_code == 503
@@ -89,9 +87,8 @@ def test_admin_login_without_oidc(boundary, tmp_path):
 
 def test_app_submission_uses_policy_not_repository_pat_mapping(boundary):
     _, upstream, _, settings = boundary
-    settings.update({"GITHUB_AUTH_MODE": "github-app", "MANAGEMENT_SERVICE_TOKEN": "management-service-only",
-                     "GITHUB_REPOSITORY_POLICIES": json.dumps([{"repository": "org/repo"}]),
-                     "MANAGEMENT_REPOSITORIES_FILE": "/not-present"})
+    settings.update({"MANAGEMENT_SERVICE_TOKEN": "management-service-only",
+                     "GITHUB_REPOSITORY_POLICIES": json.dumps([{"repository": "org/repo"}])})
     settings.update({"MANAGEMENT_AUTH_MODE": "admin", "MANAGEMENT_ADMIN_PASSWORD": "admin-test-password-only"})
     client = TestClient(create_app(settings, httpx.MockTransport(upstream)))
     client.auth = ("admin", "admin-test-password-only")
@@ -107,6 +104,14 @@ def test_app_submission_uses_policy_not_repository_pat_mapping(boundary):
                        headers={"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"}).status_code == 403
 
 
+@pytest.mark.parametrize("setting", ["MANAGEMENT_REPOSITORIES_FILE", "CODEFACTORY_AUTH_TOKEN", "GITHUB_AUTH_MODE",
+                                     "REPO_GITHUB_PAT", "GITHUB_APP_PRIVATE_KEY_FILE", "GITHUB_OIDC_ISSUER"])
+def test_management_rejects_obsolete_or_gateway_only_auth_settings(boundary, setting):
+    settings = {**boundary[3], setting: "stale-test-only"}
+    with pytest.raises(ValueError, match="^repository-authentication-configuration-invalid$"):
+        create_app(settings)
+
+
 @pytest.mark.parametrize("password", ["abcdefg!", "elevenchar!"])
 def test_admin_password_accepts_eight_characters_with_special_character(boundary, password):
     _, _, _, settings = boundary
@@ -120,16 +125,16 @@ def test_admin_operations_without_repository_access(boundary, tmp_path, reposito
     _, upstream, _, settings = boundary
     settings.update({"MANAGEMENT_AUTH_MODE": "admin", "MANAGEMENT_ADMIN_PASSWORD": "abcdefg!"})
     if repository_config == "absent":
-        settings.pop("MANAGEMENT_REPOSITORIES_FILE")
+        settings.pop("GITHUB_REPOSITORY_POLICIES")
     else:
-        Path(settings["MANAGEMENT_REPOSITORIES_FILE"]).write_text("{}")
+        settings["GITHUB_REPOSITORY_POLICIES"] = "[]"
     (tmp_path / "index.html").write_text("<html>Management</html>")
     settings["MANAGEMENT_STATIC_DIR"] = str(tmp_path)
     client = TestClient(create_app(settings, httpx.MockTransport(upstream)))
     client.auth = ("admin", "abcdefg!")
     for path in ("/", "/management/api/session", "/management/api/config"):
         assert client.get(path).status_code == 200
-    assert client.get("/management/api/repositories").json() == {"repositories": []}
+    assert client.get("/management/api/repositories").status_code == 503
     upstream.assert_not_called()
     upstream.return_value = httpx.Response(200, json={"tasks": [{"task_id": "task-1", "patch": "private"}],
                                                     "total": 1, "limit": 25, "offset": 0})
@@ -139,7 +144,7 @@ def test_admin_operations_without_repository_access(boundary, tmp_path, reposito
     upstream.reset_mock()
     response = client.post("/management/api/tasks", json={"repo": "org/repo", "issue_number": 7},
                            headers={"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"})
-    assert response.status_code == 403
+    assert response.status_code == 503
     upstream.assert_not_called()
 
 
@@ -181,8 +186,8 @@ def test_submission_keeps_credentials_server_side_and_uses_contract(boundary):
     request = upstream.call_args.args[0]
     assert request.url == "https://gateway.example/api/v1/tasks/spawn"
     assert json.loads(request.content) == {"repo": "org/repo", "issue_number": 7}
-    assert request.headers["Authorization"] == "token gateway-test-secret"
-    assert request.headers["X-Repository-Token"] == "repository-test-secret"
+    assert request.headers["Authorization"] == "token management-service-test-only-at-least-32-characters"
+    assert "X-Repository-Token" not in request.headers
     assert "secret" not in response.text
 
 
@@ -254,7 +259,11 @@ def test_adapter_to_real_gateway_contract(boundary, monkeypatch, tmp_path, auth_
     _, _, _, settings = boundary
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gateway"))
     import server as gateway
-    monkeypatch.setattr(gateway, "TOKEN", "gateway-test-secret")
+    monkeypatch.setenv("MANAGEMENT_SERVICE_TOKEN", settings["MANAGEMENT_SERVICE_TOKEN"])
+    app_auth = Mock()
+    app_auth.policy.return_value = {"repository": "org/repo"}
+    app_auth.mint.return_value = {"token": "repository-test-secret"}
+    monkeypatch.setattr(gateway, "_github_app", lambda: app_auth)
     monkeypatch.setenv("TASK_DB_PATH", str(tmp_path / "tasks.sqlite3"))
     monkeypatch.setenv("GATEWAY_TRANSPORT_MODE", "local-http")
     def github(method, path, *, token):
@@ -314,7 +323,7 @@ def test_adapter_to_real_gateway_contract(boundary, monkeypatch, tmp_path, auth_
 def test_management_helm_shared_origin_routes_gateway(tmp_path, command, gateway_url, shared):
     chart = Path(__file__).resolve().parents[2] / "helm" / "orchestrator"
     values = tmp_path / "management.yaml"
-    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS,
+    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS, "githubAuth": APP_VALUES,
         "supervisor": {"config": {"acceptor-url": "https://factory.example"}},
         "management": {"enabled": True, "publicOrigin": "https://factory.example",
                        "gatewayUrl": gateway_url, "admin": {"password": "abcdefg!"},
@@ -336,14 +345,14 @@ def test_management_helm_shared_origin_routes_gateway(tmp_path, command, gateway
 def test_management_helm_opt_in_and_snapshot(tmp_path):
     chart = Path(__file__).resolve().parents[2] / "helm" / "orchestrator"
     values = tmp_path / "management.yaml"
-    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS}))
+    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS, "githubAuth": APP_VALUES}))
     base = ["helm", "template", "test", str(chart), "-f", str(values)]
     default = subprocess.run(base, text=True, capture_output=True, check=True).stdout
     assert "component: management" not in default
     assert subprocess.run([*base, "--set", "management.enabled=true"], capture_output=True, check=False).returncode != 0
-    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS,
+    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS, "githubAuth": APP_VALUES,
         "management": {"enabled": True, "authMode": "oidc", "image": "example/management:test",
-        "publicOrigin": "https://factory.example", "repositories": {"org/repo": "repository-test-secret"},
+        "publicOrigin": "https://factory.example",
         "oidc": {"issuer": "https://identity.example", "audience": "management",
                  "jwksUrl": "https://identity.example/keys", "allowedSubjects": ["operator"]}}}))
     rendered = subprocess.run(base, text=True, capture_output=True, check=True).stdout
@@ -352,43 +361,31 @@ def test_management_helm_opt_in_and_snapshot(tmp_path):
     pod = deployment["spec"]["template"]["spec"]
     assert pod["automountServiceAccountToken"] is False
     assert pod["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
-    repositories = next(document for document in documents if document["kind"] == "Secret"
-                        and document["metadata"]["name"] == "orchestrator-management-repositories")
-    assert json.loads(base64.b64decode(repositories["data"]["repositories.json"])) == {"org/repo": "repository-test-secret"}
-    assert pod["volumes"][0]["secret"]["secretName"] == repositories["metadata"]["name"]
+    assert not any(document["kind"] == "Secret" and document["metadata"]["name"] == "orchestrator-management-repositories"
+                   for document in documents)
     assert not any(document["kind"] == "Ingress" and "management" in document["metadata"]["name"] for document in documents)
     snapshot = next(document for document in documents if document["kind"] == "ConfigMap" and "runtime-config.json" in document.get("data", {}))
     runtime = json.loads(snapshot["data"]["runtime-config.json"])
     assert runtime["coder_model"] and runtime["judge_model"]
-    assert pod["volumes"][1]["configMap"]["name"] == snapshot["metadata"]["name"]
+    assert pod["volumes"][0]["configMap"]["name"] == snapshot["metadata"]["name"]
 
 
 @pytest.mark.parametrize("command", ["template", "lint"])
-@pytest.mark.parametrize("password,repositories,valid", [
-    ("abcdefg!", {}, True),
-    ("elevenchar!", {}, True),
-    ("abcdefg!", {"org/repo": "repository-test-secret"}, True),
-    ("short!", {}, False),
-    ("abcdefgh", {}, False),
-    ("abcdefghijklmnop", {}, False),
-    ("abcdef! ", {}, False),
-    ("abcdefg<", {}, False),
-    ("abcdefg!", {"org/repo": ""}, False),
+@pytest.mark.parametrize("password,valid", [
+    ("abcdefg!", True), ("elevenchar!", True), ("short!", False),
+    ("abcdefgh", False), ("abcdefghijklmnop", False), ("abcdef! ", False), ("abcdefg<", False),
 ])
-def test_management_helm_admin_password_and_optional_repositories(tmp_path, command, password, repositories, valid):
+def test_management_helm_admin_password(tmp_path, command, password, valid):
     chart = Path(__file__).resolve().parents[2] / "helm" / "orchestrator"
     values = tmp_path / "management.yaml"
-    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS, "management": {
+    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS, "githubAuth": APP_VALUES, "management": {
         "enabled": True, "publicOrigin": "https://factory.example",
-        "admin": {"username": "admin", "password": password}, "repositories": repositories}}))
+        "admin": {"username": "admin", "password": password}}}))
     arguments = ["helm", command, *(["test"] if command == "template" else []), str(chart), "-f", str(values)]
     result = subprocess.run(arguments, text=True, capture_output=True, check=False)
     assert (result.returncode == 0) == valid, result.stderr + result.stdout
     if valid and command == "template":
         documents = [document for document in yaml.safe_load_all(result.stdout) if document]
-        repository_secret = next(document for document in documents if document["kind"] == "Secret"
-                                 and document["metadata"]["name"] == "orchestrator-management-repositories")
-        assert json.loads(base64.b64decode(repository_secret["data"]["repositories.json"])) == repositories
         admin_secret = next(document for document in documents if document["kind"] == "Secret"
                             and document["metadata"]["name"] == "orchestrator-management-admin")
         assert base64.b64decode(admin_secret["data"]["password"]).decode() == password

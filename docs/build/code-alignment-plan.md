@@ -106,7 +106,7 @@ No tests or render checks are claimed as run for this review.
 ## Remaining Deployment Checks
 
 - Confirm the selected cluster storage class permits both pods to mount the same `ReadWriteOnce` claim on one node and supports SQLite locking/durability semantics. This chart has not been installed or exercised against the cluster.
-- Set `credentials.internal.supervisorServiceToken`, `credentials.github.pullRequestPat`, and any required model API keys in `helm/local.secrets-values.yaml`. Helm creates separate supervisor-service, GitHub-PR, and model-auth Secrets; use least-privilege GitHub scopes and confirm the task repository token supplied by workflows is read-only.
+- Set `credentials.internal.supervisorServiceToken` and any required model API keys in the private values file. Configure mandatory `githubAuth` App/OIDC policies and external App-key/management-service references. Only the gateway mounts the App key; it brokers read-only worker tokens and scoped supervisor publication tokens. Source workflows supply OIDC identity, not repository credentials. See the breaking rollout guide before changing images or queued tasks.
 - Configure per-repository credentials, allowed base branches, reviewers, and the existing P40 endpoints/model IDs. Empty/default PR policy intentionally prevents publication.
 - Validate actual worker Job lifecycle/status across supervisor restart, the selected GPU router compatibility with JSON response formats, reviewer policy availability, and GitHub branch/PR permissions in a non-production environment.
 

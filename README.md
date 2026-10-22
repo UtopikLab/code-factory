@@ -188,7 +188,7 @@ sits alongside — and is independent of — the `inference` inference stack:
 | `Deployment` | `orchestrator/supervisor.yaml` | `orchestrator` | **Always-on** supervisor + judge (the agent loop). |
 | `ConfigMap` | `orchestrator/worker.yaml` | `orchestrator` | Policy knobs (max-iterations, task-wait, worker count). |
 | `Job` | `orchestrator/worker.yaml` | `orchestrator` | **Worker spawn** — N parallel coder agents per task. |
-| `Secret` | `orchestrator/secrets.yaml` | `orchestrator` | OpenAI key + workflow-scoped GitHub PAT (never hardcoded). |
+| `Secret` | `helm/orchestrator/templates/secrets.yaml` | `orchestrator` | Separate model and supervisor credentials; external App key mounts only in gateway. |
 
 ### 4.4.1 How the pieces relate to the inference stack
 
@@ -201,7 +201,7 @@ sits alongside — and is independent of — the `inference` inference stack:
     (`orchestrator/gateway`) exposed on `:8000`, not by a sidecar in the
     supervisor pod.
   - The gateway handles **`POST /api/v1/tasks/spawn`** with
-    `Authorization: token <PAT>`, validates repo constraints, and returns
+    `Authorization: Bearer <actions-oidc-jwt>`, validates App repository policy, and returns
     accepted task metadata.
 - **Workers (`orchestrator/worker.yaml`)** — the **spawn mechanism**. The
   supervisor triggers a `Job` that runs N parallel **coder** agents (pure CPU,
@@ -217,7 +217,8 @@ sits alongside — and is independent of — the `inference` inference stack:
 1. The supervisor is always resident (idle, listening for a task).
 2. A task arrives (webhook / cron / user). It is POSTed to the gateway
   endpoint at `https://<svc>/api/v1/tasks/spawn` with
-   `Authorization: token <PAT>` and a JSON body naming the repo + issue.
+  `Authorization: Bearer <actions-oidc-jwt>` and a JSON body naming the repo + issue.
+  Management uses its distinct service token for policy-approved repository submissions.
 3. The gateway accepts the task and the orchestrator flow creates worker `Job`s and waits for them to
    complete (`kubectl wait --for=jobcomplete`).
 4. The supervisor runs the LangGraph
@@ -296,7 +297,7 @@ curl -s https://inference.local/v1/chat/completions \
 | `orchestrator/namespace.yaml` | Namespace | `orchestrator` | |
 | `orchestrator/supervisor.yaml` | Deployment, Service | `orchestrator` | CPU-only, limits cpu `2.5`/mem `5Gi`, port 8000 |
 | `orchestrator/worker.yaml` | ConfigMap, Job | `orchestrator` | limits cpu `6.5`/mem `7Gi`, parallelism `1` |
-| `orchestrator/secrets.yaml` | Secret | `orchestrator` | `orchestrator-secrets` (OpenAI key + GitHub PAT) |
+| `helm/orchestrator/templates/secrets.yaml` | Secret | `orchestrator` | Purpose-separated model/internal credentials; repository auth uses App/OIDC only |
 | `monitoring/namespace.yaml` | Namespace | `monitoring` | |
 | `monitoring/node-exporter.yaml` | Namespace, DaemonSet, Service, SA | `monitoring` | hostNetwork, limits cpu `1`/mem `1Gi`, :9100 |
 | `monitoring/<hardware-telemetry-manifest>.yaml` | ConfigMap, DaemonSet, Service, SA | `monitoring` | transport `redfish`, limits cpu `200m`/mem `256Mi` |

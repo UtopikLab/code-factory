@@ -166,3 +166,36 @@ def test_discovery_cannot_choose_another_jwks_url(auth_setup):
     with pytest.raises(AuthenticationError):
         auth.authenticate(jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"}))
     assert requested == [DISCOVERY_URL]
+
+
+@pytest.mark.parametrize("setting", ["GITHUB_AUTH_MODE", "CODEFACTORY_AUTH_MODE", "CODEFACTORY_AUTH_TOKEN",
+                                     "GITHUB_TOKEN", "PR_GITHUB_TOKEN", "REPO_GITHUB_PAT"])
+def test_obsolete_auth_settings_rejected(auth_setup, setting):
+    auth, _, _, _ = auth_setup
+    settings = {"GITHUB_OIDC_AUDIENCE": auth.audience, "GITHUB_APP_ID": auth.app_id,
+                "GITHUB_APP_PRIVATE_KEY_FILE": auth.key_file,
+                "GITHUB_REPOSITORY_POLICIES": json.dumps(list(auth.policies.values())), setting: "stale"}
+    with pytest.raises(ValueError, match="^github-auth-configuration-invalid$"):
+        GitHubAuth(settings)
+
+
+@pytest.mark.parametrize("setting", ["GITHUB_AUTH_UNKNOWN", "GITHUB_APP_TOKEN", "GITHUB_OIDC_ISSUER", "CODEFACTORY_AUTH_UNKNOWN"])
+def test_unknown_security_settings_rejected(auth_setup, setting):
+    test_obsolete_auth_settings_rejected(auth_setup, setting)
+
+
+@pytest.mark.parametrize("location", ["policy", "binding"])
+def test_unknown_policy_security_fields_rejected(auth_setup, location):
+    auth, _, _, _ = auth_setup
+    policy = next(iter(auth.policies.values()))
+    target = policy if location == "policy" else policy["bindings"][0]
+    target["token"] = "unsupported-test-only"
+    settings = {"GITHUB_OIDC_AUDIENCE": auth.audience, "GITHUB_APP_ID": auth.app_id,
+                "GITHUB_APP_PRIVATE_KEY_FILE": auth.key_file, "GITHUB_REPOSITORY_POLICIES": json.dumps([policy])}
+    with pytest.raises(ValueError, match="^github-auth-configuration-invalid$"):
+        GitHubAuth(settings)
+
+
+def test_app_configuration_is_mandatory():
+    with pytest.raises(ValueError, match="^github-auth-configuration-invalid$"):
+        GitHubAuth({})

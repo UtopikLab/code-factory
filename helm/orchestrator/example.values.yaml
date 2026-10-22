@@ -1,3 +1,26 @@
+githubAuth:
+  audience: https://gateway.example.com/tasks
+  appId: "12"
+  privateKeySecret:
+    name: code-factory-github-app
+    key: private-key.pem
+  managementServiceSecret:
+    name: code-factory-management-service
+    key: token
+  repositories:
+  - repository: owner/repository
+    repository_id: "123"
+    repository_owner_id: "456"
+    installation_id: "789"
+    bindings:
+    - workflow_ref: owner/repository/.github/workflows/drain.yaml@refs/heads/main
+      ref: refs/heads/main
+      sub: repo:owner/repository:ref:refs/heads/main
+      event_name: issues
+    - workflow_ref: owner/repository/.github/workflows/drain.yaml@refs/heads/main
+      ref: refs/heads/main
+      sub: repo:owner/repository:ref:refs/heads/main
+      event_name: workflow_dispatch
 gateway:
   transportMode: edge-tls
   ingress:

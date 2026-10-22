@@ -1,75 +1,41 @@
-# Multi-Repo Orchestrator Configuration
+# Multi-Repository Setup
 
-Each originating repository supplies its own task credential. A shared registry
-token or global GitHub PAT is not a repository credential service.
-Read [credential separation and migration](credential-separation.md) and the
-[new repository execution contract](new-repo-setup.md) before rollout.
+Repository authentication uses GitHub App installation tokens only. Read the
+[setup and breaking rollout requirements](credential-separation.md) first.
 
-## Per-Repository Setup
+For each source repository:
 
-Use the canonical [drain workflow](../../.github/workflows/drain.yaml) in each source
-repository. Issue-only requests are supported; PR-only events are not implementation
-requests. Configure these Actions secrets independently:
+1. Install the App with selected-repository access and independently verify its
+   repository ID, owner ID, and installation ID.
+2. Add its policy to `githubAuth.repositories`, including exact trusted
+   workflow/ref/subject/event bindings. Both issue and manual retry events need
+   their own bindings. Repository names alone do not authorize a signed identity.
+3. Install the canonical [drain workflow](../../.github/workflows/drain.yaml).
+   Configure Actions secret `CODEFACTORY_URL` as the trusted HTTPS gateway base
+   URL and variable `CODEFACTORY_OIDC_AUDIENCE` matching the gateway audience.
+   The workflow requires `id-token: write`; it has no mode or PAT fallback.
 
-| Secret | Purpose |
-|---|---|
-| `CODEFACTORY_URL` | Trusted HTTPS base URL, for example `https://gateway.example.com` |
-| `CODEFACTORY_AUTH_TOKEN` | Dedicated gateway-authentication secret, not a GitHub PAT |
-| `REPO_GITHUB_PAT` | Fine-grained PAT scoped to this source repository |
+Management lists the configured policies and submits repository identity using
+its separate service token. No repository-to-PAT mapping exists. Human Basic/OIDC
+login, supervisor internal trust, model credentials, and kubelet GHCR pulls remain
+independent. Only the gateway receives the App private key.
 
-The URL and gateway-auth secret may be shared among trusted callers. The repository
-credential must not be shared across source repositories. It needs Contents, Pull
-requests and Issues read/write, with Metadata read and an actor with repository write
-access. The gateway checks identity, actor write metadata and authenticated reads
-before acceptance. These checks do not prove every token write grant; GitHub still
-enforces actual writes. Missing permission metadata is rejected, not guessed.
+Automatic Python source/test discovery remains available with `worker.repoPolicies: {}`.
+These execution policies do not authorize repository access. Workers obtain
+read-only, task-bound tokens from the broker; supervisor publication obtains
+write-scoped tokens. Both renew before expiry, including delayed execution.
 
-GHCR credentials remain only in existing Kubernetes `imagePullSecrets`, with
-`read:packages`. They are not mounted into gateway/worker environments.
-The workflow has no implicit built-in `GITHUB_TOKEN` fallback. The migration guide
-explains workflow-token expiry, PR limitations and required rotation of the exposed PAT.
+Keep the opaque task ID returned by intake: issue numbers collide across repos.
+HTTP 202 means queued, not completed. Callback tokens are task-bound; Actions
+retries are bound to the original repository. A duplicate submission cannot
+replace credentials or restart work. Terminal cleanup and intentional retry
+semantics are described in the credential guide.
 
-## Repository Selection
-
-No repository-name allowlist or Helm repository registration is required. Intake
-requires gateway authentication and validates the supplied source-repository
-credential against the requested repository and issue. Workers retain task-bound
-repository identity and credential checks.
-
-Automatic Python source/test discovery remains the default with
-`worker.repoPolicies: {}`. Optional policy overrides narrow context, editable paths
-and fixed validation commands. The sandbox and publication gates are unchanged.
-Repository credentials do not replace sandbox isolation or publication policy.
-
-## Task Ownership And Recovery
-
-Issue numbers collide across repositories. Keep the opaque task ID returned by
-intake and use authenticated task GET state. A duplicate task cannot replace the
-assigned credential, refresh its expiry or launch another worker. The task Secret
-persists across gateway restarts and is used only by the assigned worker and terminal
-lifecycle processing. Worker reports additionally require their task callback token.
-
-HTTP 202 means dispatched, not completed. Completion requires a recorded terminal
-result with a same-repository PR link and `lifecycle: synced`. Use authenticated
-`POST /api/v1/tasks/{task_id}/sync` with JSON `{}` for terminal retry; never resubmit
-another repository's credential. GET exposes lifecycle and credential cleanup state.
-Expiry/revocation fails explicitly and does not select a global credential.
-
-Transient failures retain credentials until retry. Owned Secrets are deleted after
-sync or a permanent unusable-credential outcome; failed deletion can be retried.
-Stale mismatched Secrets are not adopted or deleted automatically. Interrupted
-queued/running tasks require operator reconciliation, not automatic replay/reset.
-
-The gateway-auth secret still permits broad task read/intake/resync access. This
-is not tenant isolation. Use separate gateways/namespaces for separate trust domains;
-namespace-scoped dynamic Secret permissions cannot be limited by name prefix with RBAC.
-
-## Rollout Boundary
-
-Configure TLS, trusted immediate proxy source CIDRs, gateway network restrictions,
-dedicated gateway auth and per-source credentials before separately authorized image
-builds and deployment. Preserve registry credentials and select rebuilt image pins
-explicitly. Never dump Secret manifests or send tokens in URLs, payloads, comments,
-model context or diagnostic output. Local mocked tests do not establish live GitHub
-access, sandbox support, TLS/network policy or PVC durability. No deployment, live task
-submission or token rotation is performed by the local implementation checks.
+Before an authorized rollout, rebuild/select all four orchestrator images, update
+source workflows and policies, and drain or separately reconcile old PAT tasks.
+Old credential artifacts cannot execute or silently become App-backed tasks.
+Preserve GHCR and model credentials and existing catalog pinning. No live setup,
+deployment, credential mutation, task migration, or remote edit is performed by
+local validation. Verify live permissions, transport isolation, sandbox support,
+and persistence separately. Use separate namespaces/gateways for different trust
+domains; management status access is not tenant isolation.

@@ -55,6 +55,14 @@ class GitHubAuth:
         self.lock = threading.Lock()
         self.keys, self.keys_until = {}, 0
         try:
+            obsolete = {"GITHUB_AUTH_MODE", "CODEFACTORY_AUTH_MODE", "CODEFACTORY_AUTH_TOKEN",
+                        "GITHUB_TOKEN", "PR_GITHUB_TOKEN", "REPO_GITHUB_PAT"}
+            allowed = {"GITHUB_OIDC_AUDIENCE", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_FILE",
+                       "GITHUB_REPOSITORY_POLICIES"}
+            if obsolete.intersection(settings) or any(
+                    name.startswith(("GITHUB_AUTH_", "GITHUB_APP_", "GITHUB_OIDC_", "GITHUB_REPOSITORY_", "CODEFACTORY_AUTH_"))
+                    and name not in allowed for name in settings):
+                raise ValueError()
             policies = json.loads(settings.get("GITHUB_REPOSITORY_POLICIES", "[]"))
             if not self.audience or not re.fullmatch(r"[1-9][0-9]*", self.app_id) or not self.key_file:
                 raise ValueError()
@@ -62,6 +70,8 @@ class GitHubAuth:
                 raise ValueError()
             self.policies = {}
             for policy in policies:
+                if set(policy) != {"repository", "repository_id", "repository_owner_id", "installation_id", "bindings"}:
+                    raise ValueError()
                 repo = policy["repository"]
                 if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) or any(
                         part in (".", "..") for part in repo.split("/")):
@@ -72,7 +82,8 @@ class GitHubAuth:
                 if not isinstance(policy["bindings"], list) or not policy["bindings"]:
                     raise ValueError()
                 for binding in policy["bindings"]:
-                    if (binding["event_name"] not in ("issues", "workflow_dispatch")
+                    if (set(binding) != {"event_name", "ref", "workflow_ref", "sub"}
+                            or binding["event_name"] not in ("issues", "workflow_dispatch")
                             or not isinstance(binding["ref"], str) or not binding["ref"].startswith("refs/heads/")
                             or binding["workflow_ref"] != repo + "/.github/workflows/drain.yaml@" + binding["ref"]
                             or binding["sub"] != "repo:" + repo + ":ref:" + binding["ref"]):

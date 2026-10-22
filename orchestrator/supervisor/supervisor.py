@@ -97,8 +97,7 @@ def _dispatch_task(task, runtime):
     return _runtime_dispatch_task(task, runtime, _k8s_request)
 
 
-def _github_request(method: str, repo: str, path: str, body: dict | None = None, *, token=None):
-    token = os.environ.get("PR_GITHUB_TOKEN", "") if token is None else token
+def _github_request(method: str, repo: str, path: str, body: dict | None = None, *, token):
     if not token:
         raise RuntimeError("pr-publication-credential-required")
     request = urllib.request.Request("https://api.github.com/repos/" + repo + path,
@@ -132,9 +131,9 @@ def _task_github(task, runtime=None):
     try:
         payload = task["payload"]
     except (KeyError, IndexError):
-        return _github_request
+        raise RuntimeError("task-authentication-unsupported") from None
     if json.loads(payload).get("repository_auth") != "github-app":
-        return _github_request
+        raise RuntimeError("task-authentication-unsupported")
     return _candidate_workflow.AppGitHub(task, runtime, _github_request, urllib.request.build_opener(RejectRedirect()))
 
 

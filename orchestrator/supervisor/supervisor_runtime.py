@@ -8,6 +8,9 @@ import uuid
 
 class SupervisorLoop:
     def __init__(self, supervisor):
+        if {"PR_GITHUB_TOKEN", "GITHUB_TOKEN", "REPO_GITHUB_PAT", "CODEFACTORY_AUTH_TOKEN",
+            "GITHUB_AUTH_MODE", "CODEFACTORY_AUTH_MODE"}.intersection(supervisor.os.environ):
+            raise ValueError("repository-authentication-configuration-invalid")
         self.supervisor = supervisor
         self.graph = supervisor.create_supervisor_graph()
         self.logger = supervisor.logger
@@ -54,6 +57,8 @@ class SupervisorLoop:
         task_id = task["task_id"]
         runtime = None
         try:
+            if json.loads(task["payload"]).get("repository_auth") != "github-app":
+                raise RuntimeError("task-authentication-unsupported")
             catalog, runtime = supervisor._load_pinned_catalog(task)
             if task["attempts"] >= supervisor.MAX_TOTAL_ATTEMPTS and not task["result"]:
                 supervisor._complete_via_gateway(task_id, "failed", runtime, error="max-total-attempts-exhausted")
@@ -95,8 +100,8 @@ class SupervisorLoop:
                     db.execute("UPDATE tasks SET status='queued', result=NULL, claim_owner=NULL, claimed_at=NULL WHERE task_id=? AND claim_owner=?",
                                (task_id, owner))
                 return True
-            if not supervisor.os.environ.get("PR_GITHUB_TOKEN") and json.loads(task["payload"]).get("repository_auth") != "github-app":
-                raise RuntimeError("pr-publication-credential-required")
+            if json.loads(task["payload"]).get("repository_auth") != "github-app":
+                raise RuntimeError("task-authentication-unsupported")
             current = db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()
             pr_url = supervisor._publish_candidate(current, candidate, runtime)
             supervisor._complete_via_gateway(task_id, "completed", runtime, pr_url=pr_url, score=score, review=review,
@@ -104,7 +109,7 @@ class SupervisorLoop:
         except Exception as error:
             supervisor.logger.exception("durable task failed task=%s", task_id)
             terminal_errors = {"pr-policy-required", "pr-base-branch-not-allowed", "pr-reviewer-policy-invalid",
-                               "pr-publication-credential-required", "judge-credential-required",
+                               "pr-publication-credential-required", "task-authentication-unsupported", "judge-credential-required",
                                "planner-credential-required", "planner-output-invalid",
                                "candidate-publish-data-missing", "candidate-edit-policy-violation",
                                "task-config-pin-invalid", "task-catalog-hash-mismatch",

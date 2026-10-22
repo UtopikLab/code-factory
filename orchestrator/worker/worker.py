@@ -250,22 +250,21 @@ class GitHub:
         self.client = client
         self.repo = repo
         self.base = "/repos/" + quote(repo, safe="/")
-        self.app_mode = os.environ.get("REPO_GITHUB_PAT") == "github-app"
         self.expires_at = 0
-        self.headers = {"Authorization": "Bearer " + os.environ.get("REPO_GITHUB_PAT", ""),
-                        "Accept": "application/vnd.github+json"}
-        if not os.environ.get("REPO_GITHUB_PAT"):
-            raise TaskFailure("repository-credential-required")
+        self.headers = {"Accept": "application/vnd.github+json"}
+        if any(name in os.environ for name in ("REPO_GITHUB_PAT", "GITHUB_TOKEN", "CODEFACTORY_AUTH_TOKEN",
+                                              "PR_GITHUB_TOKEN", "GITHUB_AUTH_MODE", "CODEFACTORY_AUTH_MODE")):
+            raise TaskFailure("repository-authentication-unsupported")
+        if os.environ.get("TASK_REPOSITORY_AUTH") != "github-app":
+            raise TaskFailure("repository-broker-required")
         if os.environ.get("TASK_REPOSITORY", "").lower() != repo.lower():
             raise TaskFailure("repository-credential-binding-mismatch")
 
     async def call(self, method, path, body=None, optional=False):
         if method != "GET":
             raise TaskFailure("worker-github-read-only")
-        if self.app_mode and self.expires_at <= time.time() + 60:
+        if self.expires_at <= time.time() + 60:
             await self.refresh()
-        if not self.app_mode and float(os.environ.get("TASK_CREDENTIAL_EXPIRES_AT", "0")) <= time.time():
-            raise TaskFailure("repository-credential-expired")
         async with self.client.stream(method, "https://api.github.com" + self.base + path,
                                       headers=self.headers, json=body, follow_redirects=False) as response:
             if optional and response.status_code == 404:

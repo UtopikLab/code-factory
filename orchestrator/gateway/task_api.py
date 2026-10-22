@@ -86,7 +86,7 @@ class TaskAPI:
 
     def retry(self, payload):
         gateway, handler = self.gateway, self.handler
-        gateway._reject_credentials(payload, handler.headers.get("X-Repository-Token", ""))
+        gateway._reject_credentials(payload)
         if set(payload) != {"retry_key"} or not isinstance(payload["retry_key"], str) or not gateway.re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", payload["retry_key"]
         ):
@@ -100,15 +100,19 @@ class TaskAPI:
             original = gateway.json.loads(task["payload"])
         finally:
             db.close()
-        if gateway._app_mode() and handler.actions_repo and handler.actions_repo.lower() != (task["repo"] or "").lower():
+        if original.get("repository_auth") != "github-app":
+            raise PermissionError("task-authentication-unsupported")
+        if handler.actions_repo and handler.actions_repo.lower() != (task["repo"] or "").lower():
             raise PermissionError("repository-mismatch")
         original.pop("task_id", None)
+        original.pop("repository_auth")
         self.spawn(original, retry_of=task["task_id"], retry_key=payload["retry_key"])
 
     def spawn(self, payload, retry_of=None, retry_key=None):
         gateway, handler = self.gateway, self.handler
-        token = handler.headers.get("X-Repository-Token", "")
-        gateway._reject_credentials(payload, token, handler.headers.get("Authorization", "").removeprefix("Bearer "))
+        gateway._reject_credentials(payload, handler.headers.get("Authorization", "").removeprefix("Bearer "))
+        if "repository_auth" in payload:
+            raise ValueError("repository-authentication-assigned-by-gateway")
         repo, issue = gateway._identity(payload)
         if "worker_id" in payload:
             raise ValueError("gateway-assignment-required")
@@ -120,21 +124,18 @@ class TaskAPI:
                 raise ValueError("issue-mismatch")
         if not handler._transport_allowed():
             raise gateway.CredentialError("transport-not-allowed")
-        if gateway._app_mode():
-            policy = gateway._github_app().policy(repo)
-            if handler.actions_repo and handler.actions_repo.lower() != policy["repository"].lower():
-                raise PermissionError("repository-mismatch")
-            token = gateway._github_app().mint(repo)["token"]
-            gateway._reject_credentials(payload, token)
+        policy = gateway._github_app().policy(repo)
+        if handler.actions_repo and handler.actions_repo.lower() != policy["repository"].lower():
+            raise PermissionError("repository-mismatch")
+        token = gateway._github_app().mint(repo)["token"]
+        gateway._reject_credentials(payload, token)
         gateway._validate_repository(repo, issue, token)
         task_id = "issue-" + gateway.hashlib.sha256(f"{repo.lower()}#{issue}".encode()).hexdigest()[:32] if issue else gateway.uuid.uuid4().hex
         if retry_of:
             task_id = "issue-" + gateway.hashlib.sha256(f"retry:{retry_of}:{retry_key}".encode()).hexdigest()[:32]
         assigned = gateway.copy.deepcopy(payload)
         assigned["task_id"] = task_id
-        assigned.pop("repository_auth", None)
-        if gateway._app_mode():
-            assigned["repository_auth"] = "github-app"
+        assigned["repository_auth"] = "github-app"
         if repo:
             assigned["repo"] = repo
         db = gateway._task_db()
@@ -178,7 +179,7 @@ class TaskAPI:
                         retry_of, retry_key, config_version, config_hash))
             db.commit()
             try:
-                credential_uid = gateway._create_task_secret(task_id, repo, "github-app" if gateway._app_mode() else token, callback)
+                credential_uid = gateway._create_task_secret(task_id, repo, callback)
                 db.execute("UPDATE tasks SET credential_uid=? WHERE task_id=?", (credential_uid, task_id))
             except gateway.KubernetesError:
                 failure = gateway.json.dumps({"task_id": task_id, "repo": repo, "issue_number": issue,
@@ -194,7 +195,7 @@ class TaskAPI:
 
     def credentials(self, payload, supervisor=False):
         gateway, handler = self.gateway, self.handler
-        if payload or not gateway._app_mode():
+        if payload:
             raise ValueError("credential-request-invalid")
         if supervisor and not handler._supervisor_authorized():
             handler._json(401, {"error": "supervisor-unauthorized"})

@@ -21,6 +21,11 @@ TASK_ID = re.compile(r"[A-Za-z0-9_.-]{1,63}")
 
 def create_app(settings=None, transport=None, signing_keys=None):
     settings = dict(os.environ if settings is None else settings)
+    if {"GITHUB_AUTH_MODE", "CODEFACTORY_AUTH_MODE", "CODEFACTORY_AUTH_TOKEN", "MANAGEMENT_REPOSITORIES_FILE",
+        "REPO_GITHUB_PAT", "PR_GITHUB_TOKEN", "GITHUB_TOKEN"}.intersection(settings) or any(
+            name.startswith(("GITHUB_AUTH_", "GITHUB_APP_", "GITHUB_OIDC_", "GITHUB_REPOSITORY_", "CODEFACTORY_AUTH_"))
+            and name != "GITHUB_REPOSITORY_POLICIES" for name in settings):
+        raise ValueError("repository-authentication-configuration-invalid")
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     issuer = settings.get("MANAGEMENT_OIDC_ISSUER", "")
     audience = settings.get("MANAGEMENT_OIDC_AUDIENCE", "")
@@ -78,44 +83,27 @@ def create_app(settings=None, transport=None, signing_keys=None):
         return response
 
     def repositories():
-        if settings.get("GITHUB_AUTH_MODE", "legacy") == "github-app":
-            try:
-                policies = json.loads(settings.get("GITHUB_REPOSITORY_POLICIES", "[]"))
-                if not isinstance(policies, list) or not policies:
-                    raise ValueError()
-                names = [policy["repository"] for policy in policies]
-                if any(not isinstance(repo, str) or not REPOSITORY.fullmatch(repo) for repo in names):
-                    raise ValueError()
-                return dict.fromkeys(names)
-            except (ValueError, KeyError, TypeError):
-                raise HTTPException(503, "repository-policy-not-configured") from None
-        if settings.get("GITHUB_AUTH_MODE", "legacy") != "legacy":
-            raise HTTPException(503, "repository-policy-not-configured")
-        if not settings.get("MANAGEMENT_REPOSITORIES_FILE"):
-            return {}
         try:
-            data = json.loads(Path(settings["MANAGEMENT_REPOSITORIES_FILE"]).read_text())
-            if not isinstance(data, dict) or any(
-                not REPOSITORY.fullmatch(repo) or any(part in (".", "..") for part in repo.split("/"))
-                or not isinstance(token, str) or not token or any(char.isspace() for char in token)
-                for repo, token in data.items()
-            ):
+            policies = json.loads(settings.get("GITHUB_REPOSITORY_POLICIES", "[]"))
+            if not isinstance(policies, list) or not policies:
                 raise ValueError()
-            return data
-        except (KeyError, OSError, ValueError, TypeError):
-            raise HTTPException(503, "repository-credentials-not-configured") from None
+            names = [policy["repository"] for policy in policies]
+            if any(not isinstance(repo, str) or not REPOSITORY.fullmatch(repo)
+                   or any(part in (".", "..") for part in repo.split("/")) for repo in names):
+                raise ValueError()
+            return names
+        except (ValueError, KeyError, TypeError):
+            raise HTTPException(503, "repository-policy-not-configured") from None
 
-    async def gateway(method, path, *, params=None, payload=None, repository_token=None):
+    async def gateway(method, path, *, params=None, payload=None):
         base = settings.get("MANAGEMENT_GATEWAY_URL", "")
-        token = settings.get("MANAGEMENT_SERVICE_TOKEN" if settings.get("GITHUB_AUTH_MODE") == "github-app" else "CODEFACTORY_AUTH_TOKEN", "")
+        token = settings.get("MANAGEMENT_SERVICE_TOKEN", "")
         parsed = urlsplit(base)
         local = parsed.hostname in ("127.0.0.1", "localhost", "::1")
         if (not token or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment
                 or (parsed.scheme != "https" and not (parsed.scheme == "http" and local))):
             raise HTTPException(503, "gateway-not-configured")
         headers = {"Authorization": "token " + token}
-        if repository_token:
-            headers["X-Repository-Token"] = repository_token
         try:
             async with httpx.AsyncClient(transport=transport, timeout=35, follow_redirects=False) as client:
                 response = await client.request(method, base.rstrip("/") + path, params=params,
@@ -187,8 +175,7 @@ def create_app(settings=None, transport=None, signing_keys=None):
         if repo is None:
             raise HTTPException(403, "repository-not-authorized")
         status, data = await gateway("POST", "/api/v1/tasks/spawn",
-                                     payload={"repo": repo, "issue_number": payload["issue_number"]},
-                                     repository_token=allowed[repo])
+                                     payload={"repo": repo, "issue_number": payload["issue_number"]})
         return JSONResponse(task_summary(data), status_code=status)
 
     @app.get("/management/api/config", dependencies=[Depends(identity)])

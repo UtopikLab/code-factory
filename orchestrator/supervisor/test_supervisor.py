@@ -167,7 +167,8 @@ def test_completion_url_uses_pinned_runtime_or_current_fallback(monkeypatch, run
 def test_catalog_failure_consumes_eight_attempts_then_waits_for_lease(monkeypatch, tmp_path):
     path = str(tmp_path / "tasks.sqlite3")
     db = task_database(path)
-    db.execute("INSERT INTO tasks(task_id,status,payload) VALUES(?,?,?)", ("task", "queued", "{}"))
+    db.execute("INSERT INTO tasks(task_id,status,payload) VALUES(?,?,?)",
+               ("task", "queued", '{"repository_auth":"github-app"}'))
     db.close()
     monkeypatch.setattr(supervisor_module, "task_database", lambda: task_database(path))
 
@@ -359,8 +360,7 @@ def test_pr_policy_fails_closed_and_publication_never_merges(monkeypatch):
                     "state": "open", "base": {"ref": "main"}}
         return {}
 
-    monkeypatch.setattr(supervisor_module, "_github_request", github)
-    monkeypatch.setenv("PR_GITHUB_TOKEN", "supervisor-only-token")
+    monkeypatch.setattr(supervisor_module, "_task_github", lambda *_args: github)
     monkeypatch.delenv("PR_ALLOWED_BASE_BRANCHES", raising=False)
     monkeypatch.delenv("PR_REVIEWERS", raising=False)
     with pytest.raises(RuntimeError, match="pr-policy-required"):
@@ -374,13 +374,15 @@ def test_pr_policy_fails_closed_and_publication_never_merges(monkeypatch):
     assert not any("/merge" in path for _method, path in request_paths)
 
 
-def test_dispatch_injects_only_task_scoped_credentials_and_pinned_catalog(monkeypatch):
+@pytest.mark.parametrize("obsolete_setting", [None, "REPO_GITHUB_PAT", "CODEFACTORY_AUTH_TOKEN", "PR_GITHUB_TOKEN"])
+def test_dispatch_injects_only_task_scoped_credentials_and_pinned_catalog(monkeypatch, obsolete_setting):
     catalog_hash = "a" * 64
     seed = {"spec": {"suspend": True, "template": {"spec": {
         "containers": [{"name": "coder", "env": [
-            {"name": "CODEFACTORY_AUTH_TOKEN", "value": "global"},
             {"name": "JUDGE_URL", "value": "judge"},
         ]}], "volumes": [{"name": "agent-catalog", "configMap": {"name": "old"}}]}}}}
+    if obsolete_setting:
+        seed["spec"]["template"]["spec"]["containers"][0]["env"].append({"name": obsolete_setting, "value": "stale-test-only"})
     requests = []
 
     def api(method, path, body=None):
@@ -394,10 +396,15 @@ def test_dispatch_injects_only_task_scoped_credentials_and_pinned_catalog(monkey
     monkeypatch.setattr(supervisor_module, "_k8s_request", api)
     monkeypatch.setenv("AGENT_CATALOG_NAME_PREFIX", "code-factory-agent-catalog-")
     task = {"task_id": "issue-123", "attempts": 1, "config_hash": catalog_hash,
-            "config_version": "1", "payload": '{"repo":"org/repo"}', "plan": "test plan",
+            "config_version": "1", "payload": '{"repo":"org/repo","repository_auth":"github-app"}', "plan": "test plan",
             "repo": "org/repo", "credential_ref": "task-credential-issue-123"}
     runtime = {"coder_url": "http://coder", "coder_model": "coder-model", "coder_native_download": False,
                "acceptor_url": "https://gateway", "repo_policies": {}}
+    if obsolete_setting:
+        with pytest.raises(RuntimeError, match="^task-authentication-unsupported$"):
+            supervisor_module._dispatch_task(task, runtime)
+        assert not any(method == "POST" for method, _path, _body in requests)
+        return
     name = supervisor_module._dispatch_task(task, runtime)
     assert name == "code-factory-worker-issue-123-1"
     job = requests[-1][2]
@@ -405,8 +412,23 @@ def test_dispatch_injects_only_task_scoped_credentials_and_pinned_catalog(monkey
     assert "CODEFACTORY_AUTH_TOKEN" not in env and "JUDGE_URL" not in env
     assert "ALLOWED_REPOS" not in env and "ALLOWED_REPO" not in env
     assert env["TASK_CALLBACK_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == task["credential_ref"]
+    assert env["TASK_REPOSITORY_AUTH"]["valueFrom"]["secretKeyRef"]["key"] == "repository-auth"
     assert json.loads(env["ASSIGNED_TASK_PAYLOAD"]["value"])["supervisor_plan"] == "test plan"
     assert job["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"].endswith(catalog_hash[:12])
+
+
+@pytest.mark.parametrize("payload", [{}, {"repository_auth": "pat"}])
+def test_old_tasks_cannot_obtain_publication_client(payload):
+    with pytest.raises(RuntimeError, match="^task-authentication-unsupported$"):
+        supervisor_module._task_github({"repo": "org/repo", "payload": json.dumps(payload)})
+
+
+@pytest.mark.parametrize("setting", ["PR_GITHUB_TOKEN", "REPO_GITHUB_PAT", "GITHUB_TOKEN", "CODEFACTORY_AUTH_TOKEN",
+                                     "GITHUB_AUTH_MODE", "CODEFACTORY_AUTH_MODE"])
+def test_supervisor_rejects_removed_auth_settings(monkeypatch, setting):
+    monkeypatch.setenv(setting, "stale-test-only")
+    with pytest.raises(ValueError, match="^repository-authentication-configuration-invalid$"):
+        supervisor_module.SupervisorLoop()
 
 
 def test_supervisor_reconstructs_candidate_diff_and_rejects_patch_mismatch(monkeypatch):
@@ -417,7 +439,7 @@ def test_supervisor_reconstructs_candidate_diff_and_rejects_patch_mismatch(monke
             return {"truncated": False, "tree": []}
         raise AssertionError(path)
 
-    monkeypatch.setattr(supervisor_module, "_github_request", github)
+    monkeypatch.setattr(supervisor_module, "_task_github", lambda *_args: github)
     task = {"task_id": "task", "repo": "org/repo", "issue": 1}
     candidate = {"base_sha": "a" * 40, "changed_files": ["src/fix.py"],
                  "edits": [{"path": "src/fix.py", "content": "value = 1\n"}],

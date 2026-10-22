@@ -10,9 +10,9 @@ class CredentialError(Exception):
     pass
 
 
-def reject_credentials(payload, *tokens, global_token=""):
+def reject_credentials(payload, *tokens):
     serialized = json.dumps(payload)
-    if (any(token and token in serialized for token in (*tokens, global_token))
+    if (any(token and token in serialized for token in tokens)
             or re.search(r"(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]{16,}", serialized)):
         raise ValueError("credential-in-payload")
 
@@ -29,8 +29,8 @@ def reject_credentials(payload, *tokens, global_token=""):
     inspect(payload)
 
 
-def validate_repository(repo, issue, token, github, global_token=""):
-    if not repo or not token or len(token) > 4096 or any(char.isspace() for char in token) or token == global_token:
+def validate_repository(repo, issue, token, github):
+    if not repo or not token or len(token) > 4096 or any(char.isspace() for char in token):
         raise CredentialError("repository-credential-required")
     try:
         metadata = github("GET", "/repos/" + quote(repo, safe="/"), token=token)

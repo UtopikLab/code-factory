@@ -49,7 +49,6 @@ from task_store import connect_task_database, retry_lifecycle
 
 __all__ = ["copy", "hashlib", "parse_qs", "re", "secrets", "uuid"]
 
-TOKEN = os.environ.get("CODEFACTORY_AUTH_TOKEN", "")
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_AUTH_TOKEN", "")
 
 logger = logging.getLogger("gateway")
@@ -70,13 +69,6 @@ WORKER_JOB_TEMPLATE = os.environ.get("WORKER_JOB_TEMPLATE", "orchestrator-worker
 SA_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 SA_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 DB_INIT_LOCK = threading.Lock()
-
-
-def _app_mode():
-    mode = os.environ.get("GITHUB_AUTH_MODE", "legacy")
-    if mode not in ("legacy", "github-app"):
-        raise ValueError("github-auth-mode-invalid")
-    return mode == "github-app"
 
 
 @lru_cache(maxsize=1)
@@ -100,14 +92,14 @@ def _secret_path(name=""):
 
 
 def _reject_credentials(payload, *tokens):
-    return _security_reject_credentials(payload, *tokens, global_token=TOKEN)
+    return _security_reject_credentials(payload, *tokens)
 
 
 def _validate_repository(repo, issue, token):
-    return _security_validate_repository(repo, issue, token, _github, TOKEN)
+    return _security_validate_repository(repo, issue, token, _github)
 
 
-def _create_task_secret(task_id, repo, token, callback):
+def _create_task_secret(task_id, repo, callback):
     name = "task-credential-" + task_id
     expires_at = str(time.time() + int(os.environ.get("TASK_CREDENTIAL_TTL_SECONDS", "86400")))
     secret = {
@@ -116,7 +108,7 @@ def _create_task_secret(task_id, repo, token, callback):
                      "labels": {"code-factory-task": task_id},
                      "annotations": {"repository": repo.lower(), "expires-at": expires_at}},
         "data": {key: base64.b64encode(value.encode()).decode() for key, value in
-                 (("repository-token", token), ("callback-token", callback),
+                 (("repository-auth", "github-app"), ("callback-token", callback),
                   ("expires-at", expires_at))},
     }
     response = _k8s_request("POST", _secret_path(), secret)
@@ -303,18 +295,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _authorized(self):
         self.actions_repo = None
-        if _app_mode():
-            path = urlsplit(self.path).path
-            authorization = self.headers.get("Authorization", "")
-            if authorization.startswith("Bearer ") and (path == "/api/v1/tasks/spawn" or path.endswith("/retry")):
-                if not self._transport_allowed():
-                    return False
-                self.actions_repo = _github_app().authenticate(authorization[7:])
-                return True
-            management_token = os.environ.get("MANAGEMENT_SERVICE_TOKEN", "")
-            return bool(management_token) and hmac.compare_digest(
-                authorization.encode(), ("token " + management_token).encode())
-        return bool(TOKEN) and hmac.compare_digest(self.headers.get("Authorization", "").encode(), f"token {TOKEN}".encode())
+        if "X-Repository-Token" in self.headers or not self._transport_allowed():
+            return False
+        path = urlsplit(self.path).path
+        authorization = self.headers.get("Authorization", "")
+        if authorization.startswith("Bearer ") and (path == "/api/v1/tasks/spawn" or path.endswith("/retry")):
+            self.actions_repo = _github_app().authenticate(authorization[7:])
+            return True
+        management_token = os.environ.get("MANAGEMENT_SERVICE_TOKEN", "")
+        return bool(management_token) and hmac.compare_digest(
+            authorization.encode(), ("token " + management_token).encode())
 
     def _supervisor_authorized(self):
         return bool(SUPERVISOR_TOKEN) and hmac.compare_digest(
@@ -390,6 +380,9 @@ class Handler(BaseHTTPRequestHandler):
                  and not path.endswith(("/retry", "/sync")))
         supervisor_endpoint = path.startswith("/api/v1/supervisor/tasks/")
         try:
+            if "X-Repository-Token" in self.headers:
+                self._json(400, {"error": "repository-token-header-unsupported"})
+                return
             if not task_callback and not supervisor_endpoint and not self._authorized():
                 self._json(401, {"error": "unauthorized"})
                 return
@@ -447,12 +440,11 @@ class Handler(BaseHTTPRequestHandler):
         logger.info("%s request", self.command)
 
 def _create_server():
-    if _app_mode():
-        _github_app()
-        management = os.environ.get("MANAGEMENT_SERVICE_TOKEN", "")
-        if management and (len(management) < 32 or management in (TOKEN, SUPERVISOR_TOKEN)
-                           or any(character.isspace() for character in management)):
-            raise ValueError("management-service-credential-invalid")
+    _github_app()
+    management = os.environ.get("MANAGEMENT_SERVICE_TOKEN", "")
+    if management and (len(management) < 32 or management == SUPERVISOR_TOKEN
+                       or any(character.isspace() for character in management)):
+        raise ValueError("management-service-credential-invalid")
     mode = os.environ.get("GATEWAY_TRANSPORT_MODE", "")
     if mode not in ("edge-tls", "local-http"):
         raise ValueError("gateway-transport-mode-required")

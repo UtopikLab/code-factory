@@ -90,9 +90,6 @@
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
-                        "gatewayClientToken": {
-                            "type": "string"
-                        },
                         "supervisorServiceToken": {
                             "type": "string"
                         }
@@ -103,9 +100,6 @@
                     "additionalProperties": false,
                     "properties": {
                         "ghcrReadPackagesPat": {
-                            "type": "string"
-                        },
-                        "pullRequestPat": {
                             "type": "string"
                         }
                     }

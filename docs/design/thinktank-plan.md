@@ -116,16 +116,16 @@ processing; it does not mean the task is complete.
 
 ##### Authentication
 
-Task API requests must carry the workflow's GitHub token:
+Actions task submission and retry require a verified, repository-bound OIDC JWT:
 
 ```
-Authorization: token <github-token>
+Authorization: Bearer <actions-oidc-jwt>
 ```
 
-The current implementation uses a dedicated gateway-auth token, separate from the
-source-repository token supplied in `X-Repository-Token`. Repository identity and
-access are validated before registering and handing off a task; no repository-name
-allowlist is required. See [credential separation](../operations/credential-separation.md).
+Repository access uses GitHub App installation tokens only. Exact workflow and
+immutable repository bindings authorize submission. Management uses a distinct
+service token for policy-approved identities and task status, never repository PATs.
+See [credential separation](../operations/credential-separation.md).
 
 ##### Request payload — task registration
 

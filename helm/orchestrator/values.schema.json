@@ -7,7 +7,6 @@
             "type": "object",
             "additionalProperties": false,
             "required": [
-                "mode",
                 "audience",
                 "appId",
                 "privateKeySecret",
@@ -15,28 +14,36 @@
                 "repositories"
             ],
             "properties": {
-                "mode": {
-                    "enum": [
-                        "legacy",
-                        "github-app"
-                    ]
-                },
                 "audience": {
                     "type": "string",
-                    "maxLength": 256
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "pattern": "^https://[^<>\\s]+$"
                 },
                 "appId": {
                     "type": "string",
-                    "pattern": "^$|^[1-9][0-9]*$"
+                    "pattern": "^[1-9][0-9]*$"
                 },
                 "privateKeySecret": {
-                    "$ref": "#/definitions/secretReference"
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/secretReference"
+                        },
+                        {
+                            "properties": {
+                                "name": {
+                                    "minLength": 1
+                                }
+                            }
+                        }
+                    ]
                 },
                 "managementServiceSecret": {
                     "$ref": "#/definitions/secretReference"
                 },
                 "repositories": {
                     "type": "array",
+                    "minItems": 1,
                     "maxItems": 100,
                     "uniqueItems": true,
                     "items": {
@@ -107,34 +114,6 @@
                         }
                     }
                 }
-            },
-            "if": {
-                "properties": {
-                    "mode": {
-                        "const": "github-app"
-                    }
-                }
-            },
-            "then": {
-                "properties": {
-                    "audience": {
-                        "minLength": 1,
-                        "pattern": "^https://[^<>\\s]+$"
-                    },
-                    "appId": {
-                        "minLength": 1
-                    },
-                    "privateKeySecret": {
-                        "properties": {
-                            "name": {
-                                "minLength": 1
-                            }
-                        }
-                    },
-                    "repositories": {
-                        "minItems": 1
-                    }
-                }
             }
         },
         "management": {
@@ -179,20 +158,6 @@
                 "gatewayUrl": {
                     "type": "string",
                     "pattern": "^(https://[^@?#]+)?$"
-                },
-                "repositories": {
-                    "type": "object",
-                    "propertyNames": {
-                        "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
-                        "not": {
-                            "pattern": "^\\.{1,2}/|/\\.{1,2}$"
-                        }
-                    },
-                    "additionalProperties": {
-                        "type": "string",
-                        "minLength": 1,
-                        "pattern": "^[^\\s<>]+$"
-                    }
                 },
                 "ingress": {
                     "type": "object",
@@ -318,9 +283,6 @@
                     }
                 },
                 "properties": {
-                    "repositories": {
-                        "description": "Optional for operational access; configure repository PATs in helm/local.secrets-values.yaml to submit repository tasks."
-                    },
                     "image": {
                         "minLength": 1
                     },
@@ -379,9 +341,6 @@
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
-                        "gatewayClientToken": {
-                            "type": "string"
-                        },
                         "supervisorServiceToken": {
                             "type": "string",
                             "minLength": 1,
@@ -394,9 +353,6 @@
                     "additionalProperties": false,
                     "properties": {
                         "ghcrReadPackagesPat": {
-                            "type": "string"
-                        },
-                        "pullRequestPat": {
                             "type": "string"
                         }
                     }
@@ -460,7 +416,7 @@
             "properties": {
                 "auth": {
                     "not": {},
-                    "description": "Set credentials.internal.supervisorServiceToken and credentials.github.pullRequestPat in helm/local.secrets-values.yaml."
+                    "description": "Set credentials.internal.supervisorServiceToken in helm/local.secrets-values.yaml."
                 },
                 "config": {
                     "type": "object",
@@ -609,7 +565,7 @@
             "properties": {
                 "auth": {
                     "not": {},
-                    "description": "Set credentials.internal.gatewayClientToken in helm/local.secrets-values.yaml."
+                    "description": "Repository submission requires GitHub Actions OIDC or the management service credential."
                 },
                 "transportMode": {
                     "type": "string",
@@ -983,48 +939,23 @@
         {
             "if": {
                 "properties": {
-                    "githubAuth": {
+                    "management": {
                         "properties": {
-                            "mode": {
-                                "const": "github-app"
+                            "enabled": {
+                                "const": true
                             }
                         }
                     }
-                },
-                "required": [
-                    "githubAuth"
-                ]
+                }
             },
             "then": {
                 "properties": {
-                    "management": {
+                    "githubAuth": {
                         "properties": {
-                            "repositories": {
-                                "maxProperties": 0
-                            }
-                        }
-                    }
-                },
-                "if": {
-                    "properties": {
-                        "management": {
-                            "properties": {
-                                "enabled": {
-                                    "const": true
-                                }
-                            }
-                        }
-                    }
-                },
-                "then": {
-                    "properties": {
-                        "githubAuth": {
-                            "properties": {
-                                "managementServiceSecret": {
-                                    "properties": {
-                                        "name": {
-                                            "minLength": 1
-                                        }
+                            "managementServiceSecret": {
+                                "properties": {
+                                    "name": {
+                                        "minLength": 1
                                     }
                                 }
                             }
@@ -1078,59 +1009,29 @@
             }
         },
         {
-            "if": {
-                "properties": {
-                    "githubAuth": {
-                        "properties": {
-                            "mode": {
-                                "const": "legacy"
-                            }
+            "properties": {
+                "credentials": {
+                    "properties": {
+                        "internal": {
+                            "properties": {
+                                "supervisorServiceToken": {
+                                    "minLength": 1,
+                                    "pattern": "^[^<>\\s]+$"
+                                }
+                            },
+                            "required": [
+                                "supervisorServiceToken"
+                            ]
                         }
-                    }
+                    },
+                    "required": [
+                        "internal"
+                    ]
                 }
             },
-            "then": {
-                "properties": {
-                    "credentials": {
-                        "properties": {
-                            "internal": {
-                                "properties": {
-                                    "gatewayClientToken": {
-                                        "minLength": 32,
-                                        "pattern": "^[^<>\\s]+$"
-                                    },
-                                    "supervisorServiceToken": {
-                                        "minLength": 1,
-                                        "pattern": "^[^<>\\s]+$"
-                                    }
-                                },
-                                "required": [
-                                    "gatewayClientToken",
-                                    "supervisorServiceToken"
-                                ]
-                            },
-                            "github": {
-                                "properties": {
-                                    "pullRequestPat": {
-                                        "minLength": 1,
-                                        "pattern": "^[^<>\\s]+$"
-                                    }
-                                },
-                                "required": [
-                                    "pullRequestPat"
-                                ]
-                            }
-                        },
-                        "required": [
-                            "internal",
-                            "github"
-                        ]
-                    }
-                },
-                "required": [
-                    "credentials"
-                ]
-            }
+            "required": [
+                "credentials"
+            ]
         }
     ]
 }

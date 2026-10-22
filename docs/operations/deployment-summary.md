@@ -126,9 +126,9 @@ The disabled example in `helm/orchestrator/example.values.yaml` uses
 the workload or ingress. Before enabling both settings:
 
 - Supply a registry-verified, explicitly versioned management image. Set
-  `management.repositories`, OIDC issuer/audience/JWKS URL and allowed subjects,
-  and gateway credential values in `helm/local.secrets-values.yaml`; Helm creates
-  the repository and authentication Secrets. No image or credentials
+  human admin/OIDC login settings and the mandatory `githubAuth` policy and external
+  App-key/management-service Secret references. Repository PAT mappings are not
+  supported. Follow the [breaking rollout guide](credential-separation.md). No image or credentials
   are supplied by this ingress change.
 - Set `management.publicOrigin` to the browser-visible HTTPS origin, without
   a path or trailing slash. Normally its hostname matches the ingress host;
@@ -372,7 +372,8 @@ All configurable via ConfigMap: `kubectl edit configmap k8s-inference-orchestrat
 
 ### Secrets
 - **OPENAI_API_KEY:** Required for judge inference calls
-- **GITHUB_TOKEN:** Required for task-acceptor authorization + PR operations
+- **Repository auth:** Mandatory GitHub App configuration; Actions OIDC for submission,
+  brokered installation tokens for reads/publication. No source or PR PAT.
 
 Stored in: `kubectl get secret k8s-inference-orchestrator-secrets -n orchestrator`
 
@@ -385,7 +386,7 @@ GitHub Issue/PR
       ↓
 GitHub Actions (drain.yaml)
       ↓
-POST /api/v1/tasks/spawn (auth: token $GITHUB_TOKEN)
+POST /api/v1/tasks/spawn (auth: Bearer <verified-actions-oidc-jwt>)
       ↓
 gateway deployment (port 8000)
       ↓
@@ -471,21 +472,12 @@ git push origin feature/your-feature
 # → Orchestrator processes the task
 ```
 
-### Option 2: Manual cURL (for testing)
-```bash
-export GITHUB_TOKEN=<your-pat>
+### Option 2: Management Submission
 
-curl -X POST http://supervisor.orchestrator.svc.cluster.local:8000/api/v1/tasks/spawn \
-  -H "Authorization: token $GITHUB_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "task_id": "test-001",
-    "repo": "UtopikLab/code-factory",
-    "issue_number": 123,
-    "issue_title": "Fix: broken test",
-    "issue_url": "https://github.com/UtopikLab/code-factory/issues/123"
-  }'
-```
+Use the authenticated management interface to select a policy-authorized
+repository and issue. Its server-side service token is separate from human login;
+repository access is brokered by the GitHub App. Do not submit a PAT or use a plain
+HTTP backend. See [operator setup](credential-separation.md#operator-setup).
 
 Expected response:
 ```json

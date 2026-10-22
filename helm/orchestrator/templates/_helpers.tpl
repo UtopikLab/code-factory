@@ -1,9 +1,6 @@
 {{- define "orchestrator.supervisorSecretName" -}}
 {{- printf "%s-supervisor-service-auth" .Chart.Name -}}
 {{- end -}}
-{{- define "orchestrator.pullRequestSecretName" -}}
-{{- printf "%s-github-pr-auth" .Chart.Name -}}
-{{- end -}}
 {{- define "orchestrator.workerSecretName" -}}
 {{- printf "%s-coder-model-auth" .Chart.Name -}}
 {{- end -}}

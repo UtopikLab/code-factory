@@ -143,11 +143,16 @@ def dispatch_task(task, runtime, k8s_request):
         if volume.get("name") == "agent-catalog":
             volume["configMap"]["name"] = catalog_name
     container = next(item for item in pod_spec["containers"] if item["name"] == "coder")
+    if any(entry.get("name") in {"CODEFACTORY_AUTH_TOKEN", "REPO_GITHUB_PAT", "GITHUB_TOKEN", "PR_GITHUB_TOKEN",
+                                 "GITHUB_AUTH_MODE", "CODEFACTORY_AUTH_MODE"} for entry in container.get("env", [])):
+        raise RuntimeError("task-authentication-unsupported")
     assigned_payload = json.loads(task["payload"])
+    if assigned_payload.get("repository_auth") != "github-app":
+        raise RuntimeError("task-authentication-unsupported")
     assigned_payload["supervisor_plan"] = task["plan"] or ""
     env = [entry for entry in container.get("env", []) if entry.get("name") not in {
         "ASSIGNED_TASK_ID", "ASSIGNED_TASK_PAYLOAD", "TASK_CALLBACK_TOKEN", "TASK_REPOSITORY",
-        "TASK_CREDENTIAL_EXPIRES_AT", "CODEFACTORY_AUTH_TOKEN", "REPO_GITHUB_PAT",
+        "TASK_CREDENTIAL_EXPIRES_AT", "TASK_REPOSITORY_AUTH",
         "AGENT_CONFIG_VERSION", "AGENT_CONFIG_HASH", "JUDGE_URL", "JUDGE_MODEL",
         "JUDGE_NATIVE_DOWNLOAD", "JUDGE_ACCEPT_THRESHOLD", "OPENAI_API_KEY", "CODER_URL",
         "CODER_MODEL", "CODER_NATIVE_DOWNLOAD", "ACCEPTOR_URL", "ALLOWED_REPOS", "ALLOWED_REPO",
@@ -161,8 +166,8 @@ def dispatch_task(task, runtime, k8s_request):
         {"name": "TASK_REPOSITORY", "value": task["repo"] or ""},
         {"name": "TASK_CREDENTIAL_EXPIRES_AT", "valueFrom": {"secretKeyRef": {
             "name": task["credential_ref"], "key": "expires-at"}}},
-        {"name": "REPO_GITHUB_PAT", "valueFrom": {"secretKeyRef": {
-            "name": task["credential_ref"], "key": "repository-token"}}},
+        {"name": "TASK_REPOSITORY_AUTH", "valueFrom": {"secretKeyRef": {
+            "name": task["credential_ref"], "key": "repository-auth"}}},
         {"name": "TASK_CALLBACK_TOKEN", "valueFrom": {"secretKeyRef": {
             "name": task["credential_ref"], "key": "callback-token"}}},
         {"name": "CODER_URL", "value": runtime["coder_url"]},

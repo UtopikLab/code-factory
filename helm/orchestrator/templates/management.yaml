@@ -43,9 +43,6 @@ spec:
           env:
             - name: PYTHONDONTWRITEBYTECODE
               value: "1"
-            - name: GITHUB_AUTH_MODE
-              value: {{ .Values.githubAuth.mode | quote }}
-            {{- if eq .Values.githubAuth.mode "github-app" }}
             - name: GITHUB_REPOSITORY_POLICIES
               value: {{ .Values.githubAuth.repositories | toJson | quote }}
             - name: MANAGEMENT_SERVICE_TOKEN
@@ -53,13 +50,6 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.githubAuth.managementServiceSecret.name }}
                   key: {{ .Values.githubAuth.managementServiceSecret.key }}
-            {{- else }}
-            - name: CODEFACTORY_AUTH_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Chart.Name }}-gateway-auth
-                  key: gateway-auth-token
-                {{- end }}
             - name: MANAGEMENT_GATEWAY_URL
               value: {{ default (index .Values.supervisor.config "acceptor-url") .Values.management.gatewayUrl | quote }}
             - name: MANAGEMENT_PUBLIC_ORIGIN
@@ -84,20 +74,11 @@ spec:
             - name: MANAGEMENT_ALLOWED_SUBJECTS
               value: {{ join "," .Values.management.oidc.allowedSubjects | quote }}
             {{- end }}
-            {{- if eq .Values.githubAuth.mode "legacy" }}
-            - name: MANAGEMENT_REPOSITORIES_FILE
-              value: /etc/repositories/repositories.json
-            {{- end }}
             - name: MANAGEMENT_RUNTIME_CONFIG_FILE
               value: /etc/runtime/runtime-config.json
             - name: MANAGEMENT_CONFIG_HASH
               value: {{ include "orchestrator.agentCatalogHash" . | quote }}
           volumeMounts:
-            {{- if eq .Values.githubAuth.mode "legacy" }}
-            - name: repositories
-              mountPath: /etc/repositories
-              readOnly: true
-            {{- end }}
             - name: runtime
               mountPath: /etc/runtime
               readOnly: true
@@ -117,15 +98,6 @@ spec:
               cpu: 500m
               memory: 256Mi
       volumes:
-        {{- if eq .Values.githubAuth.mode "legacy" }}
-        - name: repositories
-          secret:
-            secretName: {{ .Chart.Name }}-management-repositories
-            defaultMode: 0440
-            items:
-              - key: repositories.json
-                path: repositories.json
-        {{- end }}
         - name: runtime
           configMap:
             name: {{ .Chart.Name }}-agent-catalog-{{ include "orchestrator.agentCatalogHash" . | trunc 12 }}
