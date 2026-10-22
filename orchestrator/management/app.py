@@ -208,6 +208,3 @@ def create_app(settings=None, transport=None, signing_keys=None):
         return FileResponse(asset)
 
     return app
-
-
-app = create_app()

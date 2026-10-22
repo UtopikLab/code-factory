@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -23,6 +24,23 @@ AUTH_CREDENTIALS = {
     },
 }
 APP_VALUES = yaml.safe_load((Path(__file__).resolve().parents[2] / "helm/orchestrator/example.values.yaml").read_text())["githubAuth"]
+
+
+def test_module_import_does_not_construct_app_with_ci_environment():
+    environment = {**os.environ, "GITHUB_TOKEN": "ci-test-only"}
+    subprocess.run(
+        [sys.executable, "-c", "import app"],
+        cwd=Path(__file__).parent, env=environment,
+        capture_output=True, text=True, check=True,
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", "import app; app.create_app()"],
+        cwd=Path(__file__).parent,
+        env=environment,
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode != 0
+    assert "repository-authentication-configuration-invalid" in result.stderr
 
 
 @pytest.fixture
