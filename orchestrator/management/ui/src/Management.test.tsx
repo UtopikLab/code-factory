@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
@@ -8,13 +8,16 @@ const task = { task_id: 'task-1', repo: 'org/repo', issue_number: 7, status: 'qu
 let calls: [string, RequestInit | undefined][]
 let taskResponse: unknown
 let status = 200
+let repositories: string[]
+let connected = true
 
 beforeEach(() => {
     window.location.hash = '/tasks'
-    calls = []; status = 200; taskResponse = { tasks: [task], total: 1, limit: 25, offset: 0 }
+    calls = []; status = 200; repositories = ['org/repo']; connected = true; taskResponse = { tasks: [task], total: 1, limit: 25, offset: 0 }
     vi.stubGlobal('fetch', vi.fn(async (url: string, options?: RequestInit) => {
         calls.push([url, options])
-        const body = url.endsWith('/session') ? { subject: 'operator' } : url.endsWith('/repositories') ? { repositories: ['org/repo'] }
+        const body = url.endsWith('/github/session') ? { connected, configured: true }
+            : url.endsWith('/session') ? { subject: 'operator' } : url.endsWith('/repositories') ? { repositories }
             : options?.method === 'POST' ? task : url.includes('/tasks/task-1') ? { ...task, status: 'completed', pr_url: 'https://github.com/org/repo/pull/8' }
                 : url.includes('/config') ? { version: '1', hash: 'abc', models: [{ role: 'coder', model: 'verified-model', native_download: true, availability: 'unknown' }], agents: [] } : taskResponse
         return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -62,6 +65,32 @@ test('has honest empty and read-only model states', async () => {
     expect(screen.getByText('unknown')).toBeInTheDocument()
     expect(screen.getByText('Read only')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /save|deploy/i })).not.toBeInTheDocument()
+})
+
+test('dynamic submission accepts a repository name after GitHub connection', async () => {
+    repositories = []
+    const user = userEvent.setup()
+    mount()
+    await user.click(await screen.findByRole('button', { name: 'New task' }))
+    await waitFor(() => expect(within(screen.getByRole('dialog')).getByPlaceholderText('owner/repository')).toBeInTheDocument())
+    await user.type(within(screen.getByRole('dialog')).getByLabelText('Repository'), 'other/project')
+    await user.type(screen.getByLabelText('Issue number'), '12')
+    await user.click(screen.getByRole('button', { name: 'Submit task' }))
+    await waitFor(() => expect(calls.some(([url, options]) => url.endsWith('/tasks') && options?.method === 'POST')).toBe(true))
+    const post = calls.find(([url, options]) => url.endsWith('/tasks') && options?.method === 'POST')!
+    expect(JSON.parse(post[1]!.body as string)).toEqual({ repo: 'other/project', issue_number: 12 })
+})
+
+test('management login alone cannot submit', async () => {
+    connected = false
+    const user = userEvent.setup()
+    mount()
+    await user.click(await screen.findByRole('button', { name: 'New task' }))
+    expect(await screen.findByRole('button', { name: 'Connect GitHub' })).toBeEnabled()
+    await user.selectOptions(screen.getByLabelText('Repository', { selector: 'select' }), 'org/repo')
+    await user.type(screen.getByLabelText('Issue number'), '7')
+    expect(screen.getByRole('button', { name: 'Submit task' })).toBeDisabled()
+    expect(calls.some(([, options]) => options?.method === 'POST')).toBe(false)
 })
 
 test('denied session never loads management data', async () => {

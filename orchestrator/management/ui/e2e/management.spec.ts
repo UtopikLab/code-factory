@@ -18,7 +18,8 @@ test('tasks, detail, submission and read-only views fit the viewport', async ({ 
     await page.route('**/management/api/**', async route => {
         const url = new URL(route.request().url())
         let body: unknown = {}
-        if (url.pathname.endsWith('/session')) body = { subject: 'test-operator' }
+        if (url.pathname.endsWith('/github/session')) body = { connected: true, configured: true }
+        else if (url.pathname.endsWith('/session')) body = { subject: 'test-operator' }
         else if (url.pathname.endsWith('/config')) body = config
         else if (url.pathname.endsWith('/repositories')) body = { repositories: [task.repo] }
         else if (route.request().method() === 'POST') { submitted = route.request().postDataJSON(); body = task }
@@ -60,4 +61,36 @@ test('access denied state never renders task controls', async ({ page }, testInf
     await expect(page.getByRole('alert')).toHaveText('Sign in is required.')
     await expect(page.getByRole('button', { name: 'New task' })).toHaveCount(0)
     await page.screenshot({ path: testInfo.outputPath('access-required.png'), fullPage: true })
+})
+
+test('dynamic repository submission requires a GitHub connection', async ({ page }, testInfo) => {
+    let connected = false
+    let submitted: unknown
+    await page.route('**/management/api/**', async route => {
+        const url = new URL(route.request().url())
+        const body = url.pathname.endsWith('/github/session') ? { connected, configured: true }
+            : url.pathname.endsWith('/session') ? { subject: 'test-operator' }
+                : url.pathname.endsWith('/repositories') ? { repositories: [] }
+                    : route.request().method() === 'POST' ? task : { tasks: [], total: 0, limit: 25, offset: 0 }
+        if (route.request().method() === 'POST') submitted = route.request().postDataJSON()
+        await route.fulfill({ json: body })
+    })
+    await page.goto('/')
+    await page.getByRole('button', { name: 'New task' }).click()
+    const dialog = page.getByRole('dialog')
+    await dialog.getByLabel('Repository', { exact: true }).fill(task.repo)
+    await dialog.getByLabel('Issue number').fill('128')
+    await expect(dialog.getByRole('button', { name: 'Connect GitHub' })).toBeEnabled()
+    await expect(dialog.getByRole('button', { name: 'Submit task', exact: true })).toBeDisabled()
+    connected = true
+    await page.reload()
+    await page.getByRole('button', { name: 'New task' }).click()
+    await dialog.getByLabel('Repository', { exact: true }).fill(task.repo)
+    await dialog.getByLabel('Issue number').fill('128')
+    await expect(dialog.getByRole('button', { name: 'Disconnect GitHub' })).toBeVisible()
+    expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+    await page.screenshot({ path: testInfo.outputPath('dynamic-submission.png'), fullPage: true })
+    await dialog.getByRole('button', { name: 'Submit task', exact: true }).click()
+    await expect(dialog).toHaveCount(0)
+    expect(submitted).toEqual({ repo: task.repo, issue_number: 128 })
 })

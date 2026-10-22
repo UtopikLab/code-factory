@@ -1,37 +1,39 @@
+# Orchestrator-only nonsecret overrides. Copy to orchestrator/local.values.yaml.
+# Replace illustrative identity/policy values; external Secret references live
+# in ../local.secrets-values.yaml and are applied last by deploy.sh.
 githubAuth:
   audience: https://gateway.example.com/tasks
   appId: "12"
-  privateKeySecret:
-    name: code-factory-github-app
-    key: private-key.pem
-  managementServiceSecret:
-    name: code-factory-management-service
-    key: token
-  repositories:
-  - repository: owner/repository
-    repository_id: "123"
-    repository_owner_id: "456"
-    installation_id: "789"
-    bindings:
-    - workflow_ref: owner/repository/.github/workflows/drain.yaml@refs/heads/main
-      ref: refs/heads/main
-      sub: repo:owner/repository:ref:refs/heads/main
-      event_name: issues
-    - workflow_ref: owner/repository/.github/workflows/drain.yaml@refs/heads/main
-      ref: refs/heads/main
-      sub: repo:owner/repository:ref:refs/heads/main
-      event_name: workflow_dispatch
+  workflowPolicy:
+    ref: refs/heads/main
+    workflow: .github/workflows/drain.yaml
+    events: [issues, workflow_dispatch]
+  repositories: []
+
 gateway:
   transportMode: edge-tls
   ingress:
     tlsTermination: external
     host: code-factory.local
     tlsSecretName: ""
+    
 supervisor:
   config:
     acceptor-url: https://gateway.example.com
+
 management:
   enabled: false
+  github:
+    clientId: ""
+    clientSecret:
+      name: ""
+      key: client-secret
+  authMode: admin
+  oidc:
+    issuer: ""
+    audience: ""
+    jwksUrl: ""
+    allowedSubjects: []
   publicOrigin: https://management.example.com
   ingress:
     enabled: false

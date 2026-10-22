@@ -16,6 +16,7 @@ from unittest.mock import Mock
 import pytest
 import server
 import yaml
+from github_auth import AuthenticationError, AuthorizationError
 
 AUTH_CREDENTIALS = {
     "internal": {
@@ -23,6 +24,7 @@ AUTH_CREDENTIALS = {
     },
 }
 APP_VALUES = yaml.safe_load((Path(__file__).resolve().parents[2] / "helm/orchestrator/example.values.yaml").read_text())["githubAuth"]
+APP_VALUES.update(yaml.safe_load((Path(__file__).resolve().parents[2] / "helm/example.secrets-values.yaml").read_text())["githubAuth"])
 
 
 @pytest.fixture
@@ -67,7 +69,7 @@ def task_gateway(monkeypatch, tmp_path):
 
 
 def task_request(method, path, payload=None, token="test-token", repository_token=None, callback="callback-test-only", supervisor=True,
-                 authorization=None):
+                 authorization=None, user_token="ghu_user-test-only"):
     if (supervisor and method == "POST" and path.startswith("/api/v1/tasks/") and isinstance(payload, dict)
         and payload.get("status") in ("completed", "failed") and callback == "callback-test-only"):
         path = path.replace("/api/v1/tasks/", "/api/v1/supervisor/tasks/", 1)
@@ -76,7 +78,7 @@ def task_request(method, path, payload=None, token="test-token", repository_toke
     handler = server.Handler.__new__(server.Handler)
     handler.command = method
     handler.headers = {"Authorization": authorization or f"token {token}", "Content-Length": str(len(body)),
-                       "X-Task-Token": callback}
+                       "X-Task-Token": callback, "X-GitHub-User-Token": user_token}
     if repository_token is not None:
         handler.headers["X-Repository-Token"] = repository_token
     handler.client_address = ("127.0.0.1", 1234)
@@ -154,6 +156,30 @@ def test_actions_submission_is_bound_to_verified_repository(task_gateway):
     assert task_request("POST", "/api/v1/tasks/spawn", issue_payload(), token="supervisor-test-token")[0] == 401
 
 
+@pytest.mark.parametrize("error,status", [(AuthenticationError("github-user-required"), 401),
+                                         (AuthorizationError("github-user-repository-denied"), 403)])
+def test_management_service_cannot_bypass_github_user_authorization(task_gateway, error, status):
+    app = server._github_app()
+    app.authorize_user.side_effect = error
+    assert task_request("POST", "/api/v1/tasks/spawn", issue_payload(), user_token="")[0] == status
+    app.authorize_user.assert_called_once_with("org/repo", "")
+    app.mint.assert_not_called()
+    assert server._task_db().execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
+def test_user_token_stays_out_of_task_storage_and_is_rechecked(task_gateway, monkeypatch):
+    app = server._github_app()
+    _, task = task_request("POST", "/api/v1/tasks/spawn", issue_payload())
+    task_id = task["task_id"]
+    with server._task_db() as db:
+        assert "ghu_user-test-only" not in str(dict(db.execute("SELECT * FROM tasks").fetchone()))
+    app.authorize_user.assert_called_once_with("org/repo", "ghu_user-test-only")
+    finish_failed_task(task_gateway, monkeypatch, task_id)
+    app.authorize_user.side_effect = AuthorizationError("revoked")
+    assert task_request("POST", f"/api/v1/tasks/{task_id}/retry", {"retry_key": "revoked-user"})[0] == 403
+    assert app.authorize_user.call_count == 2
+
+
 def test_old_task_cannot_renew_or_retry_as_app_task(task_gateway, monkeypatch):
     _, task = task_request("POST", "/api/v1/tasks/spawn", issue_payload())
     task_id = task["task_id"]
@@ -203,7 +229,7 @@ def test_app_chart_lint_render_and_schema(helm_values):
     assert not secrets.intersection({"orchestrator-github-pr-auth", "orchestrator-gateway-auth", "orchestrator-management-repositories"})
     role = next(document for document in documents if document["kind"] == "Role" and document["metadata"]["name"] == "orchestrator-supervisor")
     assert next(rule for rule in role["rules"] if "configmaps" in rule["resources"])["verbs"] == ["get"]
-    for setting in ("githubAuth.audience=", "githubAuth.appId=", "githubAuth.repositories=[]",
+    for setting in ("githubAuth.audience=", "githubAuth.appId=", "githubAuth.workflowPolicy.events[0]=pull_request",
                     "githubAuth.privateKeySecret.name=", "githubAuth.managementServiceSecret.name="):
         invalid = subprocess.run(["helm", "template", "app-check", str(chart), "--values", "-", "--set", setting],
                                  input=yaml.safe_dump(values), capture_output=True, text=True, check=False)

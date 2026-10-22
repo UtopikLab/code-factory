@@ -58,7 +58,7 @@ class GitHubAuth:
             obsolete = {"GITHUB_AUTH_MODE", "CODEFACTORY_AUTH_MODE", "CODEFACTORY_AUTH_TOKEN",
                         "GITHUB_TOKEN", "PR_GITHUB_TOKEN", "REPO_GITHUB_PAT"}
             allowed = {"GITHUB_OIDC_AUDIENCE", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_FILE",
-                       "GITHUB_REPOSITORY_POLICIES"}
+                       "GITHUB_REPOSITORY_POLICIES", "GITHUB_WORKFLOW_POLICY"}
             if obsolete.intersection(settings) or any(
                     name.startswith(("GITHUB_AUTH_", "GITHUB_APP_", "GITHUB_OIDC_", "GITHUB_REPOSITORY_", "CODEFACTORY_AUTH_"))
                     and name not in allowed for name in settings):
@@ -66,7 +66,16 @@ class GitHubAuth:
             policies = json.loads(settings.get("GITHUB_REPOSITORY_POLICIES", "[]"))
             if not self.audience or not re.fullmatch(r"[1-9][0-9]*", self.app_id) or not self.key_file:
                 raise ValueError()
-            if not isinstance(policies, list) or not policies or len(policies) > 100:
+            if not isinstance(policies, list) or len(policies) > 100:
+                raise ValueError()
+            self.workflow = json.loads(settings.get("GITHUB_WORKFLOW_POLICY", "null"))
+            if self.workflow is not None and (set(self.workflow) != {"ref", "workflow", "events"}
+                        or not re.fullmatch(r"refs/heads/[A-Za-z0-9_.\-/]+", self.workflow["ref"])
+                        or not re.fullmatch(r"\.github/workflows/[A-Za-z0-9_-]+\.ya?ml", self.workflow["workflow"])
+                        or not isinstance(self.workflow["events"], list) or not self.workflow["events"]
+                        or any(event not in ("issues", "workflow_dispatch") for event in self.workflow["events"])):
+                    raise ValueError()
+            if not policies and self.workflow is None:
                 raise ValueError()
             self.policies = {}
             for policy in policies:
@@ -95,10 +104,68 @@ class GitHubAuth:
             raise ValueError("github-auth-configuration-invalid") from None
 
     def policy(self, repo):
-        policy = self.policies.get((repo or "").lower())
-        if policy is None:
+        if (not isinstance(repo, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)
+                or any(part in (".", "..") for part in repo.split("/"))):
             raise AuthorizationError("repository-not-authorized")
-        return policy
+        policy = self.policies.get((repo or "").lower())
+        if policy is None and self.policies:
+            raise AuthorizationError("repository-not-authorized")
+        return policy or {"repository": repo}
+
+    def assertion(self):
+        with open(self.key_file, encoding="utf-8") as source:
+            private_key = source.read(32769)
+        if len(private_key) > 32768:
+            raise ValueError()
+        now = int(self.clock())
+        return jwt.encode({"iat": now - 30, "exp": now + 300, "iss": self.app_id}, private_key, algorithm="RS256")
+
+    def installation(self, repo):
+        policy = self.policy(repo)
+        try:
+            assertion = self.assertion()
+            installation = self.fetch("https://api.github.com/repos/" + repo + "/installation", token=assertion)
+            installation_id = str(installation["id"])
+            owner_id = str(installation["account"]["id"])
+            if (not re.fullmatch(r"[1-9][0-9]*", installation_id)
+                    or not re.fullmatch(r"[1-9][0-9]*", owner_id)
+                    or str(installation.get("app_id")) != self.app_id
+                    or installation.get("repository_selection") != "selected"
+                    or installation.get("suspended_at") is not None
+                    or any(policy.get(field, value) != value for field, value in
+                           (("installation_id", installation_id), ("repository_owner_id", owner_id)))):
+                raise ValueError()
+            return {**policy, "installation_id": installation_id, "repository_owner_id": owner_id}, assertion
+        except (jwt.PyJWTError, OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            raise AppUnavailable("github-app-unavailable") from None
+
+    def authorize_user(self, repo, token):
+        self.policy(repo)
+        if not isinstance(token, str) or not token.startswith("ghu_") or len(token) > 4096 or any(char.isspace() for char in token):
+            raise AuthenticationError("github-user-required")
+        try:
+            user = self.fetch("https://api.github.com/user", token=token)
+            if type(user.get("id")) is not int or user["id"] <= 0 or user.get("type") != "User":
+                raise ValueError()
+            policy, _ = self.installation(repo)
+            found = False
+            for page in range(1, 11):
+                result = self.fetch(f"https://api.github.com/user/installations?per_page=100&page={page}", token=token)
+                installations = result["installations"]
+                found = any(str(item.get("id")) == policy["installation_id"]
+                            and str(item.get("app_id")) == self.app_id for item in installations)
+                if found or len(installations) < 100:
+                    break
+            metadata = self.fetch("https://api.github.com/repos/" + repo, token=token)
+            if (not found or metadata.get("permissions", {}).get("push") is not True
+                    or metadata.get("archived") or metadata.get("fork") is not False
+                    or metadata.get("full_name", "").lower() != repo.lower()
+                    or str(metadata.get("owner", {}).get("id")) != policy["repository_owner_id"]
+                    or ("repository_id" in policy and str(metadata.get("id")) != policy["repository_id"])):
+                raise ValueError()
+            return str(user["id"])
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            raise AuthorizationError("github-user-repository-denied") from None
 
     def authenticate(self, token):
         try:
@@ -130,6 +197,24 @@ class GitHubAuth:
         except (jwt.PyJWTError, OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
             raise AuthenticationError("github-identity-invalid") from None
         policy = self.policy(claims["repository"] if isinstance(claims["repository"], str) else None)
+        if self.workflow is not None:
+            repo = claims["repository"]
+            binding = self.workflow
+            if (claims["ref"] != binding["ref"] or claims["event_name"] not in binding["events"]
+                    or claims["workflow_ref"] != repo + "/" + binding["workflow"] + "@" + binding["ref"]
+                    or claims["sub"] != "repo:" + repo + ":ref:" + binding["ref"]):
+                raise AuthorizationError("github-workflow-not-authorized")
+            credential = self.mint(repo)
+            try:
+                metadata = self.fetch("https://api.github.com/repos/" + repo, token=credential["token"])
+            except (OSError, ValueError, TypeError):
+                raise AppUnavailable("github-app-unavailable") from None
+            if (str(metadata.get("id")) != claims["repository_id"]
+                    or str(metadata.get("owner", {}).get("id")) != claims["repository_owner_id"]
+                    or metadata.get("fork") is not False):
+                raise AuthorizationError("github-workflow-not-authorized")
+            if not self.policies:
+                return repo
         if (claims["repository"] != policy["repository"]
                 or claims["repository_id"] != policy["repository_id"]
                 or claims["repository_owner_id"] != policy["repository_owner_id"]
@@ -139,14 +224,9 @@ class GitHubAuth:
         return policy["repository"]
 
     def mint(self, repo, write=False):
-        policy = self.policy(repo)
+        policy, assertion = self.installation(repo)
         try:
-            with open(self.key_file, encoding="utf-8") as source:
-                private_key = source.read(32769)
-            if len(private_key) > 32768:
-                raise ValueError()
             now = int(self.clock())
-            assertion = jwt.encode({"iat": now - 30, "exp": now + 300, "iss": self.app_id}, private_key, algorithm="RS256")
             installation = self.fetch("https://api.github.com/app/installations/" + policy["installation_id"], token=assertion)
             if (str(installation.get("id")) != policy["installation_id"]
                     or str(installation.get("app_id")) != self.app_id
@@ -154,6 +234,16 @@ class GitHubAuth:
                     or installation.get("repository_selection") != "selected" or installation.get("suspended_at") is not None):
                 raise ValueError()
             permissions = WRITE_PERMISSIONS if write else READ_PERMISSIONS
+            if "repository_id" not in policy:
+                probe = self.fetch("https://api.github.com/app/installations/" + policy["installation_id"] + "/access_tokens",
+                                   method="POST", token=assertion,
+                                   body={"repositories": [repo.split("/")[1]], "permissions": {"metadata": "read"}})
+                metadata = self.fetch("https://api.github.com/repos/" + repo, token=probe["token"])
+                if (metadata.get("full_name", "").lower() != repo.lower()
+                        or str(metadata.get("owner", {}).get("id")) != policy["repository_owner_id"]
+                        or type(metadata.get("id")) is not int or metadata["id"] <= 0):
+                    raise ValueError()
+                policy["repository_id"] = str(metadata["id"])
             result = self.fetch("https://api.github.com/app/installations/" + policy["installation_id"] + "/access_tokens",
                                 method="POST", token=assertion,
                                 body={"repository_ids": [int(policy["repository_id"])], "permissions": permissions})
@@ -168,7 +258,8 @@ class GitHubAuth:
             metadata = self.fetch("https://api.github.com/repos/" + policy["repository"], token=token)
             if (str(metadata.get("id")) != policy["repository_id"]
                     or str(metadata.get("owner", {}).get("id")) != policy["repository_owner_id"]
-                    or metadata.get("full_name", "").lower() != policy["repository"].lower() or metadata.get("archived")):
+                    or metadata.get("full_name", "").lower() != policy["repository"].lower()
+                    or metadata.get("archived") or metadata.get("fork") is not False):
                 raise ValueError()
             return {"token": token, "expires_at": expires, "repo": policy["repository"]}
         except (jwt.PyJWTError, OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):

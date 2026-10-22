@@ -58,6 +58,10 @@ spec:
               value: /etc/github-app/private-key.pem
             - name: GITHUB_REPOSITORY_POLICIES
               value: {{ .Values.githubAuth.repositories | toJson | quote }}
+            {{- with .Values.githubAuth.workflowPolicy }}
+            - name: GITHUB_WORKFLOW_POLICY
+              value: {{ . | toJson | quote }}
+            {{- end }}
             {{- if .Values.management.enabled }}
             - name: MANAGEMENT_SERVICE_TOKEN
               valueFrom:
@@ -68,8 +72,8 @@ spec:
             - name: SUPERVISOR_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "orchestrator.supervisorSecretName" . }}
-                  key: supervisor-auth-token
+                  name: {{ default (include "orchestrator.supervisorSecretName" .) .Values.credentials.internal.supervisorServiceSecret.name | quote }}
+                  key: {{ ternary .Values.credentials.internal.supervisorServiceSecret.key "supervisor-auth-token" (not (empty .Values.credentials.internal.supervisorServiceSecret.name)) | quote }}
             - name: GATEWAY_TRANSPORT_MODE
               value: {{ .Values.gateway.transportMode | quote }}
             - name: TASK_CREDENTIAL_TTL_SECONDS
@@ -100,7 +104,7 @@ spec:
       volumes:
         - name: github-app-key
           secret:
-            secretName: {{ .Values.githubAuth.privateKeySecret.name }}
+            secretName: {{ include "orchestrator.githubAppSecretName" . | quote }}
             defaultMode: 0440
             items:
               - key: {{ .Values.githubAuth.privateKeySecret.key }}

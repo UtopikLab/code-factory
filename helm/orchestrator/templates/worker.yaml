@@ -82,8 +82,8 @@ spec:
             - name: CODER_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "orchestrator.workerSecretName" . }}
-                  key: coder-api-key
+                  name: {{ default (include "orchestrator.workerSecretName" .) .Values.credentials.models.coderSecret.name | quote }}
+                  key: {{ ternary .Values.credentials.models.coderSecret.key "coder-api-key" (not (empty .Values.credentials.models.coderSecret.name)) | quote }}
             - name: ACCEPTOR_URL
               valueFrom:
                 configMapKeyRef:

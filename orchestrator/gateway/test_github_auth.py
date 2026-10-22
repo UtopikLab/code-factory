@@ -45,9 +45,9 @@ def auth_setup(tmp_path):
             return {"token": "test-installation-token", "permissions": {**kwargs["body"]["permissions"], "metadata": "read"},
                     "repositories": [{"id": 123}],
                     "expires_at": datetime.fromtimestamp(time.time() + 3600, UTC).isoformat()}
-        if "/app/installations/" in url:
+        if "/app/installations/" in url or url.endswith("/installation"):
             return {"id": 789, "app_id": 12, "account": {"id": 456}, "repository_selection": "selected", "suspended_at": None}
-        return {"id": 123, "owner": {"id": 456}, "full_name": "owner/repo", "archived": False}
+        return {"id": 123, "owner": {"id": 456}, "full_name": "owner/repo", "archived": False, "fork": False}
 
     claims = {"iss": ISSUER, "aud": settings["GITHUB_OIDC_AUDIENCE"], "iat": int(time.time()) - 1,
               "nbf": int(time.time()) - 1, "exp": int(time.time()) + 299,
@@ -199,3 +199,105 @@ def test_unknown_policy_security_fields_rejected(auth_setup, location):
 def test_app_configuration_is_mandatory():
     with pytest.raises(ValueError, match="^github-auth-configuration-invalid$"):
         GitHubAuth({})
+
+
+def dynamic_auth(auth_setup, restricted=False):
+    auth, key, claims, calls = auth_setup
+    settings = {"GITHUB_OIDC_AUDIENCE": auth.audience, "GITHUB_APP_ID": auth.app_id,
+                "GITHUB_APP_PRIVATE_KEY_FILE": auth.key_file,
+                "GITHUB_WORKFLOW_POLICY": json.dumps({"ref": "refs/heads/main", "workflow": ".github/workflows/drain.yaml",
+                                                      "events": ["issues", "workflow_dispatch"]})}
+    if restricted:
+        settings["GITHUB_REPOSITORY_POLICIES"] = json.dumps(list(auth.policies.values()))
+    original = auth.fetch
+
+    def fetch(url, **kwargs):
+        if url == "https://api.github.com/user":
+            return {"id": 42, "type": "User", "login": "verified-user"}
+        if "/user/installations?" in url:
+            return {"installations": [{"id": 789, "app_id": 12}]}
+        result = original(url, **kwargs)
+        if url == "https://api.github.com/repos/owner/repo":
+            result["permissions"] = {"push": True}
+        return result
+
+    return GitHubAuth(settings, fetch), key, claims, calls
+
+
+@pytest.mark.parametrize("restricted", [False, True])
+def test_dynamic_actions_and_user_success(auth_setup, restricted):
+    auth, key, claims, calls = dynamic_auth(auth_setup, restricted)
+    for event in ("issues", "workflow_dispatch"):
+        claims["event_name"] = event
+        if restricted and event == "workflow_dispatch":
+            continue
+        assert auth.authenticate(jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"})) == "owner/repo"
+    assert auth.authorize_user("owner/repo", "ghu_test-only") == "42"
+    assert auth.mint("owner/repo", write=True)["repo"] == "owner/repo"
+    bodies = [kwargs["body"] for url, kwargs in calls if url.endswith("/access_tokens")]
+    assert all(body.get("repository_ids") == [123] or body == {"repositories": ["repo"], "permissions": {"metadata": "read"}}
+               for body in bodies)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("repository_id", "999"), ("repository_owner_id", "999"),
+    ("event_name", "pull_request"), ("event_name", "pull_request_target"), ("event_name", "push"),
+    ("workflow_ref", "owner/repo/.github/workflows/evil.yaml@refs/heads/main"),
+    ("ref", "refs/heads/untrusted"), ("sub", "repo:owner/repo:pull_request"),
+])
+def test_dynamic_actions_denies_untrusted_claims(auth_setup, field, value):
+    auth, key, claims, _ = dynamic_auth(auth_setup)
+    claims[field] = value
+    with pytest.raises(AuthorizationError):
+        auth.authenticate(jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"}))
+
+
+@pytest.mark.parametrize("kind", ["readonly", "revoked", "other-app", "other-installation", "owner", "fork", "archived", "api-error", "no-user"])
+def test_user_access_fails_closed(auth_setup, kind):
+    auth, _, _, _ = dynamic_auth(auth_setup)
+    original = auth.fetch
+
+    def fetch(url, **kwargs):
+        if kind == "api-error":
+            raise OSError("sensitive-token")
+        result = original(url, **kwargs)
+        if url.endswith("/user") and kind == "no-user":
+            result["type"] = "Bot"
+        if "/user/installations?" in url:
+            if kind == "revoked":
+                result["installations"] = []
+            if kind == "other-app":
+                result["installations"][0]["app_id"] = 999
+            if kind == "other-installation":
+                result["installations"][0]["id"] = 999
+        if url.endswith("/repos/owner/repo"):
+            if kind == "readonly":
+                result["permissions"]["push"] = False
+            if kind == "owner":
+                result["owner"]["id"] = 999
+            if kind in ("fork", "archived"):
+                result[kind] = True
+        return result
+
+    auth.fetch = fetch
+    with pytest.raises(AuthorizationError, match="^github-user-repository-denied$"):
+        auth.authorize_user("owner/repo", "ghu_test-only")
+
+
+@pytest.mark.parametrize("token", ["", "ghp_pat", "client-asserted-login", "ghu_invalid\n"])
+def test_only_app_user_tokens_supported(auth_setup, token):
+    auth, _, _, _ = dynamic_auth(auth_setup)
+    with pytest.raises(AuthenticationError):
+        auth.authorize_user("owner/repo", token)
+
+
+def test_explicit_restriction_never_falls_back_to_dynamic(auth_setup):
+    auth, key, claims, calls = dynamic_auth(auth_setup, restricted=True)
+    for operation in (lambda: auth.authorize_user("other/repo", "ghu_test-only"),
+                      lambda: auth.mint("other/repo")):
+        with pytest.raises(AuthorizationError):
+            operation()
+    assert calls == []
+    claims["repository"] = "other/repo"
+    with pytest.raises(AuthorizationError):
+        auth.authenticate(jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"}))

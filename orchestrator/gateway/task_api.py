@@ -127,6 +127,10 @@ class TaskAPI:
         policy = gateway._github_app().policy(repo)
         if handler.actions_repo and handler.actions_repo.lower() != policy["repository"].lower():
             raise PermissionError("repository-mismatch")
+        if not handler.actions_repo:
+            user_token = handler.headers.get("X-GitHub-User-Token", "")
+            gateway._reject_credentials(payload, user_token)
+            gateway._github_app().authorize_user(repo, user_token)
         token = gateway._github_app().mint(repo)["token"]
         gateway._reject_credentials(payload, token)
         gateway._validate_repository(repo, issue, token)

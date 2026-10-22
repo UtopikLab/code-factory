@@ -1,8 +1,82 @@
 {
     "$schema": "https://json-schema.org/schema",
+    "definitions": {
+        "secretReference": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "name",
+                "key"
+            ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "maxLength": 253,
+                    "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                },
+                "key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 253,
+                    "pattern": "^[-._A-Za-z0-9]+$"
+                }
+            }
+        }
+    },
     "title": "k8s-inference values",
     "type": "object",
     "properties": {
+        "githubAuth": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "audience": {
+                    "type": "string"
+                },
+                "appId": {
+                    "type": "string"
+                },
+                "managementServiceSecret": {
+                    "$ref": "#/definitions/secretReference"
+                },
+                "workflowPolicy": {
+                    "type": "object"
+                },
+                "repositories": {
+                    "type": "array"
+                },
+                "privateKeyPem": {
+                    "type": "string"
+                },
+                "privateKeySecret": {
+                    "$ref": "#/definitions/secretReference"
+                }
+            },
+            "if": {
+                "required": [
+                    "privateKeyPem"
+                ],
+                "properties": {
+                    "privateKeyPem": {
+                        "pattern": "\\S"
+                    }
+                }
+            },
+            "else": {
+                "required": [
+                    "privateKeySecret"
+                ],
+                "properties": {
+                    "privateKeySecret": {
+                        "properties": {
+                            "name": {
+                                "minLength": 1
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "inference": {
             "type": "object",
             "properties": {
@@ -92,6 +166,9 @@
                     "properties": {
                         "supervisorServiceToken": {
                             "type": "string"
+                        },
+                        "supervisorServiceSecret": {
+                            "$ref": "#/definitions/secretReference"
                         }
                     }
                 },
@@ -113,6 +190,12 @@
                         },
                         "coderApiKey": {
                             "type": "string"
+                        },
+                        "openaiSecret": {
+                            "$ref": "#/definitions/secretReference"
+                        },
+                        "coderSecret": {
+                            "$ref": "#/definitions/secretReference"
                         }
                     }
                 }

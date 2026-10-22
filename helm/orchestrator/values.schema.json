@@ -1,5 +1,28 @@
 {
     "$schema": "https://json-schema.org/schema",
+    "definitions": {
+        "secretReference": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "name",
+                "key"
+            ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "maxLength": 253,
+                    "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                },
+                "key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 253,
+                    "pattern": "^[-._A-Za-z0-9]+$"
+                }
+            }
+        }
+    },
     "title": "orchestrator values",
     "type": "object",
     "properties": {
@@ -9,9 +32,7 @@
             "required": [
                 "audience",
                 "appId",
-                "privateKeySecret",
-                "managementServiceSecret",
-                "repositories"
+                "managementServiceSecret"
             ],
             "properties": {
                 "audience": {
@@ -24,26 +45,30 @@
                     "type": "string",
                     "pattern": "^[1-9][0-9]*$"
                 },
+                "privateKeyPem": {
+                    "type": "string"
+                },
                 "privateKeySecret": {
-                    "allOf": [
-                        {
-                            "$ref": "#/definitions/secretReference"
-                        },
-                        {
-                            "properties": {
-                                "name": {
-                                    "minLength": 1
-                                }
-                            }
-                        }
-                    ]
+                    "$ref": "#/definitions/secretReference"
                 },
                 "managementServiceSecret": {
                     "$ref": "#/definitions/secretReference"
                 },
+                "workflowPolicy": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["ref", "workflow", "events"],
+                    "properties": {
+                        "ref": {"type": "string", "pattern": "^refs/heads/[A-Za-z0-9_.\\-/]+$"},
+                        "workflow": {"type": "string", "pattern": "^\\.github/workflows/[A-Za-z0-9_-]+\\.ya?ml$"},
+                        "events": {
+                            "type": "array", "minItems": 1, "uniqueItems": true,
+                            "items": {"enum": ["issues", "workflow_dispatch"]}
+                        }
+                    }
+                },
                 "repositories": {
                     "type": "array",
-                    "minItems": 1,
                     "maxItems": 100,
                     "uniqueItems": true,
                     "items": {
@@ -114,12 +139,50 @@
                         }
                     }
                 }
+            },
+            "anyOf": [
+                {"required": ["workflowPolicy"]},
+                {"required": ["repositories"], "properties": {"repositories": {"minItems": 1}}}
+            ],
+            "if": {
+                "required": [
+                    "privateKeyPem"
+                ],
+                "properties": {
+                    "privateKeyPem": {
+                        "pattern": "\\S"
+                    }
+                }
+            },
+            "else": {
+                "required": [
+                    "privateKeySecret"
+                ],
+                "properties": {
+                    "privateKeySecret": {
+                        "properties": {
+                            "name": {
+                                "minLength": 1
+                            }
+                        }
+                    }
+                }
             }
         },
         "management": {
             "type": "object",
             "additionalProperties": false,
             "properties": {
+                "github": {
+                    "type": "object", "additionalProperties": false,
+                    "required": ["clientId", "clientSecret"],
+                    "properties": {
+                        "clientId": {"type": "string", "maxLength": 256, "pattern": "^[A-Za-z0-9_.-]*$"},
+                        "clientSecret": {"$ref": "#/definitions/secretReference"}
+                    },
+                    "if": {"properties": {"clientId": {"minLength": 1}}},
+                    "then": {"properties": {"clientSecret": {"properties": {"name": {"minLength": 1}}}}}
+                },
                 "enabled": {
                     "type": "boolean"
                 },
@@ -139,6 +202,27 @@
                         },
                         "password": {
                             "type": "string"
+                        },
+                        "passwordSecret": {
+                            "$ref": "#/definitions/secretReference"
+                        }
+                    },
+                    "not": {
+                        "required": [
+                            "password",
+                            "passwordSecret"
+                        ],
+                        "properties": {
+                            "password": {
+                                "minLength": 1
+                            },
+                            "passwordSecret": {
+                                "properties": {
+                                    "name": {
+                                        "minLength": 1
+                                    }
+                                }
+                            }
                         }
                     }
                 },
@@ -238,16 +322,38 @@
                     "properties": {
                         "admin": {
                             "required": [
-                                "username",
-                                "password"
+                                "username"
+                            ],
+                            "anyOf": [
+                                {
+                                    "required": [
+                                        "password"
+                                    ],
+                                    "properties": {
+                                        "password": {
+                                            "minLength": 8,
+                                            "pattern": "^[^<>\\s]*[^A-Za-z0-9<>\\s][^<>\\s]*$"
+                                        }
+                                    }
+                                },
+                                {
+                                    "required": [
+                                        "passwordSecret"
+                                    ],
+                                    "properties": {
+                                        "passwordSecret": {
+                                            "properties": {
+                                                "name": {
+                                                    "minLength": 1
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             ],
                             "properties": {
                                 "username": {
                                     "minLength": 1
-                                },
-                                "password": {
-                                    "minLength": 8,
-                                    "pattern": "^[^<>\\s]*[^A-Za-z0-9<>\\s][^<>\\s]*$"
                                 }
                             }
                         }
@@ -343,8 +449,28 @@
                     "properties": {
                         "supervisorServiceToken": {
                             "type": "string",
-                            "minLength": 1,
-                            "pattern": "^[^<>\\s]+$"
+                            "pattern": "^$|^[^<>\\s]+$"
+                        },
+                        "supervisorServiceSecret": {
+                            "$ref": "#/definitions/secretReference"
+                        }
+                    },
+                    "not": {
+                        "required": [
+                            "supervisorServiceToken",
+                            "supervisorServiceSecret"
+                        ],
+                        "properties": {
+                            "supervisorServiceToken": {
+                                "minLength": 1
+                            },
+                            "supervisorServiceSecret": {
+                                "properties": {
+                                    "name": {
+                                        "minLength": 1
+                                    }
+                                }
+                            }
                         }
                     }
                 },
@@ -368,8 +494,56 @@
                         "coderApiKey": {
                             "type": "string",
                             "pattern": "^$|^[^<>\\s]+$"
+                        },
+                        "openaiSecret": {
+                            "$ref": "#/definitions/secretReference"
+                        },
+                        "coderSecret": {
+                            "$ref": "#/definitions/secretReference"
                         }
-                    }
+                    },
+                    "allOf": [
+                        {
+                            "not": {
+                                "required": [
+                                    "openaiApiKey",
+                                    "openaiSecret"
+                                ],
+                                "properties": {
+                                    "openaiApiKey": {
+                                        "minLength": 1
+                                    },
+                                    "openaiSecret": {
+                                        "properties": {
+                                            "name": {
+                                                "minLength": 1
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            "not": {
+                                "required": [
+                                    "coderApiKey",
+                                    "coderSecret"
+                                ],
+                                "properties": {
+                                    "coderApiKey": {
+                                        "minLength": 1
+                                    },
+                                    "coderSecret": {
+                                        "properties": {
+                                            "name": {
+                                                "minLength": 1
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
                 }
             }
         },
@@ -1013,14 +1187,31 @@
                 "credentials": {
                     "properties": {
                         "internal": {
-                            "properties": {
-                                "supervisorServiceToken": {
-                                    "minLength": 1,
-                                    "pattern": "^[^<>\\s]+$"
+                            "anyOf": [
+                                {
+                                    "required": [
+                                        "supervisorServiceToken"
+                                    ],
+                                    "properties": {
+                                        "supervisorServiceToken": {
+                                            "minLength": 1
+                                        }
+                                    }
+                                },
+                                {
+                                    "required": [
+                                        "supervisorServiceSecret"
+                                    ],
+                                    "properties": {
+                                        "supervisorServiceSecret": {
+                                            "properties": {
+                                                "name": {
+                                                    "minLength": 1
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
-                            },
-                            "required": [
-                                "supervisorServiceToken"
                             ]
                         }
                     },

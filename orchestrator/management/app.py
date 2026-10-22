@@ -1,16 +1,19 @@
+import base64
+import hashlib
 import json
 import os
 import re
 import secrets
+import time
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 import jwt
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic
 
 TASK_FIELDS = ("task_id", "repo", "issue_number", "status", "lifecycle", "credential_cleanup",
@@ -19,7 +22,7 @@ REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 TASK_ID = re.compile(r"[A-Za-z0-9_.-]{1,63}")
 
 
-def create_app(settings=None, transport=None, signing_keys=None):
+def create_app(settings=None, transport=None, signing_keys=None, github_transport=None):
     settings = dict(os.environ if settings is None else settings)
     if {"GITHUB_AUTH_MODE", "CODEFACTORY_AUTH_MODE", "CODEFACTORY_AUTH_TOKEN", "MANAGEMENT_REPOSITORIES_FILE",
         "REPO_GITHUB_PAT", "PR_GITHUB_TOKEN", "GITHUB_TOKEN"}.intersection(settings) or any(
@@ -36,6 +39,11 @@ def create_app(settings=None, transport=None, signing_keys=None):
     admin_username = settings.get("MANAGEMENT_ADMIN_USERNAME", "admin")
     admin_password = settings.get("MANAGEMENT_ADMIN_PASSWORD", "")
     basic = HTTPBasic(auto_error=False, realm="Code Factory Admin")
+    github_sessions = {}
+    github_states = {}
+    github_client = settings.get("MANAGEMENT_GITHUB_CLIENT_ID", "")
+    github_secret = settings.get("MANAGEMENT_GITHUB_CLIENT_SECRET", "")
+    callback = origin + "/management/api/github/callback"
     keys = signing_keys
     if keys is None and jwks_url.startswith("https://"):
         keys = jwt.PyJWKClient(jwks_url, timeout=5)
@@ -85,8 +93,8 @@ def create_app(settings=None, transport=None, signing_keys=None):
     def repositories():
         try:
             policies = json.loads(settings.get("GITHUB_REPOSITORY_POLICIES", "[]"))
-            if not isinstance(policies, list) or not policies:
-                raise ValueError()
+            if not isinstance(policies, list):
+                raise TypeError()
             names = [policy["repository"] for policy in policies]
             if any(not isinstance(repo, str) or not REPOSITORY.fullmatch(repo)
                    or any(part in (".", "..") for part in repo.split("/")) for repo in names):
@@ -95,7 +103,96 @@ def create_app(settings=None, transport=None, signing_keys=None):
         except (ValueError, KeyError, TypeError):
             raise HTTPException(503, "repository-policy-not-configured") from None
 
-    async def gateway(method, path, *, params=None, payload=None):
+    def same_origin(request):
+        if request.headers.get("origin") != origin or request.headers.get("x-management-request") != "1":
+            raise HTTPException(403, "same-origin-request-required")
+
+    def github_token(request, subject):
+        now = time.time()
+        for session_id, session in list(github_sessions.items()):
+            if session["expires"] <= now:
+                github_sessions.pop(session_id, None)
+        session = github_sessions.get(request.cookies.get("__Host-github-session", ""))
+        if not session or session["subject"] != subject:
+            raise HTTPException(401, "github-sign-in-required")
+        return session["token"]
+
+    @app.get("/management/api/github/session")
+    def github_session(request: Request, subject: Annotated[str, Depends(identity)]):
+        try:
+            github_token(request, subject)
+            connected = True
+        except HTTPException:
+            connected = False
+        return {"connected": connected, "configured": bool(github_client and github_secret)}
+
+    @app.post("/management/api/github/connect")
+    def github_connect(request: Request, subject: Annotated[str, Depends(identity)]):
+        same_origin(request)
+        if not github_client or not github_secret or not origin.startswith("https://"):
+            raise HTTPException(503, "github-login-not-configured")
+        now = time.time()
+        for state, entry in list(github_states.items()):
+            if entry["expires"] <= now:
+                github_states.pop(state, None)
+        if len(github_states) >= 1000:
+            raise HTTPException(503, "github-login-busy")
+        state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+        github_states[state] = {"subject": subject, "verifier": verifier, "expires": now + 300}
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+        response = JSONResponse({"authorization_url": "https://github.com/login/oauth/authorize?" + urlencode({
+            "client_id": github_client, "redirect_uri": callback, "state": state,
+            "code_challenge": challenge, "code_challenge_method": "S256"})})
+        response.set_cookie("__Host-github-state", state, max_age=300, secure=True, httponly=True, samesite="lax", path="/")
+        return response
+
+    @app.get("/management/api/github/callback")
+    async def github_callback(request: Request, subject: Annotated[str, Depends(identity)]):
+        state = request.query_params.get("state", "")
+        entry = github_states.pop(state, None)
+        if (not entry or entry["expires"] <= time.time() or entry["subject"] != subject
+                or not secrets.compare_digest(state, request.cookies.get("__Host-github-state", ""))
+                or not request.query_params.get("code") or len(request.query_params["code"]) > 1024):
+            raise HTTPException(403, "github-login-invalid")
+        try:
+            async with httpx.AsyncClient(transport=github_transport, timeout=10, follow_redirects=False) as client:
+                result = await client.post("https://github.com/login/oauth/access_token", headers={"Accept": "application/json"},
+                                           json={"client_id": github_client, "client_secret": github_secret,
+                                                 "code": request.query_params["code"], "redirect_uri": callback,
+                                                 "code_verifier": entry["verifier"]})
+            result.raise_for_status()
+            grant = result.json()
+            token = grant["access_token"]
+            if (not isinstance(token, str) or not token.startswith("ghu_") or len(token) > 4096
+                    or any(char.isspace() for char in token) or grant.get("token_type", "").lower() != "bearer"):
+                raise ValueError()
+            expires = min(int(grant.get("expires_in", 3600)), 3600)
+            if expires <= 0:
+                raise ValueError()
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+            raise HTTPException(403, "github-login-failed") from None
+        for session_id, session in list(github_sessions.items()):
+            if session["expires"] <= time.time():
+                github_sessions.pop(session_id, None)
+        if len(github_sessions) >= 1000:
+            raise HTTPException(503, "github-login-busy")
+        github_sessions.pop(request.cookies.get("__Host-github-session", ""), None)
+        session_id = secrets.token_urlsafe(32)
+        github_sessions[session_id] = {"subject": subject, "token": token, "expires": time.time() + expires}
+        response = RedirectResponse("/#/tasks", status_code=303)
+        response.set_cookie("__Host-github-session", session_id, max_age=expires, secure=True, httponly=True, samesite="lax", path="/")
+        response.delete_cookie("__Host-github-state", secure=True, httponly=True, samesite="lax", path="/")
+        return response
+
+    @app.post("/management/api/github/disconnect")
+    def github_disconnect(request: Request, subject: Annotated[str, Depends(identity)]):
+        same_origin(request)
+        github_sessions.pop(request.cookies.get("__Host-github-session", ""), None)
+        response = JSONResponse({"connected": False})
+        response.delete_cookie("__Host-github-session", secure=True, httponly=True, samesite="lax", path="/")
+        return response
+
+    async def gateway(method, path, *, params=None, payload=None, user_token=None):
         base = settings.get("MANAGEMENT_GATEWAY_URL", "")
         token = settings.get("MANAGEMENT_SERVICE_TOKEN", "")
         parsed = urlsplit(base)
@@ -104,6 +201,8 @@ def create_app(settings=None, transport=None, signing_keys=None):
                 or (parsed.scheme != "https" and not (parsed.scheme == "http" and local))):
             raise HTTPException(503, "gateway-not-configured")
         headers = {"Authorization": "token " + token}
+        if user_token:
+            headers["X-GitHub-User-Token"] = user_token
         try:
             async with httpx.AsyncClient(transport=transport, timeout=35, follow_redirects=False) as client:
                 response = await client.request(method, base.rstrip("/") + path, params=params,
@@ -151,8 +250,8 @@ def create_app(settings=None, transport=None, signing_keys=None):
             r"https://github\.com/" + re.escape(repo) + r"/pull/[1-9][0-9]*", pr_url, re.IGNORECASE)) else None
         return summary
 
-    @app.post("/management/api/tasks", dependencies=[Depends(identity)])
-    async def submit(request: Request):
+    @app.post("/management/api/tasks")
+    async def submit(request: Request, subject: Annotated[str, Depends(identity)]):
         if request.headers.get("origin") != origin or request.headers.get("x-management-request") != "1":
             raise HTTPException(403, "same-origin-request-required")
         if request.headers.get("content-type", "").split(";")[0] != "application/json":
@@ -171,11 +270,12 @@ def create_app(settings=None, transport=None, signing_keys=None):
                 or type(payload["issue_number"]) is not int or not 1 <= payload["issue_number"] <= 2147483647):
             raise HTTPException(400, "invalid-submission")
         allowed = repositories()
-        repo = next((repo for repo in allowed if repo.lower() == payload["repo"].lower()), None)
+        repo = next((repo for repo in allowed if repo.lower() == payload["repo"].lower()), None) if allowed else payload["repo"]
         if repo is None:
             raise HTTPException(403, "repository-not-authorized")
+        user_token = github_token(request, subject)
         status, data = await gateway("POST", "/api/v1/tasks/spawn",
-                                     payload={"repo": repo, "issue_number": payload["issue_number"]})
+                                     payload={"repo": repo, "issue_number": payload["issue_number"]}, user_token=user_token)
         return JSONResponse(task_summary(data), status_code=status)
 
     @app.get("/management/api/config", dependencies=[Depends(identity)])

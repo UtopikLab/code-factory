@@ -4,6 +4,13 @@
 {{- define "orchestrator.workerSecretName" -}}
 {{- printf "%s-coder-model-auth" .Chart.Name -}}
 {{- end -}}
+{{- define "orchestrator.githubAppSecretName" -}}
+{{- if (.Values.githubAuth.privateKeyPem | default "" | trim) -}}
+{{- .Values.githubAuth.privateKeySecret.name | default "code-factory-github-app" -}}
+{{- else -}}
+{{- .Values.githubAuth.privateKeySecret.name -}}
+{{- end -}}
+{{- end -}}
 {{- define "orchestrator.agentRuntimeConfigJson" -}}
 {{- $coderUrl := default (index .Values.supervisor.config "coder-url") .Values.worker.coderUrl -}}
 {{- $coderNative := eq $coderUrl "http://llama-server-args-gpu0.inference.svc.cluster.local:8000/v1" -}}

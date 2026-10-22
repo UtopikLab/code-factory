@@ -11,24 +11,39 @@ icon: ""
 githubAuth:
   audience: ""
   appId: ""
+  privateKeyPem: ""
+  # Inline PEM uses code-factory-github-app when name is empty; external mode requires a name.
   privateKeySecret:
     name: ""
     key: private-key.pem
   managementServiceSecret:
     name: ""
     key: token
+  workflowPolicy:
+    ref: refs/heads/main
+    workflow: .github/workflows/drain.yaml
+    events: [issues, workflow_dispatch]
   repositories: []
 
-# Set credential values in helm/local.secrets-values.yaml; the chart owns Secrets.
+# Set raw values OR external Secret references in helm/local.secrets-values.yaml.
 # The registry PAT is independent of App repository auth.
 credentials:
   internal:
     supervisorServiceToken: ""
+    supervisorServiceSecret:
+      name: ""
+      key: token
   github:
     ghcrReadPackagesPat: ""
   models:
     openaiApiKey: ""
     coderApiKey: ""
+    openaiSecret:
+      name: ""
+      key: api-key
+    coderSecret:
+      name: ""
+      key: api-key
 
 registry:
   create: false
@@ -153,10 +168,18 @@ agentCatalog:
 
 management:
   enabled: false
+  github:
+    clientId: ""
+    clientSecret:
+      name: ""
+      key: client-secret
   authMode: admin
   admin:
     username: admin
     password: ""
+    passwordSecret:
+      name: ""
+      key: password
   image: "ghcr.io/utopiklab/code-factory-management:latest"
   imagePullPolicy: IfNotPresent
   publicOrigin: ""

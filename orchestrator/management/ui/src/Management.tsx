@@ -31,11 +31,22 @@ function Submission({ onSubmitted }: { onSubmitted: (task: Task) => void }) {
     const [repo, setRepo] = useState('')
     const [issue, setIssue] = useState('')
     const repositories = useQuery({ queryKey: ['repositories'], queryFn: () => api<{ repositories: string[] }>('/repositories'), enabled: open, retry: false })
+    const github = useQuery({ queryKey: ['github-session'], queryFn: () => api<{ connected: boolean; configured: boolean }>('/github/session'), enabled: open, retry: false })
+    const connection = useMutation({
+        mutationFn: () => api<{ authorization_url: string }>('/github/connect', {}),
+        onSuccess: data => { window.location.assign(data.authorization_url) }
+    })
+    const disconnection = useMutation({
+        mutationFn: () => api('/github/disconnect', {}),
+        onSuccess: () => { void github.refetch() }
+    })
     const submission = useMutation({
         mutationFn: (payload: { repo: string; issue_number: number }) => api<Task>('/tasks', payload),
         onSuccess: task => { setOpen(false); setIssue(''); onSubmitted(task) }
     })
-    const valid = (repositories.data?.repositories.includes(repo) ?? false) && /^[1-9][0-9]*$/.test(issue) && Number(issue) <= 2147483647
+    const dynamic = repositories.data?.repositories.length === 0
+    const validRepo = dynamic ? /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) : (repositories.data?.repositories.includes(repo) ?? false)
+    const valid = github.data?.connected && validRepo && /^[1-9][0-9]*$/.test(issue) && Number(issue) <= 2147483647
     function submit(event: FormEvent) {
         event.preventDefault()
         if (valid && !submission.isPending) submission.mutate({ repo, issue_number: Number(issue) })
@@ -46,13 +57,16 @@ function Submission({ onSubmitted }: { onSubmitted: (task: Task) => void }) {
             onEscapeKeyDown={event => { if (submission.isPending) event.preventDefault() }}>
             <div className="dialog-heading"><Dialog.Title>Submit task</Dialog.Title><Dialog.Close asChild><button className="icon-button" aria-label="Close submission" title="Close submission" disabled={submission.isPending}><X /></button></Dialog.Close></div>
             <form onSubmit={submit}>
+                {github.data?.connected ? <button type="button" onClick={() => disconnection.mutate()} disabled={disconnection.isPending}><ShieldCheck />Disconnect GitHub</button>
+                    : <button type="button" onClick={() => connection.mutate()} disabled={!github.data?.configured || connection.isPending}><GitPullRequest />Connect GitHub</button>}
+                {github.data && !github.data.configured && <p role="status">GitHub login is not configured.</p>}
+                {(github.error || connection.error || disconnection.error) && <p role="alert" className="error">{(github.error || connection.error || disconnection.error)?.message}</p>}
                 <label htmlFor="repository">Repository</label>
-                <select id="repository" value={repo} onChange={event => setRepo(event.target.value)} required disabled={submission.isPending || repositories.isPending}>
+                {dynamic ? <input id="repository" placeholder="owner/repository" value={repo} onChange={event => setRepo(event.target.value)} required disabled={submission.isPending} /> : <select id="repository" value={repo} onChange={event => setRepo(event.target.value)} required disabled={submission.isPending || repositories.isPending}>
                     <option value="">Select repository</option>{repositories.data?.repositories.map(name => <option key={name}>{name}</option>)}
-                </select>
+                </select>}
                 {repositories.isPending && <p role="status">Loading repositories</p>}
                 {repositories.isError && <QueryState error={repositories.error} retry={() => { void repositories.refetch() }} />}
-                {repositories.data?.repositories.length === 0 && <p role="status">No repositories authorized.</p>}
                 <label htmlFor="issue">Issue number</label>
                 <input id="issue" type="number" min="1" max="2147483647" step="1" inputMode="numeric" value={issue} onChange={event => setIssue(event.target.value)} required disabled={submission.isPending} />
                 {submission.isError && <p className="error" role="alert">{submission.error.message}</p>}

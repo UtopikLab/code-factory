@@ -19,9 +19,276 @@ AUTH_CREDENTIALS = {
     },
 }
 APP_VALUES = yaml.safe_load((HELM_DIR / "orchestrator/example.values.yaml").read_text())["githubAuth"]
+APP_VALUES.update(yaml.safe_load((HELM_DIR / "example.secrets-values.yaml").read_text())["githubAuth"])
 
 
 class RegistryValuesTests(unittest.TestCase):
+    def test_inline_github_app_key_preserves_literal_block_and_mount(self):
+        for key in ("private-key.pem", "custom.pem"):
+            for chomping, ending in (("|", "\n"), ("|-", ""), ("|+", "\n\n")):
+                with self.subTest(key=key, chomping=chomping):
+                    values = {"githubAuth": {**APP_VALUES,
+                        "privateKeySecret": {"name": "code-factory-github-app", "key": key},
+                    }}
+                    literal = (f"privateKeyPem: {chomping}\n"
+                               "  NOT-A-PRIVATE-KEY\n   dummy-multiline-placeholder \n\n")
+                    values["githubAuth"].update(yaml.safe_load(literal))
+                    expected = "NOT-A-PRIVATE-KEY\n dummy-multiline-placeholder " + ending
+                    for chart in ("orchestrator", "inference"):
+                        documents = self.documents(chart, values)
+                        secrets = [document for document in documents
+                                   if document["kind"] == "Secret"
+                                   and document["metadata"]["name"] == "code-factory-github-app"]
+                        if chart == "inference":
+                            self.assertEqual(secrets, [])
+                            continue
+                        self.assertEqual(len(secrets), 1)
+                        self.assertEqual(secrets[0]["type"], "Opaque")
+                        self.assertEqual(secrets[0]["metadata"]["namespace"], "orchestrator")
+                        self.assertEqual(set(secrets[0]["data"]), {key})
+                        self.assertEqual(base64.b64decode(secrets[0]["data"][key]).decode(), expected)
+                        gateway = next(document for document in documents
+                                       if document["kind"] == "Deployment"
+                                       and document["metadata"]["name"] == "orchestrator-gateway")
+                        volumes = gateway["spec"]["template"]["spec"]["volumes"]
+                        volume = next(volume for volume in volumes if volume["name"] == "github-app-key")
+                        self.assertEqual(volume["secret"]["secretName"], "code-factory-github-app")
+                        self.assertEqual(volume["secret"]["items"], [{"key": key, "path": "private-key.pem"}])
+                        for document in documents:
+                            if document["kind"] in ("Deployment", "Job") and document != gateway:
+                                self.assertFalse(any(volume["name"] == "github-app-key" for volume in
+                                                     document["spec"]["template"]["spec"].get("volumes", [])))
+
+    def test_inline_github_app_key_rejects_invalid_input_and_legacy_flag(self):
+        cases = (
+            {"createPrivateKeySecret": True},
+            {"createPrivateKeySecret": False},
+            {"createPrivateKeySecret": True, "privateKeyPem": "dummy-key"},
+            {"createPrivateKeySecret": False, "privateKeyPem": "dummy-key"},
+            {"privateKeyPem": 123},
+            {"privateKeyPem": "dummy-key",
+             "privateKeySecret": {"name": "invalid/name", "key": "private-key.pem"}},
+            {"privateKeyPem": "dummy-key",
+             "privateKeySecret": {"name": "code-factory-github-app", "key": "invalid/key"}},
+        )
+        for index, overrides in enumerate(cases):
+            for chart in ("orchestrator", "inference"):
+                with self.subTest(case=index, chart=chart):
+                    result = self.render(chart, {"githubAuth": {**APP_VALUES, **overrides}})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("kind: Secret", result.stdout)
+
+    def test_external_github_app_key_requires_valid_reference(self):
+        for pem in (None, "", " \n\t"):
+            for reference in (None, {}, {"name": "", "key": "private-key.pem"},
+                              {"name": "invalid/name", "key": "private-key.pem"},
+                              {"name": "external-app-key", "key": ""},
+                              {"name": "external-app-key", "key": "invalid/key"}):
+                for chart in ("orchestrator", "inference"):
+                    with self.subTest(pem=pem, reference=reference, chart=chart):
+                        settings = {key: value for key, value in APP_VALUES.items()
+                                    if key not in ("privateKeyPem", "privateKeySecret")}
+                        if pem is not None:
+                            settings["privateKeyPem"] = pem
+                        if reference is not None:
+                            settings["privateKeySecret"] = reference
+                        result = self.render(chart, {"githubAuth": settings})
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("privateKeySecret", result.stderr)
+                        self.assertNotIn("kind: Secret", result.stdout)
+
+    def test_external_github_app_key_does_not_render_managed_secret(self):
+        for pem in (None, "", " \n\t"):
+            for chart in ("orchestrator", "inference"):
+                with self.subTest(pem=pem, chart=chart):
+                    settings = {**APP_VALUES, "privateKeySecret": {
+                        "name": "external-app-key", "key": "external.pem",
+                    }}
+                    settings.pop("privateKeyPem", None)
+                    if pem is not None:
+                        settings["privateKeyPem"] = pem
+                    documents = self.documents(chart, {"githubAuth": settings})
+                    self.assertFalse(any(document["kind"] == "Secret" and
+                                         document["metadata"]["name"] == "external-app-key"
+                                         for document in documents))
+                    if chart == "orchestrator":
+                        gateway = next(document for document in documents
+                                       if document["kind"] == "Deployment"
+                                       and document["metadata"]["name"] == "orchestrator-gateway")
+                        volume = next(volume for volume in
+                                      gateway["spec"]["template"]["spec"]["volumes"]
+                                      if volume["name"] == "github-app-key")
+                        self.assertEqual(volume["secret"]["secretName"], "external-app-key")
+                        self.assertEqual(volume["secret"]["items"], [
+                            {"key": "external.pem", "path": "private-key.pem"},
+                        ])
+
+    def test_inline_github_app_key_layered_lint(self):
+        shared = yaml.safe_load((HELM_DIR / "example.values.yaml").read_text())
+        shared["registry"]["username"] = USERNAME
+        settings = yaml.safe_load((HELM_DIR / "orchestrator/example.values.yaml").read_text())
+        private = yaml.safe_load((HELM_DIR / "example.secrets-values.yaml").read_text())
+        private["githubAuth"] = {
+            "privateKeyPem": "NOT-A-PRIVATE-KEY\ndummy-placeholder\n",
+        }
+        private["credentials"]["internal"].update(AUTH_CREDENTIALS["internal"])
+        private["credentials"]["github"]["ghcrReadPackagesPat"] = TOKEN
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for name, values in (("shared.yaml", shared), ("settings.yaml", settings),
+                                 ("private.yaml", private)):
+                path = Path(directory) / name
+                path.write_text(yaml.safe_dump(values))
+                paths.append(path)
+            for chart in ("inference", "orchestrator"):
+                with self.subTest(chart=chart):
+                    layers = paths if chart == "orchestrator" else [paths[0], paths[2]]
+                    command = ["helm", "lint", str(HELM_DIR / chart)]
+                    for path in layers:
+                        command.extend(("--values", str(path)))
+                    result = subprocess.run(command, text=True, capture_output=True, check=False)
+                    self.assertEqual(result.returncode, 0, "Synthetic inline App-key layered Helm lint failed")
+                    documents = self.documents_from_value_files(chart, layers)
+                    app_secrets = [document for document in documents if document["kind"] == "Secret"
+                                   and document["metadata"]["name"] == "code-factory-github-app"]
+                    self.assertEqual(len(app_secrets), int(chart == "orchestrator"))
+                    if chart == "orchestrator":
+                        self.assertEqual(base64.b64decode(app_secrets[0]["data"]["private-key.pem"]).decode(),
+                                         private["githubAuth"]["privateKeyPem"])
+                        gateway = next(document for document in documents
+                                       if document["kind"] == "Deployment"
+                                       and document["metadata"]["name"] == "orchestrator-gateway")
+                        volume = next(volume for volume in gateway["spec"]["template"]["spec"]["volumes"]
+                                      if volume["name"] == "github-app-key")
+                        self.assertEqual(volume["secret"]["secretName"], "code-factory-github-app")
+                        self.assertEqual(volume["secret"]["items"], [
+                            {"key": "private-key.pem", "path": "private-key.pem"},
+                        ])
+
+    def test_external_workload_credentials_skip_managed_secrets(self):
+        references = {
+            "supervisorServiceSecret": {"name": "code-factory-supervisor-service", "key": "token"},
+            "openaiSecret": {"name": "code-factory-openai", "key": "api-key"},
+            "coderSecret": {"name": "code-factory-coder", "key": "api-key"},
+        }
+        result = self.render("orchestrator", {"credentials": {
+            "internal": {"supervisorServiceSecret": references["supervisorServiceSecret"]},
+            "models": {key: references[key] for key in ("openaiSecret", "coderSecret")},
+        }}, provide_auth=False)
+        self.assertEqual(result.returncode, 0, "External credential render failed")
+        documents = [document for document in yaml.safe_load_all(result.stdout) if document]
+        self.assertFalse(any(document["kind"] == "Secret" for document in documents))
+        expected = {
+            "SUPERVISOR_AUTH_TOKEN": references["supervisorServiceSecret"],
+            "OPENAI_API_KEY": references["openaiSecret"],
+            "CODER_API_KEY": references["coderSecret"],
+        }
+        counts = dict.fromkeys(expected, 0)
+        for document in documents:
+            if document["kind"] not in ("Deployment", "Job"):
+                continue
+            for container in document["spec"]["template"]["spec"]["containers"]:
+                for entry in container.get("env", []):
+                    if entry["name"] in expected:
+                        self.assertEqual(entry["valueFrom"]["secretKeyRef"], expected[entry["name"]])
+                        counts[entry["name"]] += 1
+        self.assertEqual(counts, {"SUPERVISOR_AUTH_TOKEN": 2, "OPENAI_API_KEY": 1, "CODER_API_KEY": 1})
+
+    def test_external_credentials_reject_conflicts_and_invalid_references(self):
+        sources = (
+            ("internal", "supervisorServiceToken", "supervisorServiceSecret"),
+            ("models", "openaiApiKey", "openaiSecret"),
+            ("models", "coderApiKey", "coderSecret"),
+            ("admin", "password", "passwordSecret"),
+        )
+        for group, raw_key, reference_key in sources:
+            for reference in (
+                {"name": "invalid/name", "key": "token"},
+                {"name": "valid-secret", "key": ""},
+                {"name": "valid-secret", "key": "invalid/key"},
+                {"name": "valid-secret", "key": "token", "optional": True},
+                None,
+            ):
+                with self.subTest(group=group, reference=reference):
+                    if group == "admin":
+                        values = self.management_values()
+                        values["management"].update({"authMode": "admin", "admin": {
+                            reference_key: reference,
+                        }})
+                    else:
+                        values = {"credentials": {group: {reference_key: reference}}}
+                    result = self.render("orchestrator", values)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("kind: Secret", result.stdout)
+                    if group != "admin":
+                        self.assertNotEqual(self.render("inference", values).returncode, 0)
+            with self.subTest(group=group, conflict=True):
+                settings = {
+                    raw_key: "synthetic-conflicting-value",
+                    reference_key: {"name": "external-secret", "key": "token"},
+                }
+                if group == "admin":
+                    values = self.management_values()
+                    values["management"].update({"authMode": "admin", "admin": settings})
+                else:
+                    values = {"credentials": {group: settings}}
+                result = self.render("orchestrator", values)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("kind: Secret", result.stdout)
+
+    def test_external_admin_secret_and_reference_only_layers(self):
+        shared = {
+            "registry": {"create": False, "username": ""},
+            "imagePullSecrets": [{"name": "code-factory-ghcr-pull"}],
+            "inference": {"imagePullSecrets": [{"name": "code-factory-ghcr-pull"}]},
+        }
+        settings = self.management_values()
+        settings["githubAuth"] = APP_VALUES
+        settings["management"]["authMode"] = "admin"
+        private = {
+            "credentials": {
+                "internal": {"supervisorServiceSecret": {
+                    "name": "code-factory-supervisor-service", "key": "token",
+                }},
+                "models": {
+                    "openaiSecret": {"name": "code-factory-openai", "key": "api-key"},
+                    "coderSecret": {"name": "code-factory-coder", "key": "api-key"},
+                },
+            },
+            "management": {"admin": {"passwordSecret": {
+                "name": "code-factory-management-admin", "key": "login-password",
+            }}},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for name, values in (("shared.yaml", shared), ("settings.yaml", settings),
+                                 ("private.yaml", private)):
+                path = Path(directory) / name
+                path.write_text(yaml.safe_dump(values))
+                paths.append(path)
+            for chart in ("inference", "orchestrator"):
+                with self.subTest(chart=chart):
+                    layers = paths if chart == "orchestrator" else [paths[0], paths[2]]
+                    documents = self.documents_from_value_files(chart, layers)
+                    self.assertFalse(any(document["kind"] == "Secret" for document in documents))
+                    for document in documents:
+                        if document["kind"] in ("Deployment", "Job"):
+                            self.assertEqual(document["spec"]["template"]["spec"]["imagePullSecrets"],
+                                             shared["imagePullSecrets"])
+                    command = ["helm", "lint", str(HELM_DIR / chart)]
+                    for path in layers:
+                        command.extend(("--values", str(path)))
+                    result = subprocess.run(command, text=True, capture_output=True, check=False)
+                    self.assertEqual(result.returncode, 0, "Reference-only layered Helm lint failed")
+                    if chart == "orchestrator":
+                        deployment = next(document for document in documents
+                                          if document["kind"] == "Deployment"
+                                          and document["metadata"]["name"] == "orchestrator-management")
+                        environment = {entry["name"]: entry for entry in
+                                       deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+                        self.assertEqual(environment["MANAGEMENT_ADMIN_PASSWORD"]["valueFrom"]["secretKeyRef"],
+                                         private["management"]["admin"]["passwordSecret"])
+
     def test_supervisor_catalog_rbac_is_namespace_scoped_get_only(self):
         for namespace in ("orchestrator", "custom-tasks"):
             with self.subTest(namespace=namespace):
@@ -358,15 +625,20 @@ class RegistryValuesTests(unittest.TestCase):
 
     def test_examples_separate_credentials_from_behavior(self):
         credentials = yaml.safe_load((HELM_DIR / "example.secrets-values.yaml").read_text())
-        self.assertEqual(set(credentials), {"credentials", "management"})
+        self.assertEqual(set(credentials), {"githubAuth", "credentials", "management"})
+        self.assertEqual(set(credentials["githubAuth"]), {
+            "privateKeySecret", "managementServiceSecret", "privateKeyPem",
+        })
         self.assertEqual(set(credentials["credentials"]), {"internal", "github", "models"})
-        self.assertEqual(set(credentials["management"]), {"admin", "oidc"})
+        self.assertEqual(set(credentials["management"]), {"admin"})
         self.assertNotIn("createSecret", str(credentials))
         self.assertNotIn("existingSecret", str(credentials))
 
         shared = yaml.safe_load((HELM_DIR / "example.values.yaml").read_text())
         self.assertEqual(shared["registry"], {"create": True, "username": "<your-github-username>"})
         orchestrator = yaml.safe_load((HELM_DIR / "orchestrator/example.values.yaml").read_text())
+        self.assertEqual(set(orchestrator["githubAuth"]), {"audience", "appId", "repositories", "workflowPolicy"})
+        self.assertIn("oidc", orchestrator["management"])
         for component in ("gateway", "supervisor", "worker"):
             self.assertNotIn("auth", orchestrator.get(component, {}))
 
@@ -375,7 +647,10 @@ class RegistryValuesTests(unittest.TestCase):
         shared_values["registry"]["username"] = USERNAME
         orchestrator_values = yaml.safe_load(
             (HELM_DIR / "orchestrator/example.values.yaml").read_text())
-        secret_values = {"credentials": {
+        secret_values = {"githubAuth": {
+            "privateKeySecret": {"name": "layered-app-key", "key": "app.pem"},
+            "managementServiceSecret": {"name": "layered-management", "key": "service-token"},
+        }, "credentials": {
             "internal": {
                 "supervisorServiceToken": "supervisor-layered-dummy",
             },
@@ -433,6 +708,9 @@ class RegistryValuesTests(unittest.TestCase):
                     gateway_env = {entry["name"]: entry for entry in
                                    gateway["spec"]["template"]["spec"]["containers"][0]["env"]}
                     self.assertNotIn("CODEFACTORY_AUTH_TOKEN", gateway_env)
+                    gateway_volumes = gateway["spec"]["template"]["spec"]["volumes"]
+                    self.assertTrue(any(volume.get("secret", {}).get("secretName") == "layered-app-key"
+                                        for volume in gateway_volumes))
                     supervisor = next(document for document in documents if document["kind"] == "Deployment"
                                       and document["metadata"]["name"] == "orchestrator-supervisor")
                     supervisor_env = {entry["name"]: entry for entry in
@@ -449,12 +727,9 @@ class RegistryValuesTests(unittest.TestCase):
 
     def documents_from_value_files(self, chart, value_files):
         command = ["helm", "template", "local", str(HELM_DIR / chart)]
-        if chart == "orchestrator":
-            command.extend(("--values", "-"))
         for path in value_files:
             command.extend(("--values", str(path)))
-        result = subprocess.run(command, input=yaml.safe_dump({"credentials": AUTH_CREDENTIALS, "githubAuth": APP_VALUES}),
-                                text=True, capture_output=True, check=False)
+        result = subprocess.run(command, text=True, capture_output=True, check=False)
         self.assertEqual(result.returncode, 0, "Layered dummy Helm render failed")
         return [document for document in yaml.safe_load_all(result.stdout) if document]
 
@@ -638,6 +913,8 @@ class RegistryValuesTests(unittest.TestCase):
                 "supervisorServiceToken": "supervisor-proxy-example-dummy",
             },
         }
+        values["githubAuth"].update(yaml.safe_load(
+            (HELM_DIR / "example.secrets-values.yaml").read_text())["githubAuth"])
         documents = self.documents("orchestrator", values)
         ingress = next(document for document in documents if document["kind"] == "Ingress")
         self.assertEqual(ingress["spec"]["rules"][0]["host"], "code-factory.local")
@@ -723,6 +1000,32 @@ class RegistryValuesTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("repositoriesSecret", result.stderr)
 
+    def test_dynamic_repository_policy_and_oauth_secret_wiring(self):
+        values = self.management_values()
+        values["githubAuth"] = {**APP_VALUES, "repositories": []}
+        values["management"]["github"] = {"clientId": "Iv1.test-client",
+                                             "clientSecret": {"name": "test-github-oauth", "key": "client-secret"}}
+        documents = self.documents("orchestrator", values)
+        deployments = {document["metadata"]["name"]: document for document in documents if document["kind"] == "Deployment"}
+        for name, deployment in deployments.items():
+            environment = {entry["name"]: entry for entry in deployment["spec"]["template"]["spec"]["containers"][0].get("env", [])}
+            if name == "orchestrator-management":
+                self.assertEqual(environment["MANAGEMENT_GITHUB_CLIENT_ID"]["value"], "Iv1.test-client")
+                self.assertEqual(environment["MANAGEMENT_GITHUB_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"],
+                                 {"name": "test-github-oauth", "key": "client-secret"})
+            else:
+                self.assertNotIn("MANAGEMENT_GITHUB_CLIENT_SECRET", environment)
+            if name == "orchestrator-gateway":
+                self.assertEqual(json.loads(environment["GITHUB_WORKFLOW_POLICY"]["value"]), APP_VALUES["workflowPolicy"])
+                self.assertEqual(json.loads(environment["GITHUB_REPOSITORY_POLICIES"]["value"]), [])
+        for overrides in ({"workflowPolicy": None}, {"workflowPolicy": {"events": ["pull_request"]}},
+                          {"workflowPolicy": {"workflow": "../attacker.yaml"}}, {"audience": ""}):
+            values["githubAuth"] = {**APP_VALUES, "repositories": [], **overrides}
+            self.assertNotEqual(self.render("orchestrator", values).returncode, 0)
+        values["githubAuth"] = APP_VALUES
+        values["management"]["github"]["clientSecret"]["name"] = ""
+        self.assertNotEqual(self.render("orchestrator", values).returncode, 0)
+
     def test_management_admin_without_managed_repositories(self):
         values = self.management_values()
         values["management"].update({
@@ -747,12 +1050,13 @@ class RegistryValuesTests(unittest.TestCase):
 
     def test_management_secrets_file_layering_and_lint(self):
         settings = self.management_values()["management"]
-        identity = settings.pop("oidc")
-        settings["oidc"] = {"issuer": "", "audience": "", "jwksUrl": "", "allowedSubjects": []}
-        private = {"management": {"oidc": identity}}
+        identity = settings["oidc"]
+        policy = yaml.safe_load((HELM_DIR / "orchestrator/example.values.yaml").read_text())["githubAuth"]
+        private = {"githubAuth": yaml.safe_load(
+            (HELM_DIR / "example.secrets-values.yaml").read_text())["githubAuth"]}
         with tempfile.TemporaryDirectory() as directory:
             paths = []
-            for name, values in (("shared.yaml", {"credentials": AUTH_CREDENTIALS}), ("orchestrator.yaml", {"management": settings, "githubAuth": APP_VALUES}),
+            for name, values in (("shared.yaml", {"credentials": AUTH_CREDENTIALS}), ("orchestrator.yaml", {"management": settings, "githubAuth": policy}),
                                  ("secrets.yaml", private)):
                 path = Path(directory) / name
                 path.write_text(yaml.safe_dump(values))

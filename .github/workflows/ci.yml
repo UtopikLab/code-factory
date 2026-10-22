@@ -61,7 +61,73 @@ jobs:
           pip install pytest
 
       - name: Run tests
-        run: pytest orchestrator/ -v
+        id: pytest
+        run: pytest orchestrator/ -v -ra --durations=10 --junitxml=test-results/pytest.xml
+
+      - name: Summarize test results
+        if: always()
+        env:
+          TEST_OUTCOME: ${{ steps.pytest.outcome }}
+        shell: python
+        run: |
+          import html
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          def label(value):
+            return html.escape(str(value)).replace("|", "&#124;").replace("\n", " ")[:240]
+
+          report = Path("test-results/pytest.xml")
+          lines = ["## Python Test Results", "", f"Test step: **{label(os.environ['TEST_OUTCOME'])}**", ""]
+          if not report.exists():
+            lines.append("No test report was produced. Check dependency installation and test-step logs.")
+          else:
+            suites = list(ET.parse(report).getroot().iter("testsuite"))
+            totals = {key: sum(int(suite.get(key, "0")) for suite in suites)
+                for key in ("tests", "failures", "errors", "skipped")}
+            passed = totals["tests"] - totals["failures"] - totals["errors"] - totals["skipped"]
+            elapsed = sum(float(suite.get("time", "0")) for suite in suites)
+            lines += ["| Total | Passed | Failed | Errors | Skipped | Duration |",
+                "| --- | --- | --- | --- | --- | --- |",
+                f"| {totals['tests']} | {passed} | {totals['failures']} | {totals['errors']} | {totals['skipped']} | {elapsed:.2f}s |",
+                "", "### Results by Module", "",
+                "| Module | Tests | Failed / Errors | Skipped |", "| --- | --- | --- | --- |"]
+            cases = [case for suite in suites for case in suite.findall("testcase")]
+            modules = {}
+            for case in cases:
+              module = case.get("classname", "unknown")
+              counts = modules.setdefault(module, [0, 0, 0])
+              counts[0] += 1
+              counts[1] += int(case.find("failure") is not None or case.find("error") is not None)
+              counts[2] += int(case.find("skipped") is not None)
+            for module, counts in sorted(modules.items()):
+              lines.append(f"| {label(module)} | {counts[0]} | {counts[1]} | {counts[2]} |")
+            lines += ["", "### Slowest Tests", "", "| Test | Duration |", "| --- | --- |"]
+            for case in sorted(cases, key=lambda case: float(case.get("time", "0")), reverse=True)[:10]:
+              name = label(case.get("classname", "") + "::" + case.get("name", ""))
+              lines.append(f"| {name} | {float(case.get('time', '0')):.2f}s |")
+            issues = [(case, detail) for case in cases for detail in case
+                if detail.tag in ("failure", "error", "skipped")]
+            if issues:
+              lines += ["", "### Failures, Errors, and Skips", "",
+                  "| Test | Result | Reason |", "| --- | --- | --- |"]
+              for case, detail in issues[:30]:
+                name = label(case.get("classname", "") + "::" + case.get("name", ""))
+                lines.append(f"| {name} | {label(detail.tag)} | {label(detail.get('message', 'See XML report'))} |")
+              if len(issues) > 30:
+                lines += ["", f"Showing 30 of {len(issues)} results; see the XML artifact for the rest."]
+            lines += ["", "Full results are available in the **python-test-results** artifact on this run."]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+            summary.write("\n".join(lines) + "\n")
+
+      - name: Upload test results
+        if: always() && hashFiles('test-results/pytest.xml') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-test-results
+          path: test-results/pytest.xml
+          retention-days: 14
 
   build-images:
     needs: [lint, test, set-image-tag]
@@ -97,3 +163,40 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/utopiklab/code-factory-${{ matrix.service }}:${{ needs.set-image-tag.outputs.tag }}
             ${{ env.REGISTRY }}/utopiklab/code-factory-${{ matrix.service }}:latest
+
+  summary:
+    name: CI Summary
+    if: always()
+    needs: [set-image-tag, lint, test, build-images]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize pipeline
+        env:
+          TAG_RESULT: ${{ needs.set-image-tag.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          BUILD_RESULT: ${{ needs.build-images.result }}
+          IMAGE_TAG: ${{ needs.set-image-tag.outputs.tag }}
+        run: |
+          {
+            printf '## CI Overview\n\n'
+            printf '| Job | Result |\n| --- | --- |\n'
+            printf '| Image tag | %s |\n' "$TAG_RESULT"
+            printf '| Ruff lint | %s |\n' "$LINT_RESULT"
+            printf '| Python tests | %s |\n' "$TEST_RESULT"
+            printf '| Container builds (all services) | %s |\n\n' "$BUILD_RESULT"
+            printf 'Commit: `%s`\n\n' "$GITHUB_SHA"
+            printf '[Run logs and artifacts](%s/%s/actions/runs/%s)\n\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            if [[ "$BUILD_RESULT" == "success" ]]; then
+              if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then
+                printf 'Images published with tags `%s` and `latest`:\n\n' "$IMAGE_TAG"
+              else
+                printf 'Images built for validation only; nothing was published:\n\n'
+              fi
+              for service in supervisor worker gateway management; do
+                printf -- '- `%s/utopiklab/code-factory-%s:%s`\n' "$REGISTRY" "$service" "$IMAGE_TAG"
+              done
+            else
+              printf 'Image builds did not all succeed. Check individual matrix jobs before deploying.\n'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

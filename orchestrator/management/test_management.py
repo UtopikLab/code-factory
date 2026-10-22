@@ -9,12 +9,13 @@ import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import jwt
 import pytest
 import yaml
-from app import create_app
+from app import create_app as actual_create_app
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
@@ -24,6 +25,26 @@ AUTH_CREDENTIALS = {
     },
 }
 APP_VALUES = yaml.safe_load((Path(__file__).resolve().parents[2] / "helm/orchestrator/example.values.yaml").read_text())["githubAuth"]
+APP_VALUES.update(yaml.safe_load((Path(__file__).resolve().parents[2] / "helm/example.secrets-values.yaml").read_text())["githubAuth"])
+
+
+def create_app(settings=None, transport=None, signing_keys=None):
+    def oauth(request):
+        assert request.url == "https://github.com/login/oauth/access_token"
+        return httpx.Response(200, json={"access_token": "ghu_user-test-only", "token_type": "bearer", "expires_in": 3600})
+    return actual_create_app(settings, transport, signing_keys, github_transport=httpx.MockTransport(oauth))
+
+
+def connect_github(client):
+    client.base_url = "https://factory.example"
+    response = client.post("/management/api/github/connect", headers={"Origin": "https://factory.example", "X-Management-Request": "1"})
+    assert response.status_code == 200
+    query = parse_qs(urlsplit(response.json()["authorization_url"]).query)
+    assert query["code_challenge_method"] == ["S256"]
+    response = client.get("/management/api/github/callback", params={"state": query["state"][0], "code": "test-code"}, follow_redirects=False)
+    assert response.status_code == 303
+    assert "ghu_" not in response.text and "ghu_" not in response.headers.get("set-cookie", "")
+    assert client.get("/management/api/github/session").json()["connected"]
 
 
 def test_module_import_does_not_construct_app_with_ci_environment():
@@ -57,6 +78,7 @@ def boundary(tmp_path):
                 "MANAGEMENT_OIDC_ISSUER": "https://identity.example", "MANAGEMENT_OIDC_AUDIENCE": "management",
                 "MANAGEMENT_OIDC_JWKS_URL": "https://identity.example/keys", "MANAGEMENT_ALLOWED_SUBJECTS": "operator",
                 "MANAGEMENT_PUBLIC_ORIGIN": "https://factory.example",
+                "MANAGEMENT_GITHUB_CLIENT_ID": "test-client", "MANAGEMENT_GITHUB_CLIENT_SECRET": "test-client-secret",
                 "GITHUB_REPOSITORY_POLICIES": json.dumps([{"repository": "org/repo"}]),
                 "MANAGEMENT_RUNTIME_CONFIG_FILE": str(runtime), "MANAGEMENT_GATEWAY_URL": "https://gateway.example",
                 "MANAGEMENT_SERVICE_TOKEN": "management-service-test-only-at-least-32-characters"}
@@ -69,6 +91,7 @@ def boundary(tmp_path):
 
     client.headers.update({"Authorization": "Bearer " + token(), "Origin": "https://factory.example",
                            "X-Management-Request": "1"})
+    connect_github(client)
     return client, upstream, token, settings
 
 
@@ -92,6 +115,7 @@ def test_admin_login_without_oidc(boundary, tmp_path):
     assert client.get("/management/api/session").json() == {"subject": "admin"}
     assert "admin-test-password-only" not in client.get("/management/api/session").text
     assert client.post("/management/api/tasks", json={}).status_code == 403
+    connect_github(client)
     response = client.post("/management/api/tasks", json={"repo": "org/repo", "issue_number": 7},
                            headers={"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"})
     assert response.status_code == 202
@@ -110,6 +134,7 @@ def test_app_submission_uses_policy_not_repository_pat_mapping(boundary):
     settings.update({"MANAGEMENT_AUTH_MODE": "admin", "MANAGEMENT_ADMIN_PASSWORD": "admin-test-password-only"})
     client = TestClient(create_app(settings, httpx.MockTransport(upstream)))
     client.auth = ("admin", "admin-test-password-only")
+    connect_github(client)
     assert client.get("/management/api/repositories").json() == {"repositories": ["org/repo"]}
     response = client.post("/management/api/tasks", json={"repo": "org/repo", "issue_number": 7},
                            headers={"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"})
@@ -152,7 +177,7 @@ def test_admin_operations_without_repository_access(boundary, tmp_path, reposito
     client.auth = ("admin", "abcdefg!")
     for path in ("/", "/management/api/session", "/management/api/config"):
         assert client.get(path).status_code == 200
-    assert client.get("/management/api/repositories").status_code == 503
+    assert client.get("/management/api/repositories").json() == {"repositories": []}
     upstream.assert_not_called()
     upstream.return_value = httpx.Response(200, json={"tasks": [{"task_id": "task-1", "patch": "private"}],
                                                     "total": 1, "limit": 25, "offset": 0})
@@ -162,7 +187,7 @@ def test_admin_operations_without_repository_access(boundary, tmp_path, reposito
     upstream.reset_mock()
     response = client.post("/management/api/tasks", json={"repo": "org/repo", "issue_number": 7},
                            headers={"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"})
-    assert response.status_code == 503
+    assert response.status_code == 401
     upstream.assert_not_called()
 
 
@@ -205,8 +230,95 @@ def test_submission_keeps_credentials_server_side_and_uses_contract(boundary):
     assert request.url == "https://gateway.example/api/v1/tasks/spawn"
     assert json.loads(request.content) == {"repo": "org/repo", "issue_number": 7}
     assert request.headers["Authorization"] == "token management-service-test-only-at-least-32-characters"
+    assert request.headers["X-GitHub-User-Token"] == "ghu_user-test-only"
     assert "X-Repository-Token" not in request.headers
     assert "secret" not in response.text
+
+
+def test_dynamic_submission_requires_connected_github_user(boundary):
+    _, upstream, _, settings = boundary
+    settings.update({"GITHUB_REPOSITORY_POLICIES": "[]", "MANAGEMENT_AUTH_MODE": "admin",
+                     "MANAGEMENT_ADMIN_PASSWORD": "abcdefg!"})
+    client = TestClient(create_app(settings, httpx.MockTransport(upstream)))
+    client.auth = ("admin", "abcdefg!")
+    client.headers.update({"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"})
+    payload = {"repo": "new/project", "issue_number": 7}
+    assert client.post("/management/api/tasks", json=payload).status_code == 401
+    upstream.assert_not_called()
+    connect_github(client)
+    response = client.post("/management/api/tasks", json=payload)
+    assert response.status_code == 202
+    request = upstream.call_args.args[0]
+    assert json.loads(request.content) == payload
+    assert request.headers["X-GitHub-User-Token"] == "ghu_user-test-only"
+    assert "ghu_" not in response.text
+    assert client.post("/management/api/github/disconnect").status_code == 200
+    assert client.post("/management/api/tasks", json=payload).status_code == 401
+
+
+@pytest.mark.parametrize("kind", ["cookie", "state", "expired", "subject", "missing-code", "replay"])
+def test_oauth_state_cookie_subject_expiry_and_replay(boundary, monkeypatch, kind):
+    client, _, _, _ = boundary
+    response = client.post("/management/api/github/connect")
+    query = parse_qs(urlsplit(response.json()["authorization_url"]).query)
+    params = {"state": query["state"][0], "code": "test-code"}
+    if kind == "cookie":
+        client.cookies.clear()
+    if kind == "state":
+        params["state"] = "attacker-state"
+    if kind == "expired":
+        now = time.time()
+        monkeypatch.setattr("app.time.time", lambda: now + 301)
+    if kind == "subject":
+        dependency = next(route for route in client.app.routes if route.path == "/management/api/session").dependant.dependencies[0].call
+        client.app.dependency_overrides[dependency] = lambda: "another-verified-subject"
+    if kind == "missing-code":
+        params.pop("code")
+    if kind == "replay":
+        assert client.get("/management/api/github/callback", params=params, follow_redirects=False).status_code == 303
+    assert client.get("/management/api/github/callback", params=params, follow_redirects=False).status_code == 403
+
+
+def test_github_session_expires_and_is_bound_to_management_subject(boundary, monkeypatch):
+    client, upstream, _, _ = boundary
+    dependency = next(route for route in client.app.routes if route.path == "/management/api/session").dependant.dependencies[0].call
+    client.app.dependency_overrides[dependency] = lambda: "another-verified-subject"
+    assert not client.get("/management/api/github/session").json()["connected"]
+    client.app.dependency_overrides.clear()
+    now = time.time()
+    monkeypatch.setattr("app.time.time", lambda: now + 3601)
+    assert not client.get("/management/api/github/session").json()["connected"]
+    assert client.post("/management/api/tasks", json={"repo": "org/repo", "issue_number": 7}).status_code == 401
+    upstream.assert_not_called()
+
+
+@pytest.mark.parametrize("grant", [
+    {"access_token": "ghp_not-an-app-token", "token_type": "bearer"},
+    {"access_token": "ghu_test-only", "token_type": "bearer", "expires_in": 0},
+    {"error": "bad_verification_code"},
+])
+def test_oauth_invalid_grant_is_redacted(boundary, grant):
+    _, _, _, settings = boundary
+    settings.update({"MANAGEMENT_AUTH_MODE": "admin", "MANAGEMENT_ADMIN_PASSWORD": "abcdefg!"})
+    oauth = Mock(return_value=httpx.Response(200, json=grant))
+    client = TestClient(actual_create_app(settings, github_transport=httpx.MockTransport(oauth)), base_url="https://factory.example")
+    client.auth = ("admin", "abcdefg!")
+    start = client.post("/management/api/github/connect", headers={"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"})
+    state = parse_qs(urlsplit(start.json()["authorization_url"]).query)["state"][0]
+    response = client.get("/management/api/github/callback", params={"state": state, "code": "test-code"})
+    assert response.status_code == 403
+    assert "ghu_" not in response.text and "ghp_" not in response.text
+    assert "code_verifier" in json.loads(oauth.call_args.args[0].content)
+
+
+def test_oauth_connect_requires_config_and_same_origin(boundary):
+    client, _, _, settings = boundary
+    assert client.post("/management/api/github/connect", headers={"Origin": "https://attacker.example"}).status_code == 403
+    settings.update({"MANAGEMENT_AUTH_MODE": "admin", "MANAGEMENT_ADMIN_PASSWORD": "abcdefg!",
+                     "MANAGEMENT_GITHUB_CLIENT_ID": ""})
+    client = TestClient(create_app(settings))
+    client.auth = ("admin", "abcdefg!")
+    assert client.post("/management/api/github/connect", headers={"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"}).status_code == 503
 
 
 @pytest.mark.parametrize("payload,code", [({"repo": "other/repo", "issue_number": 7}, 403),
@@ -317,6 +429,7 @@ def test_adapter_to_real_gateway_contract(boundary, monkeypatch, tmp_path, auth_
         if auth_mode == "admin":
             client.auth = ("admin", "abcdefg!")
         client.headers.update({"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"})
+        connect_github(client)
         accepted = client.post("/management/api/tasks", json={"repo": "org/repo", "issue_number": 7})
         if github_status != 200:
             assert accepted.status_code == 403
