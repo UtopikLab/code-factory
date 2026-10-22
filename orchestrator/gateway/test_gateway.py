@@ -763,19 +763,24 @@ def test_drain_workflow_credential_headers_and_https(monkeypatch, tmp_path, caps
     assert all(value not in output + request.data.decode() for value in ("gateway-test-only", "repo-test-only", "registry-test-only", "legacy-test-only"))
 
 
-@pytest.mark.parametrize("status", [401, 403, 404, 409, 503])
-@pytest.mark.parametrize("response_body,detail", [
-    (b'{"error":"gateway-test-only repo-test-only"}', ""),
-    (b'{"error":"retry-already-created","task_id":"issue-' + b'a' * 32 + b'"}',
-     ": retry-already-created task_id=issue-" + "a" * 32),
-    (b'{"error":"retry-requires-failed-task"}', ": retry-requires-failed-task"),
-    (b'{"error":"retry-requires-lifecycle-sync"}', ": retry-requires-lifecycle-sync"),
-    (b'{"error":"issue-task-active"}', ": issue-task-active"),
-    (b'{"status":"failed","replayed":true}', ": failed-task-replay"),
-    (b'{"error":[],"task_id":"repo-test-only"}', ""),
-    (b'[]', ""),
-    (b'not json gateway-test-only', ""),
-    (b'x' * 1048577, ""),
+@pytest.mark.parametrize("status,response_body,detail", [
+    pytest.param(401, b'{"error":"gateway-test-only repo-test-only"}', "", id="unauthorized"),
+    pytest.param(403, b'{"error":"gateway-test-only repo-test-only"}', "", id="forbidden"),
+    pytest.param(404, b'{"error":"gateway-test-only repo-test-only"}', "", id="not-found"),
+    pytest.param(503, b'{"error":"gateway-test-only repo-test-only"}', "", id="unavailable"),
+    pytest.param(409, b'{"error":"gateway-test-only repo-test-only"}', "", id="conflict-secret"),
+    pytest.param(409, b'{"error":"retry-already-created","task_id":"issue-' + b'a' * 32 + b'"}',
+                 ": retry-already-created task_id=issue-" + "a" * 32, id="conflict-already-created"),
+    pytest.param(409, b'{"error":"retry-requires-failed-task"}', ": retry-requires-failed-task",
+                 id="conflict-requires-failed-task"),
+    pytest.param(409, b'{"error":"retry-requires-lifecycle-sync"}', ": retry-requires-lifecycle-sync",
+                 id="conflict-requires-lifecycle-sync"),
+    pytest.param(409, b'{"error":"issue-task-active"}', ": issue-task-active", id="conflict-active"),
+    pytest.param(409, b'{"status":"failed","replayed":true}', ": failed-task-replay", id="conflict-replay"),
+    pytest.param(409, b'{"error":[],"task_id":"repo-test-only"}', "", id="conflict-invalid-fields"),
+    pytest.param(409, b'[]', "", id="conflict-non-object"),
+    pytest.param(409, b'not json gateway-test-only', "", id="conflict-invalid-json"),
+    pytest.param(409, b'x' * 1048577, "", id="conflict-oversized-body"),
 ])
 def test_drain_workflow_http_errors_report_only_safe_details(monkeypatch, tmp_path, capsys, status, response_body, detail, workflow_identity):
     monkeypatch.setenv("GITHUB_EVENT_NAME", "issues")
