@@ -1,7 +1,9 @@
 import json
 import time
 from datetime import UTC, datetime
+from unittest.mock import Mock
 
+import github_auth
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -56,8 +58,25 @@ def auth_setup(tmp_path):
     return GitHubAuth(settings, fetch), key, claims, calls
 
 
-def test_verified_identity_and_scoped_app_token(auth_setup):
-    auth, key, claims, calls = auth_setup
+@pytest.fixture(params=["selected", "all"])
+def installation_auth(auth_setup, request):
+    auth, _, _, _ = auth_setup
+    original = auth.fetch
+
+    def fetch(url, **kwargs):
+        result = original(url, **kwargs)
+        if url.endswith("/installation") or "/app/installations/" in url and not url.endswith("/access_tokens"):
+            result["repository_selection"] = request.param
+        return result
+
+    auth.fetch = fetch
+    return auth_setup
+
+
+def test_verified_identity_and_scoped_app_token(installation_auth):
+    auth, key, claims, calls = installation_auth
+    policy, _ = auth.installation("owner/repo")
+    assert policy["installation_id"] == "789"
     assert auth.authenticate(jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"})) == "owner/repo"
     result = auth.mint("owner/repo")
     assert result["token"] == "test-installation-token"
@@ -105,9 +124,34 @@ def test_fail_closed_network_and_redaction(auth_setup):
         auth.mint("unknown/repo")
 
 
-@pytest.mark.parametrize("kind", ["installation", "owner", "app", "all-repos", "suspended", "repository", "permissions", "expired", "token-repositories"])
-def test_mint_rejects_wrong_installation_or_grant(auth_setup, kind):
-    auth, _, _, _ = auth_setup
+@pytest.mark.parametrize("stage", ["lookup", "mint"])
+@pytest.mark.parametrize("selection", ["unknown", None, "missing"])
+def test_installation_selection_fails_closed(auth_setup, stage, selection):
+    auth, _, _, calls = auth_setup
+    original = auth.fetch
+
+    def fetch(url, **kwargs):
+        result = original(url, **kwargs)
+        if (stage == "lookup" and url.endswith("/installation")
+                or stage == "mint" and url.endswith("/app/installations/789")):
+            if selection == "missing":
+                result.pop("repository_selection")
+            else:
+                result["repository_selection"] = selection
+        return result
+
+    auth.fetch = fetch
+    with pytest.raises(AppUnavailable, match="^github-app-unavailable$"):
+        if stage == "lookup":
+            auth.installation("owner/repo")
+        else:
+            auth.mint("owner/repo")
+    assert not any(url.endswith("/access_tokens") for url, _ in calls)
+
+
+@pytest.mark.parametrize("kind", ["installation", "owner", "app", "suspended", "repository", "permissions", "expired", "token-repositories"])
+def test_mint_rejects_wrong_installation_or_grant(installation_auth, kind):
+    auth, _, _, _ = installation_auth
     original = auth.fetch
 
     def fetch(url, **kwargs):
@@ -126,8 +170,6 @@ def test_mint_rejects_wrong_installation_or_grant(auth_setup, kind):
                 result["account"]["id"] = 999
             if kind == "app":
                 result["app_id"] = 999
-            if kind == "all-repos":
-                result["repository_selection"] = "all"
             if kind == "suspended":
                 result["suspended_at"] = "2026-01-01T00:00:00Z"
         elif kind == "repository":
@@ -225,8 +267,8 @@ def dynamic_auth(auth_setup, restricted=False):
 
 
 @pytest.mark.parametrize("restricted", [False, True])
-def test_dynamic_actions_and_user_success(auth_setup, restricted):
-    auth, key, claims, calls = dynamic_auth(auth_setup, restricted)
+def test_dynamic_actions_and_user_success(installation_auth, restricted):
+    auth, key, claims, calls = dynamic_auth(installation_auth, restricted)
     for event in ("issues", "workflow_dispatch"):
         claims["event_name"] = event
         if restricted and event == "workflow_dispatch":
@@ -250,6 +292,29 @@ def test_dynamic_actions_denies_untrusted_claims(auth_setup, field, value):
     claims[field] = value
     with pytest.raises(AuthorizationError):
         auth.authenticate(jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"}))
+
+
+@pytest.mark.parametrize("field,value,stage", [
+    ("ref", "refs/heads/private-sensitive", "workflow-binding"),
+    ("event_name", "private-sensitive", "workflow-binding"),
+    ("workflow_ref", "private-sensitive", "workflow-binding"),
+    ("sub", "repo:owner/repo:environment:private-sensitive", "workflow-binding"),
+    ("repository_id", "private-sensitive", "repository-metadata"),
+    ("repository_owner_id", "private-sensitive", "repository-metadata"),
+])
+def test_dynamic_denial_logs_only_stage_and_field(auth_setup, monkeypatch, field, value, stage):
+    auth, key, claims, calls = dynamic_auth(auth_setup)
+    claims[field] = value
+    warning = Mock()
+    monkeypatch.setattr(github_auth.logger, "warning", warning)
+    token = jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"})
+    with pytest.raises(AuthorizationError, match="^github-workflow-not-authorized$"):
+        auth.authenticate(token)
+    warning.assert_called_once_with("github-authorization-denied stage=" + stage + " field=%s", field)
+    assert value not in str(warning.call_args)
+    assert token not in str(warning.call_args)
+    if stage == "workflow-binding":
+        assert [url for url, _ in calls] == [DISCOVERY_URL, JWKS_URL]
 
 
 @pytest.mark.parametrize("kind", ["readonly", "revoked", "other-app", "other-installation", "owner", "fork", "archived", "api-error", "no-user"])

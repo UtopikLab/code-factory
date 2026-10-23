@@ -15,8 +15,12 @@ and audit consumers through a separately authorized process.
 Before a separately authorized rollout:
 
 1. Create a GitHub App with Contents and Pull requests read/write, Issues read,
-   and implicit Metadata read. Install it with **Only select repositories** for
-   each trusted owner. All-repository or suspended installations are rejected.
+   and implicit Metadata read. Both **Only select repositories** and **All
+   repositories** installations are supported; prefer selected repositories for
+   least privilege. All repositories broadens App installation access, including
+   dynamic eligibility when no repository allowlist is configured, but probe and
+   execution tokens remain scoped to one repository. Suspended installations and
+   missing or unknown repository-selection modes are rejected.
    Organization approvals, branch rules, and human PR review still apply.
 2. Provision its PEM in an externally managed Kubernetes Secret in the
    orchestrator namespace. Helm accepts only the Secret name/key; only the
@@ -35,11 +39,13 @@ Before a separately authorized rollout:
    Only gateway and management reference it. Preserve human Basic/OIDC login;
    neither login method proves GitHub repository access. Enable GitHub App user
    authorization as described below before using interactive submissions.
-5. In each source repository set the Actions secret `CODEFACTORY_URL` to the
-   trusted HTTPS gateway base URL and variable `CODEFACTORY_OIDC_AUDIENCE` to
-   exactly `githubAuth.audience`. Install the canonical
+5. In each source repository install the canonical
    [drain workflow](../../.github/workflows/drain.yaml) through a separately
-   authorized remote change. It always requests OIDC with `id-token: write`.
+   authorized remote change. It sets the public gateway URL
+   `https://code-factory.utopiklab.com` and audience
+   `https://code-factory.utopiklab.com/tasks` directly in its step environment;
+   no Actions URL secret or audience variable is required. Verify the audience
+   matches `githubAuth.audience`. It always requests OIDC with `id-token: write`.
 
 Use the single [orchestrator example](../../helm/orchestrator/example.values.yaml),
 replacing its illustrative App ID and audience. Secret names/keys are chart defaults;
@@ -299,8 +305,8 @@ renew tokens in memory before expiration; delayed work does not depend on the
 submitting workflow's lifetime.
 
 The broker checks active task state, assigned repository, retained credential
-binding, current policy, installation owner/App identity, selected repository
-grant, and exact returned permissions. Terminal/cleaned-up tasks cannot renew.
+binding, current policy, installation owner/App identity, selected/all installation
+mode, single-repository token grant, and exact returned permissions. Terminal/cleaned-up tasks cannot renew.
 Already-issued installation tokens can remain valid until GitHub expiry; local
 cleanup is not remote revocation. Workers remain read-only and cannot request
 supervisor grants. No credentials belong in issue text, URLs, model context,

@@ -195,25 +195,17 @@ issue text into shell. `id-token: write` is required.
 
 ---
 
-## Step 2: Configure Actions Identity
+## Step 2: Verify Actions Identity
 
-Go to: **Repository Settings → Secrets and variables → Actions**
+The canonical workflow sets public, literal step environment values:
+- `CODEFACTORY_URL`: `https://code-factory.utopiklab.com`
+- `CODEFACTORY_OIDC_AUDIENCE`: `https://code-factory.utopiklab.com/tasks`
 
-Configure the URL secret and audience variable after completing App/policy setup:
-
-### Secret 1: `CODEFACTORY_URL`
-```
-https://gateway.example.com
-```
-
-Use a reachable HTTPS base URL with a trusted certificate, not the plain internal
-Service. An optional trailing slash is accepted. The workflow appends
-`/api/v1/tasks/spawn`; do not include that path in this setting.
-
-### Variable: `CODEFACTORY_OIDC_AUDIENCE`
-
-Set it to exactly the configured `githubAuth.audience`. No source PAT, shared
-gateway token, or auth-mode variable is supported. Missing OIDC setup fails closed.
+No Actions URL secret or audience variable is required. After completing App/policy
+setup, verify that `githubAuth.audience` matches the workflow audience exactly.
+The workflow appends `/api/v1/tasks/spawn` to the HTTPS base URL.
+No source PAT, shared gateway token, or auth-mode variable is supported.
+Missing OIDC setup fails closed.
 Do not print request headers or dump task Secrets. Existing PAT tasks and stale
 private values require separate operator reconciliation before rollout.
 
@@ -250,8 +242,8 @@ lifecycle processing, use **Run workflow** with that failed task's ID to retry.
   dispatch. Old copies hide every identity failure behind this single message;
   update the source repository's workflow from the canonical
   [drain workflow](../../.github/workflows/drain.yaml) to obtain a safe reason.
-- `CODEFACTORY_OIDC_AUDIENCE is not configured`: set the Actions **variable**
-  `CODEFACTORY_OIDC_AUDIENCE` to exactly the gateway's `githubAuth.audience`.
+- `CODEFACTORY_OIDC_AUDIENCE is not configured`: restore the canonical workflow's
+  literal step environment value; no Actions audience variable is required.
 - `runner OIDC environment missing`: retain `permissions: id-token: write` in the
   executing workflow/job. GitHub supplies the runner URL/token; do not set them
   manually or substitute repository credentials.
@@ -271,8 +263,8 @@ lifecycle processing, use **Run workflow** with that failed task's ID to retry.
   metadata or redeploying the gateway does not migrate that client.
 - Replace the source repository workflow with the canonical
   [drain workflow](../../.github/workflows/drain.yaml), including `id-token: write`,
-  and configure `CODEFACTORY_OIDC_AUDIENCE` and the repository's exact App/OIDC
-  policy bindings. Do not restore PAT intake or log credential values.
+  and verify the literal audience matches `githubAuth.audience` and the repository's
+  exact App/OIDC policy bindings. Do not restore PAT intake or log credential values.
 - Old workflow copies may report only `Task intake failed: HTTP 400`; the current
   canonical workflow displays this allowlisted reason without dumping the response.
 

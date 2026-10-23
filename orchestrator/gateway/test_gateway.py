@@ -285,8 +285,8 @@ def test_drain_workflow_uses_runner_oidc_without_pat(monkeypatch, tmp_path, caps
     step = next(step for step in workflow["jobs"]["send-to-orchestrator"]["steps"] if step.get("shell") == "python")
     event = tmp_path / "event.json"
     event.write_text(json.dumps({"repository": {"full_name": "org/repo"}, "issue": {"number": 2}}))
-    for key, value in {"CODEFACTORY_URL": "https://gateway.test",
-                       "CODEFACTORY_OIDC_AUDIENCE": "https://gateway.test/tasks", "GITHUB_EVENT_NAME": "issues",
+    for key, value in {"CODEFACTORY_URL": step["env"]["CODEFACTORY_URL"],
+                       "CODEFACTORY_OIDC_AUDIENCE": step["env"]["CODEFACTORY_OIDC_AUDIENCE"], "GITHUB_EVENT_NAME": "issues",
                        "GITHUB_EVENT_PATH": str(event), "GITHUB_REPOSITORY": "org/repo",
                        "ACTIONS_ID_TOKEN_REQUEST_URL": "https://runner.actions.githubusercontent.com/token?api-version=2",
                        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "runner-test-only"}.items():
@@ -311,8 +311,9 @@ def test_drain_workflow_uses_runner_oidc_without_pat(monkeypatch, tmp_path, caps
     script = tmp_path / "intake.py"
     script.write_text(step["run"])
     runpy.run_path(str(script))
-    assert "audience=https%3A%2F%2Fgateway.test%2Ftasks" in requests[0].full_url
+    assert "audience=https%3A%2F%2Fcode-factory.utopiklab.com%2Ftasks" in requests[0].full_url
     assert requests[0].get_header("Authorization") == "Bearer runner-test-only"
+    assert requests[1].full_url == "https://code-factory.utopiklab.com/api/v1/tasks/spawn"
     assert requests[1].get_header("Authorization") == "Bearer identity-test-only"
     assert requests[1].get_header("X-repository-token") is None
     output = capsys.readouterr()
@@ -796,7 +797,7 @@ def test_drain_workflow_credential_headers_and_https(monkeypatch, tmp_path, caps
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load((root / ".github/workflows/drain.yaml").read_text())
     step = next(step for step in workflow["jobs"]["send-to-orchestrator"]["steps"] if step.get("shell") == "python")
-    assert step["env"]["CODEFACTORY_URL"] == "${{ secrets.CODEFACTORY_URL }}"
+    assert step["env"]["CODEFACTORY_URL"] == "https://code-factory.utopiklab.com"
     assert not {"CODEFACTORY_AUTH_MODE", "CODEFACTORY_AUTH_TOKEN", "REPO_GITHUB_PAT"} & step["env"].keys()
     event = tmp_path / "event.json"
     event.write_text(json.dumps({"repository": {"full_name": "org/repo"}, "issue": {"number": 2, "title": "untrusted $()"}}))
@@ -858,7 +859,7 @@ def test_drain_workflow_identity_failures_are_safe_and_do_not_submit(
     workflow = yaml.safe_load((root / ".github/workflows/drain.yaml").read_text())
     step = next(step for step in workflow["jobs"]["send-to-orchestrator"]["steps"] if step.get("shell") == "python")
     assert workflow["permissions"]["id-token"] == "write"
-    assert step["env"]["CODEFACTORY_OIDC_AUDIENCE"] == "${{ vars.CODEFACTORY_OIDC_AUDIENCE }}"
+    assert step["env"]["CODEFACTORY_OIDC_AUDIENCE"] == "https://code-factory.utopiklab.com/tasks"
     event = tmp_path / "event.json"
     event.write_text(json.dumps({"repository": {"full_name": "org/repo"}, "issue": {"number": 2}}))
     for key, value in {

@@ -1,6 +1,7 @@
 """GitHub Actions identity and repository-scoped App credentials."""
 
 import json
+import logging
 import re
 import threading
 import time
@@ -14,6 +15,7 @@ JWKS_URL = ISSUER + "/.well-known/jwks"
 DISCOVERY_URL = ISSUER + "/.well-known/openid-configuration"
 READ_PERMISSIONS = {"contents": "read", "issues": "read", "pull_requests": "read"}
 WRITE_PERMISSIONS = {"contents": "write", "issues": "read", "pull_requests": "write"}
+logger = logging.getLogger("gateway.github_auth")
 
 
 class AuthenticationError(Exception):
@@ -106,9 +108,11 @@ class GitHubAuth:
     def policy(self, repo):
         if (not isinstance(repo, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)
                 or any(part in (".", "..") for part in repo.split("/"))):
+            logger.warning("github-authorization-denied stage=repository-policy field=repository-format")
             raise AuthorizationError("repository-not-authorized")
         policy = self.policies.get((repo or "").lower())
         if policy is None and self.policies:
+            logger.warning("github-authorization-denied stage=repository-policy field=repository-allowlist")
             raise AuthorizationError("repository-not-authorized")
         return policy or {"repository": repo}
 
@@ -130,7 +134,7 @@ class GitHubAuth:
             if (not re.fullmatch(r"[1-9][0-9]*", installation_id)
                     or not re.fullmatch(r"[1-9][0-9]*", owner_id)
                     or str(installation.get("app_id")) != self.app_id
-                    or installation.get("repository_selection") != "selected"
+                    or installation.get("repository_selection") not in ("selected", "all")
                     or installation.get("suspended_at") is not None
                     or any(policy.get(field, value) != value for field, value in
                            (("installation_id", installation_id), ("repository_owner_id", owner_id)))):
@@ -200,19 +204,30 @@ class GitHubAuth:
         if self.workflow is not None:
             repo = claims["repository"]
             binding = self.workflow
-            if (claims["ref"] != binding["ref"] or claims["event_name"] not in binding["events"]
-                    or claims["workflow_ref"] != repo + "/" + binding["workflow"] + "@" + binding["ref"]
-                    or claims["sub"] != "repo:" + repo + ":ref:" + binding["ref"]):
-                raise AuthorizationError("github-workflow-not-authorized")
+            checks = (
+                ("ref", claims["ref"] == binding["ref"]),
+                ("event_name", claims["event_name"] in binding["events"]),
+                ("workflow_ref", claims["workflow_ref"] == repo + "/" + binding["workflow"] + "@" + binding["ref"]),
+                ("sub", claims["sub"] == "repo:" + repo + ":ref:" + binding["ref"]),
+            )
+            for field, matches in checks:
+                if not matches:
+                    logger.warning("github-authorization-denied stage=workflow-binding field=%s", field)
+                    raise AuthorizationError("github-workflow-not-authorized")
             credential = self.mint(repo)
             try:
                 metadata = self.fetch("https://api.github.com/repos/" + repo, token=credential["token"])
             except (OSError, ValueError, TypeError):
                 raise AppUnavailable("github-app-unavailable") from None
-            if (str(metadata.get("id")) != claims["repository_id"]
-                    or str(metadata.get("owner", {}).get("id")) != claims["repository_owner_id"]
-                    or metadata.get("fork") is not False):
-                raise AuthorizationError("github-workflow-not-authorized")
+            checks = (
+                ("repository_id", str(metadata.get("id")) == claims["repository_id"]),
+                ("repository_owner_id", str(metadata.get("owner", {}).get("id")) == claims["repository_owner_id"]),
+                ("fork", metadata.get("fork") is False),
+            )
+            for field, matches in checks:
+                if not matches:
+                    logger.warning("github-authorization-denied stage=repository-metadata field=%s", field)
+                    raise AuthorizationError("github-workflow-not-authorized")
             if not self.policies:
                 return repo
         if (claims["repository"] != policy["repository"]
@@ -220,6 +235,7 @@ class GitHubAuth:
                 or claims["repository_owner_id"] != policy["repository_owner_id"]
                 or not any(all(claims[field] == binding[field] for field in
                                ("workflow_ref", "ref", "sub", "event_name")) for binding in policy["bindings"])):
+            logger.warning("github-authorization-denied stage=repository-binding field=identity-or-binding")
             raise AuthorizationError("github-workflow-not-authorized")
         return policy["repository"]
 
@@ -231,7 +247,7 @@ class GitHubAuth:
             if (str(installation.get("id")) != policy["installation_id"]
                     or str(installation.get("app_id")) != self.app_id
                     or str(installation.get("account", {}).get("id")) != policy["repository_owner_id"]
-                    or installation.get("repository_selection") != "selected" or installation.get("suspended_at") is not None):
+                    or installation.get("repository_selection") not in ("selected", "all") or installation.get("suspended_at") is not None):
                 raise ValueError()
             permissions = WRITE_PERMISSIONS if write else READ_PERMISSIONS
             if "repository_id" not in policy:

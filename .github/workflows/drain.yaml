@@ -40,8 +40,8 @@ jobs:
       - name: POST task to orchestrator
         if: steps.issue-state.outputs.skip != 'true'
         env:
-          CODEFACTORY_URL: ${{ secrets.CODEFACTORY_URL }}
-          CODEFACTORY_OIDC_AUDIENCE: ${{ vars.CODEFACTORY_OIDC_AUDIENCE }}
+          CODEFACTORY_URL: https://code-factory.utopiklab.com
+          CODEFACTORY_OIDC_AUDIENCE: https://code-factory.utopiklab.com/tasks
           RETRY_TASK_ID: ${{ inputs.retry_task_id }}
         shell: python
         run: |
