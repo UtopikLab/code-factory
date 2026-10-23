@@ -377,7 +377,12 @@ def test_pr_policy_fails_closed_and_publication_never_merges(monkeypatch):
 @pytest.mark.parametrize("obsolete_setting", [None, "REPO_GITHUB_PAT", "CODEFACTORY_AUTH_TOKEN", "PR_GITHUB_TOKEN"])
 def test_dispatch_injects_only_task_scoped_credentials_and_pinned_catalog(monkeypatch, obsolete_setting):
     catalog_hash = "a" * 64
-    seed = {"spec": {"suspend": True, "template": {"spec": {
+    ownership_labels = {"controller-uid": "template-uid", "job-name": "code-factory-worker",
+                        "batch.kubernetes.io/controller-uid": "template-uid",
+                        "batch.kubernetes.io/job-name": "code-factory-worker"}
+    seed = {"spec": {"suspend": True, "manualSelector": False,
+                     "selector": {"matchLabels": {"batch.kubernetes.io/controller-uid": "template-uid"}},
+                     "template": {"metadata": {"labels": {"component": "worker", **ownership_labels}}, "spec": {
         "containers": [{"name": "coder", "env": [
             {"name": "JUDGE_URL", "value": "judge"},
         ]}], "volumes": [{"name": "agent-catalog", "configMap": {"name": "old"}}]}}}}
@@ -408,6 +413,10 @@ def test_dispatch_injects_only_task_scoped_credentials_and_pinned_catalog(monkey
     name = supervisor_module._dispatch_task(task, runtime)
     assert name == "code-factory-worker-issue-123-1"
     job = requests[-1][2]
+    assert "selector" not in job["spec"]
+    assert "manualSelector" not in job["spec"]
+    assert job["spec"]["template"]["metadata"]["labels"] == {"component": "worker"}
+    assert seed["spec"]["template"]["metadata"]["labels"] == {"component": "worker", **ownership_labels}
     env = {entry["name"]: entry for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]}
     assert "CODEFACTORY_AUTH_TOKEN" not in env and "JUDGE_URL" not in env
     assert "ALLOWED_REPOS" not in env and "ALLOWED_REPO" not in env

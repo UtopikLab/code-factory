@@ -129,6 +129,11 @@ def dispatch_task(task, runtime, k8s_request):
     job.pop("status", None)
     job_spec = job.setdefault("spec", {})
     job_spec.pop("suspend", None)
+    job_spec.pop("selector", None)
+    job_spec.pop("manualSelector", None)
+    pod_labels = job_spec["template"].get("metadata", {}).get("labels", {})
+    for label in ("controller-uid", "job-name", "batch.kubernetes.io/controller-uid", "batch.kubernetes.io/job-name"):
+        pod_labels.pop(label, None)
     job_spec.update({"parallelism": 1, "completions": 1, "backoffLimit": 0,
                      "ttlSecondsAfterFinished": int(os.environ.get("TASK_JOB_TTL_SECONDS_AFTER_FINISHED", "86400"))})
     pod_spec = job_spec["template"]["spec"]
