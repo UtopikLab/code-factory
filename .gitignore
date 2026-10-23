@@ -30,6 +30,7 @@ vendored/
 *.lock-bins/
 secrets-values.yaml
 local.secrets-values.yaml
+local.secret-bundle.env
 local.values.yaml
 
 # Management frontend build and browser artifacts

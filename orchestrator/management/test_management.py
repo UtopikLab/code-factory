@@ -1,4 +1,3 @@
-import base64
 import json
 import os
 import subprocess
@@ -19,13 +18,21 @@ from app import create_app as actual_create_app
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
-AUTH_CREDENTIALS = {
-    "internal": {
-        "supervisorServiceToken": "supervisor-test-sentinel",
-    },
-}
 APP_VALUES = yaml.safe_load((Path(__file__).resolve().parents[2] / "helm/orchestrator/example.values.yaml").read_text())["githubAuth"]
-APP_VALUES.update(yaml.safe_load((Path(__file__).resolve().parents[2] / "helm/example.secrets-values.yaml").read_text())["githubAuth"])
+SECRET_REFS = {
+    "githubAppKey": {"name": "test-app-key", "key": "private-key.pem"},
+    "managementServiceToken": {"name": "test-management-token", "key": "token"},
+    "supervisorServiceToken": {"name": "test-supervisor-token", "key": "token"},
+    "openaiApiKey": {"name": "", "key": "api-key"},
+    "coderApiKey": {"name": "", "key": "api-key"},
+    "managementAdminPassword": {"name": "test-admin-password", "key": "password"},
+    "managementGithubClientSecret": {"name": "", "key": "client-secret"},
+}
+HELM_TEST_VALUES = {
+    "secretRefs": SECRET_REFS,
+    "imagePullSecrets": [{"name": "test-pull"}],
+    "githubAuth": APP_VALUES,
+}
 
 
 def create_app(settings=None, transport=None, signing_keys=None):
@@ -41,7 +48,8 @@ def connect_github(client):
     assert response.status_code == 200
     query = parse_qs(urlsplit(response.json()["authorization_url"]).query)
     assert query["code_challenge_method"] == ["S256"]
-    response = client.get("/management/api/github/callback", params={"state": query["state"][0], "code": "test-code"}, follow_redirects=False)
+    assert query["redirect_uri"] == ["https://factory.example/auth"]
+    response = client.get("/auth", params={"state": query["state"][0], "code": "test-code"}, follow_redirects=False)
     assert response.status_code == 303
     assert "ghu_" not in response.text and "ghu_" not in response.headers.get("set-cookie", "")
     assert client.get("/management/api/github/session").json()["connected"]
@@ -275,8 +283,8 @@ def test_oauth_state_cookie_subject_expiry_and_replay(boundary, monkeypatch, kin
     if kind == "missing-code":
         params.pop("code")
     if kind == "replay":
-        assert client.get("/management/api/github/callback", params=params, follow_redirects=False).status_code == 303
-    assert client.get("/management/api/github/callback", params=params, follow_redirects=False).status_code == 403
+        assert client.get("/auth", params=params, follow_redirects=False).status_code == 303
+    assert client.get("/auth", params=params, follow_redirects=False).status_code == 403
 
 
 def test_github_session_expires_and_is_bound_to_management_subject(boundary, monkeypatch):
@@ -305,7 +313,7 @@ def test_oauth_invalid_grant_is_redacted(boundary, grant):
     client.auth = ("admin", "abcdefg!")
     start = client.post("/management/api/github/connect", headers={"Origin": settings["MANAGEMENT_PUBLIC_ORIGIN"], "X-Management-Request": "1"})
     state = parse_qs(urlsplit(start.json()["authorization_url"]).query)["state"][0]
-    response = client.get("/management/api/github/callback", params={"state": state, "code": "test-code"})
+    response = client.get("/auth", params={"state": state, "code": "test-code"})
     assert response.status_code == 403
     assert "ghu_" not in response.text and "ghp_" not in response.text
     assert "code_verifier" in json.loads(oauth.call_args.args[0].content)
@@ -454,10 +462,10 @@ def test_adapter_to_real_gateway_contract(boundary, monkeypatch, tmp_path, auth_
 def test_management_helm_shared_origin_routes_gateway(tmp_path, command, gateway_url, shared):
     chart = Path(__file__).resolve().parents[2] / "helm" / "orchestrator"
     values = tmp_path / "management.yaml"
-    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS, "githubAuth": APP_VALUES,
+    values.write_text(yaml.safe_dump({**HELM_TEST_VALUES,
         "supervisor": {"config": {"acceptor-url": "https://factory.example"}},
         "management": {"enabled": True, "publicOrigin": "https://factory.example",
-                       "gatewayUrl": gateway_url, "admin": {"password": "abcdefg!"},
+                       "gatewayUrl": gateway_url, "admin": {"username": "admin"},
                        "ingress": {"enabled": True, "host": "factory.example",
                                    "tlsTermination": "external"}}}))
     arguments = ["helm", command, *(["test"] if command == "template" else []), str(chart), "-f", str(values)]
@@ -468,6 +476,10 @@ def test_management_helm_shared_origin_routes_gateway(tmp_path, command, gateway
                    and document["kind"] == "Ingress" and document["metadata"]["name"].endswith("-management-ingress"))
     paths = {path["path"]: path["backend"]["service"] for path in ingress["spec"]["rules"][0]["http"]["paths"]}
     assert paths["/"] == {"name": "orchestrator-management", "port": {"number": 8081}}
+    auth_routes = [path for path in ingress["spec"]["rules"][0]["http"]["paths"]
+                   if path["pathType"] == "Prefix" and "/auth".startswith(path["path"])]
+    assert len(auth_routes) == 1
+    assert auth_routes[0]["backend"]["service"] == paths["/"]
     assert ("/api/v1" in paths) is shared
     if shared:
         assert paths["/api/v1"] == {"name": "orchestrator-orchestrator-gateway", "port": {"number": 8000}}
@@ -476,12 +488,12 @@ def test_management_helm_shared_origin_routes_gateway(tmp_path, command, gateway
 def test_management_helm_opt_in_and_snapshot(tmp_path):
     chart = Path(__file__).resolve().parents[2] / "helm" / "orchestrator"
     values = tmp_path / "management.yaml"
-    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS, "githubAuth": APP_VALUES}))
+    values.write_text(yaml.safe_dump(HELM_TEST_VALUES))
     base = ["helm", "template", "test", str(chart), "-f", str(values)]
     default = subprocess.run(base, text=True, capture_output=True, check=True).stdout
     assert "component: management" not in default
     assert subprocess.run([*base, "--set", "management.enabled=true"], capture_output=True, check=False).returncode != 0
-    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS, "githubAuth": APP_VALUES,
+    values.write_text(yaml.safe_dump({**HELM_TEST_VALUES,
         "management": {"enabled": True, "authMode": "oidc", "image": "example/management:test",
         "publicOrigin": "https://factory.example",
         "oidc": {"issuer": "https://identity.example", "audience": "management",
@@ -492,8 +504,7 @@ def test_management_helm_opt_in_and_snapshot(tmp_path):
     pod = deployment["spec"]["template"]["spec"]
     assert pod["automountServiceAccountToken"] is False
     assert pod["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
-    assert not any(document["kind"] == "Secret" and document["metadata"]["name"] == "orchestrator-management-repositories"
-                   for document in documents)
+    assert not any(document["kind"] == "Secret" for document in documents)
     assert not any(document["kind"] == "Ingress" and "management" in document["metadata"]["name"] for document in documents)
     snapshot = next(document for document in documents if document["kind"] == "ConfigMap" and "runtime-config.json" in document.get("data", {}))
     runtime = json.loads(snapshot["data"]["runtime-config.json"])
@@ -502,21 +513,23 @@ def test_management_helm_opt_in_and_snapshot(tmp_path):
 
 
 @pytest.mark.parametrize("command", ["template", "lint"])
-@pytest.mark.parametrize("password,valid", [
-    ("abcdefg!", True), ("elevenchar!", True), ("short!", False),
-    ("abcdefgh", False), ("abcdefghijklmnop", False), ("abcdef! ", False), ("abcdefg<", False),
-])
-def test_management_helm_admin_password(tmp_path, command, password, valid):
+def test_management_helm_admin_password_uses_external_ref(tmp_path, command):
     chart = Path(__file__).resolve().parents[2] / "helm" / "orchestrator"
     values = tmp_path / "management.yaml"
-    values.write_text(yaml.safe_dump({"credentials": AUTH_CREDENTIALS, "githubAuth": APP_VALUES, "management": {
-        "enabled": True, "publicOrigin": "https://factory.example",
-        "admin": {"username": "admin", "password": password}}}))
+    refs = {**SECRET_REFS, "managementAdminPassword": {
+        "name": "external-admin-password", "key": "password",
+    }}
+    values.write_text(yaml.safe_dump({**HELM_TEST_VALUES, "secretRefs": refs, "management": {
+        "enabled": True, "publicOrigin": "https://factory.example", "image": "example/management:test",
+        "authMode": "admin", "admin": {"username": "admin"}}}))
     arguments = ["helm", command, *(["test"] if command == "template" else []), str(chart), "-f", str(values)]
     result = subprocess.run(arguments, text=True, capture_output=True, check=False)
-    assert (result.returncode == 0) == valid, result.stderr + result.stdout
-    if valid and command == "template":
+    assert result.returncode == 0, result.stderr + result.stdout
+    if command == "template":
         documents = [document for document in yaml.safe_load_all(result.stdout) if document]
-        admin_secret = next(document for document in documents if document["kind"] == "Secret"
-                            and document["metadata"]["name"] == "orchestrator-management-admin")
-        assert base64.b64decode(admin_secret["data"]["password"]).decode() == password
+        assert not any(document["kind"] == "Secret" for document in documents)
+        deployment = next(document for document in documents if document["kind"] == "Deployment"
+                          and document["metadata"]["name"] == "orchestrator-management")
+        password_env = next(entry for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+                            if entry["name"] == "MANAGEMENT_ADMIN_PASSWORD")
+        assert password_env["valueFrom"]["secretKeyRef"] == refs["managementAdminPassword"]

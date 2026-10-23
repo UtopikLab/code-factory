@@ -18,18 +18,25 @@ import server
 import yaml
 from github_auth import AuthenticationError, AuthorizationError
 
-AUTH_CREDENTIALS = {
-    "internal": {
-        "supervisorServiceToken": "supervisor-test-sentinel",
-    },
-}
 APP_VALUES = yaml.safe_load((Path(__file__).resolve().parents[2] / "helm/orchestrator/example.values.yaml").read_text())["githubAuth"]
-APP_VALUES.update(yaml.safe_load((Path(__file__).resolve().parents[2] / "helm/example.secrets-values.yaml").read_text())["githubAuth"])
+SECRET_REFS = {
+    "githubAppKey": {"name": "test-github-app", "key": "private-key.pem"},
+    "managementServiceToken": {"name": "test-management", "key": "token"},
+    "supervisorServiceToken": {"name": "test-supervisor", "key": "token"},
+    "openaiApiKey": {"name": "", "key": "api-key"},
+    "coderApiKey": {"name": "", "key": "api-key"},
+    "managementAdminPassword": {"name": "test-admin", "key": "password"},
+    "managementGithubClientSecret": {"name": "", "key": "client-secret"},
+}
 
 
 @pytest.fixture
 def helm_values():
-    return {"credentials": copy.deepcopy(AUTH_CREDENTIALS), "githubAuth": copy.deepcopy(APP_VALUES)}
+    return {
+        "secretRefs": copy.deepcopy(SECRET_REFS),
+        "imagePullSecrets": [{"name": "test-pull"}],
+        "githubAuth": copy.deepcopy(APP_VALUES),
+    }
 
 
 @pytest.fixture
@@ -198,15 +205,17 @@ def test_app_chart_lint_render_and_schema(helm_values):
     if not shutil.which("helm"):
         pytest.skip("helm unavailable")
     chart = Path(__file__).resolve().parents[2] / "helm/orchestrator"
-    values = {"credentials": {"internal": {"supervisorServiceToken": "independent-supervisor-test-only"}},
+    values = {"secretRefs": {**SECRET_REFS,
+              "githubAppKey": {"name": "app-key", "key": "private-key.pem"},
+              "managementServiceToken": {"name": "management-service", "key": "token"},
+              "managementAdminPassword": {"name": "admin-password", "key": "password"}},
+              "imagePullSecrets": [{"name": "test-pull"}],
               "githubAuth": {"audience": "https://gateway.test/tasks", "appId": "12",
-              "privateKeySecret": {"name": "app-key", "key": "private-key.pem"},
-              "managementServiceSecret": {"name": "management-service", "key": "token"},
               "repositories": [{"repository": "org/repo", "repository_id": "123", "repository_owner_id": "456",
               "installation_id": "789", "bindings": [{"workflow_ref": "org/repo/.github/workflows/drain.yaml@refs/heads/main",
               "ref": "refs/heads/main", "sub": "repo:org/repo:ref:refs/heads/main", "event_name": "issues"}]}]},
               "management": {"enabled": True, "publicOrigin": "https://management.test",
-                             "admin": {"password": "independent-admin-test!"}}}
+                             "image": "management:test", "admin": {"username": "admin"}}}
     for mode_values in (helm_values, values):
         lint = subprocess.run(["helm", "lint", str(chart), "--strict", "--values", "-"],
                               input=yaml.safe_dump(mode_values), capture_output=True, text=True, check=False)
@@ -230,7 +239,7 @@ def test_app_chart_lint_render_and_schema(helm_values):
     role = next(document for document in documents if document["kind"] == "Role" and document["metadata"]["name"] == "orchestrator-supervisor")
     assert next(rule for rule in role["rules"] if "configmaps" in rule["resources"])["verbs"] == ["get"]
     for setting in ("githubAuth.audience=", "githubAuth.appId=", "githubAuth.workflowPolicy.events[0]=pull_request",
-                    "githubAuth.privateKeySecret.name=", "githubAuth.managementServiceSecret.name="):
+                    "secretRefs.githubAppKey.name=", "secretRefs.supervisorServiceToken.name="):
         invalid = subprocess.run(["helm", "template", "app-check", str(chart), "--values", "-", "--set", setting],
                                  input=yaml.safe_dump(values), capture_output=True, text=True, check=False)
         assert invalid.returncode != 0
@@ -893,7 +902,7 @@ def test_helm_credential_references_and_rbac(helm_values):
         if document["kind"] not in ("Deployment", "Job"):
             continue
         pod = document["spec"]["template"]["spec"]
-        assert pod["imagePullSecrets"] == [{"name": "ghcr-read-packages-pull-secret"}]
+        assert pod["imagePullSecrets"] == [{"name": "test-pull"}]
         for container in pod["containers"]:
             env = {entry["name"]: entry for entry in container.get("env", [])}
             assert not {"GITHUB_TOKEN", "REPO_GITHUB_PAT"} & env.keys()
@@ -911,7 +920,7 @@ def test_helm_credential_references_and_rbac(helm_values):
                       and document["metadata"]["name"] == "orchestrator-supervisor")
     supervisor_env = {entry["name"]: entry for entry in supervisor["spec"]["template"]["spec"]["containers"][0]["env"]}
     assert "PR_GITHUB_TOKEN" not in supervisor_env
-    assert supervisor_env["SUPERVISOR_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == "orchestrator-supervisor-service-auth"
+    assert supervisor_env["SUPERVISOR_AUTH_TOKEN"]["valueFrom"]["secretKeyRef"]["name"] == "test-supervisor"
 
 
 def test_helm_pins_nonsecret_catalog_runtime_and_p40_routes(helm_values):

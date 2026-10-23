@@ -23,56 +23,66 @@
             }
         }
     },
-    "title": "k8s-inference values",
+    "title": "inference values",
     "type": "object",
+    "additionalProperties": false,
     "properties": {
-        "githubAuth": {
+        "namespace": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+        },
+        "secretRefs": {
             "type": "object",
             "additionalProperties": false,
+            "required": [
+                "githubAppKey",
+                "managementServiceToken",
+                "supervisorServiceToken",
+                "openaiApiKey",
+                "coderApiKey",
+                "managementAdminPassword",
+                "managementGithubClientSecret"
+            ],
             "properties": {
-                "audience": {
-                    "type": "string"
-                },
-                "appId": {
-                    "type": "string"
-                },
-                "managementServiceSecret": {
+                "githubAppKey": {
                     "$ref": "#/definitions/secretReference"
                 },
-                "workflowPolicy": {
-                    "type": "object"
+                "managementServiceToken": {
+                    "$ref": "#/definitions/secretReference"
                 },
-                "repositories": {
-                    "type": "array"
+                "supervisorServiceToken": {
+                    "$ref": "#/definitions/secretReference"
                 },
-                "privateKeyPem": {
-                    "type": "string"
+                "openaiApiKey": {
+                    "$ref": "#/definitions/secretReference"
                 },
-                "privateKeySecret": {
+                "coderApiKey": {
+                    "$ref": "#/definitions/secretReference"
+                },
+                "managementAdminPassword": {
+                    "$ref": "#/definitions/secretReference"
+                },
+                "managementGithubClientSecret": {
                     "$ref": "#/definitions/secretReference"
                 }
-            },
-            "if": {
+            }
+        },
+        "imagePullSecrets": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
                 "required": [
-                    "privateKeyPem"
+                    "name"
                 ],
                 "properties": {
-                    "privateKeyPem": {
-                        "pattern": "\\S"
-                    }
-                }
-            },
-            "else": {
-                "required": [
-                    "privateKeySecret"
-                ],
-                "properties": {
-                    "privateKeySecret": {
-                        "properties": {
-                            "name": {
-                                "minLength": 1
-                            }
-                        }
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 253,
+                        "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
                     }
                 }
             }
@@ -80,6 +90,25 @@
         "inference": {
             "type": "object",
             "properties": {
+                "imagePullSecrets": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                            "name"
+                        ],
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 253,
+                                "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+                            }
+                        }
+                    }
+                },
                 "modelSource": {
                     "description": "Removed: requesters select HF models through the native router API, not deployment values.",
                     "not": {}
@@ -118,96 +147,10 @@
                 }
             }
         },
-        "registry": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-                "create",
-                "username"
-            ],
-            "properties": {
-                "create": {
-                    "type": "boolean"
-                },
-                "username": {
-                    "type": "string"
-                }
-            },
-            "if": {
-                "properties": {
-                    "create": {
-                        "const": true
-                    }
-                }
-            },
-            "then": {
-                "properties": {
-                    "username": {
-                        "minLength": 1,
-                        "pattern": "^[^<>\\s]+$"
-                    }
-                }
-            },
-            "else": {
-                "properties": {
-                    "username": {
-                        "maxLength": 0
-                    }
-                }
-            }
-        },
-        "credentials": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "internal": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "supervisorServiceToken": {
-                            "type": "string"
-                        },
-                        "supervisorServiceSecret": {
-                            "$ref": "#/definitions/secretReference"
-                        }
-                    }
-                },
-                "github": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "ghcrReadPackagesPat": {
-                            "type": "string"
-                        }
-                    }
-                },
-                "models": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "openaiApiKey": {
-                            "type": "string"
-                        },
-                        "coderApiKey": {
-                            "type": "string"
-                        },
-                        "openaiSecret": {
-                            "$ref": "#/definitions/secretReference"
-                        },
-                        "coderSecret": {
-                            "$ref": "#/definitions/secretReference"
-                        }
-                    }
-                }
-            }
-        },
         "global": {
             "type": "object",
             "properties": {
                 "IMAGE_REGISTRY": {
-                    "type": "string"
-                },
-                "imagePullSecrets": {
                     "type": "string"
                 }
             }
@@ -455,51 +398,5 @@
                 }
             }
         }
-    },
-    "allOf": [
-        {
-            "if": {
-                "properties": {
-                    "registry": {
-                        "properties": {
-                            "create": {
-                                "const": true
-                            }
-                        },
-                        "required": [
-                            "create"
-                        ]
-                    }
-                },
-                "required": [
-                    "registry"
-                ]
-            },
-            "then": {
-                "properties": {
-                    "credentials": {
-                        "properties": {
-                            "github": {
-                                "properties": {
-                                    "ghcrReadPackagesPat": {
-                                        "minLength": 1,
-                                        "pattern": "^[^<>\\s]+$"
-                                    }
-                                },
-                                "required": [
-                                    "ghcrReadPackagesPat"
-                                ]
-                            }
-                        },
-                        "required": [
-                            "github"
-                        ]
-                    }
-                },
-                "required": [
-                    "credentials"
-                ]
-            }
-        }
-    ]
+    }
 }

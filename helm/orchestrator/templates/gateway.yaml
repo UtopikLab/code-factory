@@ -66,14 +66,14 @@ spec:
             - name: MANAGEMENT_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.githubAuth.managementServiceSecret.name }}
-                  key: {{ .Values.githubAuth.managementServiceSecret.key }}
+                  name: {{ .Values.secretRefs.managementServiceToken.name | quote }}
+                  key: {{ .Values.secretRefs.managementServiceToken.key | quote }}
             {{- end }}
             - name: SUPERVISOR_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ default (include "orchestrator.supervisorSecretName" .) .Values.credentials.internal.supervisorServiceSecret.name | quote }}
-                  key: {{ ternary .Values.credentials.internal.supervisorServiceSecret.key "supervisor-auth-token" (not (empty .Values.credentials.internal.supervisorServiceSecret.name)) | quote }}
+                  name: {{ .Values.secretRefs.supervisorServiceToken.name | quote }}
+                  key: {{ .Values.secretRefs.supervisorServiceToken.key | quote }}
             - name: GATEWAY_TRANSPORT_MODE
               value: {{ .Values.gateway.transportMode | quote }}
             - name: TASK_CREDENTIAL_TTL_SECONDS
@@ -104,10 +104,10 @@ spec:
       volumes:
         - name: github-app-key
           secret:
-            secretName: {{ include "orchestrator.githubAppSecretName" . | quote }}
+            secretName: {{ .Values.secretRefs.githubAppKey.name | quote }}
             defaultMode: 0440
             items:
-              - key: {{ .Values.githubAuth.privateKeySecret.key }}
+              - key: {{ .Values.secretRefs.githubAppKey.key | quote }}
                 path: private-key.pem
         - name: task-state
           persistentVolumeClaim:

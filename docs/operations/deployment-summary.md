@@ -2,6 +2,26 @@
 
 **Status:** Partial recovery; gateway HTTPS intake remains blocked (2026-10-21).
 
+## Deployment Script Readiness
+
+`helm/deploy.sh` waits for each release's Helm resource-readiness checks before
+continuing, with a default timeout of 10 minutes per release. For slower image
+pulls or model startup, run `HELM_TIMEOUT=20m ./helm/deploy.sh`.
+An upgrade failure or readiness timeout stops the script with a nonzero status
+and prints namespace pod status and events. Deferred GPU components must be
+ready if enabled; they no longer bypass readiness validation.
+
+The suspended worker Job is not awaited for completion. Successful readiness
+does not validate external GitHub/OAuth integrations or end-to-end task execution.
+
+The Helm layout is chart defaults plus the tracked
+`helm/orchestrator/example.values.yaml` starting point and the operator-local
+`helm/orchestrator/local.values.yaml` override. The deploy script uses chart
+defaults and the local override; the example is not a separate deployment layer.
+Secret references remain at chart defaults unless intentionally overridden
+locally. External Secret data is provisioned from the ignored local dotenv file
+using the apply workflow documented in [credential separation](credential-separation.md).
+
 ## Supervisor Catalog Permission And Callback DNS: Prepared, Not Deployed
 
 Read-only checks on 2026-10-22 confirmed task
@@ -58,12 +78,11 @@ orchestrator-only upgrade command is:
 
 ```bash
 helm upgrade orchestrator helm/orchestrator -n orchestrator \
-  -f helm/orchestrator/local.values.yaml -f helm/local.secrets-values.yaml
+  -f helm/orchestrator/local.values.yaml
 ```
 
-This command was not executed. If a shared nonsecret values file is used, layer
-it before the orchestrator-local file, matching the deployment script. Do not
-use `helm/deploy.sh` for this narrow action: it also deploys inference and deletes
+This command was not executed. It uses chart defaults plus the orchestrator-local
+override. Do not use `helm/deploy.sh` for this narrow action: it also deploys inference and deletes
 Jobs/pods. An upgrade is not by itself a stored-task compatibility fix; the worker
 Job may also expose existing immutable-field constraints. Do not delete it as
 part of this incident without separate approval.
@@ -317,7 +336,7 @@ The deployed system implements the minimal credible loop:
 
 | Component | Role | Status | Notes |
 |---|---|---|---|
-| **Supervisor** | Always-on planner/coordinator | ✅ Running (CPU-only) | `k8s-inference-orchestrator` deployment |
+| **Supervisor** | Always-on planner/coordinator | ✅ Running (CPU-only) | `inference-orchestrator` deployment |
 | **Coder Brain** | P40-0 inference server (Qwen2.5-7B) | ✅ Running | Interactive + worker calls |
 | **Judge Brain** | P40-1 inference server (Qwen2.5-7B) | ✅ Running | Evaluates worker outputs |
 | **Workers** | Spawned on-demand (K8s Jobs) | ✅ Ready | Coder agents for task execution |
@@ -368,14 +387,14 @@ The deployed system implements the minimal credible loop:
 - **JUDGE_URL:** https://inference.local/v1 (OpenAI-compatible endpoint)
 - **JUDGE_MODEL:** qwen2.5-coder-7b-instruct-q4-km@32k
 
-All configurable via ConfigMap: `kubectl edit configmap k8s-inference-orchestrator-config -n orchestrator`
+All configurable via ConfigMap: `kubectl edit configmap inference-orchestrator-config -n orchestrator`
 
 ### Secrets
 - **OPENAI_API_KEY:** Required for judge inference calls
 - **Repository auth:** Mandatory GitHub App configuration; Actions OIDC for submission,
   brokered installation tokens for reads/publication. No source or PR PAT.
 
-Stored in: `kubectl get secret k8s-inference-orchestrator-secrets -n orchestrator`
+Stored in: `kubectl get secret inference-orchestrator-secrets -n orchestrator`
 
 ---
 
@@ -521,7 +540,7 @@ Expected response:
 ### Supervisor pod CrashLoopBackOff
 ```bash
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-kubectl logs -n orchestrator k8s-inference-orchestrator-<pod-id> -c supervisor --tail=50
+kubectl logs -n orchestrator inference-orchestrator-<pod-id> -c supervisor --tail=50
 ```
 Check that secrets are correctly configured and the image is available.
 

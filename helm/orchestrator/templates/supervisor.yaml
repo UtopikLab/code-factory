@@ -60,11 +60,13 @@ spec:
               cpu: {{ .Values.supervisor.config.cpuLimit | default "2500m" }}
               memory: {{ .Values.supervisor.config.memoryLimit | default "5Gi" }}
           env:
+            {{- if .Values.secretRefs.openaiApiKey.name }}
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ default (printf "%s-openai-model-auth" .Chart.Name) .Values.credentials.models.openaiSecret.name | quote }}
-                  key: {{ ternary .Values.credentials.models.openaiSecret.key "openai-api-key" (not (empty .Values.credentials.models.openaiSecret.name)) | quote }}
+                  name: {{ .Values.secretRefs.openaiApiKey.name | quote }}
+                  key: {{ .Values.secretRefs.openaiApiKey.key | quote }}
+            {{- end }}
             - name: ACCEPTOR_URL
               valueFrom:
                 configMapKeyRef:
@@ -111,8 +113,8 @@ spec:
             - name: SUPERVISOR_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ default (include "orchestrator.supervisorSecretName" .) .Values.credentials.internal.supervisorServiceSecret.name | quote }}
-                  key: {{ ternary .Values.credentials.internal.supervisorServiceSecret.key "supervisor-auth-token" (not (empty .Values.credentials.internal.supervisorServiceSecret.name)) | quote }}
+                  name: {{ .Values.secretRefs.supervisorServiceToken.name | quote }}
+                  key: {{ .Values.secretRefs.supervisorServiceToken.key | quote }}
             - name: WORKER_JOB_TEMPLATE
               value: {{ printf "%s-worker" .Chart.Name | quote }}
             - name: TASK_JOB_TTL_SECONDS_AFTER_FINISHED

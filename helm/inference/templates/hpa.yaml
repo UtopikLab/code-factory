@@ -19,7 +19,7 @@ metadata:
   namespace: {{ $ns }}
   labels:
     app: {{ $.Chart.Name | quote }}
-    component: {{ $.Release.Name | default "k8s-inference" | quote }}
+    component: {{ $.Release.Name | default "inference" | quote }}
     app.kubernetes.io/component: inference-server
     app.kubernetes.io/managed-by: Helm
 spec:

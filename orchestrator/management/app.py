@@ -43,7 +43,7 @@ def create_app(settings=None, transport=None, signing_keys=None, github_transpor
     github_states = {}
     github_client = settings.get("MANAGEMENT_GITHUB_CLIENT_ID", "")
     github_secret = settings.get("MANAGEMENT_GITHUB_CLIENT_SECRET", "")
-    callback = origin + "/management/api/github/callback"
+    callback = origin + "/auth"
     keys = signing_keys
     if keys is None and jwks_url.startswith("https://"):
         keys = jwt.PyJWKClient(jwks_url, timeout=5)
@@ -146,7 +146,7 @@ def create_app(settings=None, transport=None, signing_keys=None, github_transpor
         response.set_cookie("__Host-github-state", state, max_age=300, secure=True, httponly=True, samesite="lax", path="/")
         return response
 
-    @app.get("/management/api/github/callback")
+    @app.get("/auth")
     async def github_callback(request: Request, subject: Annotated[str, Depends(identity)]):
         state = request.query_params.get("state", "")
         entry = github_states.pop(state, None)

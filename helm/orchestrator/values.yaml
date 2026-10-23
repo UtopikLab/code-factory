@@ -1,8 +1,8 @@
-# Orchestrator sub-chart values: the LangGraph supervisor loop + always-on
-# task-acceptor gateway. Namespace is the parent release namespace.
+# Orchestrator chart values: the LangGraph supervisor loop + always-on
+# task-acceptor gateway.
 
-# Namespace the sub-chart's resources are placed in. Defaults to the parent
-# release namespace so `helm template` renders them in the correct namespace.
+# Namespace where this chart's resources are placed. Defaults to the release
+# namespace so `helm template` renders them in the correct namespace.
 # Override here when installing into a non-default namespace.
 namespace: "orchestrator"
 
@@ -11,43 +11,11 @@ icon: ""
 githubAuth:
   audience: ""
   appId: ""
-  privateKeyPem: ""
-  # Inline PEM uses code-factory-github-app when name is empty; external mode requires a name.
-  privateKeySecret:
-    name: ""
-    key: private-key.pem
-  managementServiceSecret:
-    name: ""
-    key: token
   workflowPolicy:
     ref: refs/heads/main
     workflow: .github/workflows/drain.yaml
     events: [ issues, workflow_dispatch ]
   repositories: []
-
-# Set raw values OR external Secret references in helm/local.secrets-values.yaml.
-# The registry PAT is independent of App repository auth.
-credentials:
-  internal:
-    supervisorServiceToken: ""
-    supervisorServiceSecret:
-      name: ""
-      key: token
-  github:
-    ghcrReadPackagesPat: ""
-  models:
-    openaiApiKey: ""
-    coderApiKey: ""
-    openaiSecret:
-      name: ""
-      key: api-key
-    coderSecret:
-      name: ""
-      key: api-key
-
-registry:
-  create: false
-  username: ""
 
 # Supervisor (code-factory-supervisor) Deployment — the resident LangGraph loop.
 # Shared values for both the supervisor and task-acceptor resources.
@@ -143,7 +111,7 @@ gateway:
 
 # Shared pull secret applied to all containers.
 imagePullSecrets:
-- name: ghcr-read-packages-pull-secret
+- name: code-factory-ghcr-pull
 
 # The `orchestrator-config` ConfigMap key/values consumed by the supervisor
 # loop and the task-acceptor. Mirrors the parent chart's orchestrator.config.
@@ -170,16 +138,9 @@ management:
   enabled: false
   github:
     clientId: ""
-    clientSecret:
-      name: ""
-      key: client-secret
   authMode: admin
   admin:
     username: admin
-    password: ""
-    passwordSecret:
-      name: ""
-      key: password
   image: "ghcr.io/utopiklab/code-factory-management:latest"
   imagePullPolicy: IfNotPresent
   publicOrigin: ""
@@ -194,3 +155,27 @@ management:
     audience: ""
     jwksUrl: ""
     allowedSubjects: []
+
+# References to pre-provisioned Kubernetes Secrets. No secret values belong in Helm.
+secretRefs:
+  githubAppKey:
+    name: code-factory-github-app-key
+    key: private-key.pem
+  managementServiceToken:
+    name: code-factory-management-service
+    key: token
+  supervisorServiceToken:
+    name: code-factory-supervisor-auth
+    key: token
+  openaiApiKey:
+    name: ""
+    key: api-key
+  coderApiKey:
+    name: ""
+    key: api-key
+  managementAdminPassword:
+    name: code-factory-management-admin-password
+    key: password
+  managementGithubClientSecret:
+    name: ""
+    key: client-secret

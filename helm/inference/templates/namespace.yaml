@@ -5,5 +5,5 @@ metadata:
   name: {{ .Release.Namespace | default .Values.namespace | quote }}
   labels:
     app: {{ .Chart.Name | quote }}
-    component: {{ .Release.Name | default "k8s-inference" | quote }}
+    component: {{ .Release.Name | default "inference" | quote }}
 {{- end }}

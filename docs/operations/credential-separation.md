@@ -18,12 +18,11 @@ Before a separately authorized rollout:
    and implicit Metadata read. Install it with **Only select repositories** for
    each trusted owner. All-repository or suspended installations are rejected.
    Organization approvals, branch rules, and human PR review still apply.
-2. By default, provision its PEM in an externally managed Kubernetes Secret in
-   the orchestrator namespace and configure only the Secret name/key in values.
-   Alternatively, explicitly opt into the inline PEM mode described below. Only
-   the gateway mounts the private key; management, supervisor, workers, task
-   records, and catalogs must never receive it. Restrict Secret/RBAC access and
-   backups, namespace workload creation, and enable encryption at rest.
+2. Provision its PEM in an externally managed Kubernetes Secret in the
+   orchestrator namespace. Helm accepts only the Secret name/key; only the
+   gateway mounts it. Management, supervisor, workers, task records, and catalogs
+   must never receive the PEM. Restrict Secret/RBAC access and backups, namespace
+   workload creation, and enable encryption at rest.
 3. Set the App ID and Actions audience. Configure `githubAuth.workflowPolicy`
    with the protected branch, workflow path, and allowed events. Empty or omitted
    `githubAuth.repositories` enables dynamic access through verified App
@@ -42,12 +41,15 @@ Before a separately authorized rollout:
    [drain workflow](../../.github/workflows/drain.yaml) through a separately
    authorized remote change. It always requests OIDC with `id-token: write`.
 
-Use the nonsecret [orchestrator example](../../helm/orchestrator/example.values.yaml),
-replacing its illustrative App ID and audience, together with external
-Secret references from the [private example](../../helm/example.secrets-values.yaml).
-App setup is mandatory even when management is disabled. Its service-token
-reference is required only when management is enabled. Missing or unknown auth
-settings fail closed; blank defaults intentionally cannot deploy.
+Use the single [orchestrator example](../../helm/orchestrator/example.values.yaml),
+replacing its illustrative App ID and audience. Secret names/keys are chart defaults;
+override them in the ignored `helm/orchestrator/local.values.yaml` only when needed.
+Provision every referenced Secret out of band. App-key and supervisor-token refs
+are always required; management refs are required when management or its OAuth
+integration is enabled. Image-pull Secrets are required in both namespaces.
+The deploy script checks each rendered Secret name, type, and required data key
+before either chart upgrade begins. It never creates Secrets or receives their
+contents.
 
 ## Dynamic Authorization
 
@@ -89,16 +91,18 @@ is rechecked at submission/retry, not continuously after acceptance.
 
 In the **same GitHub App**, enable user authorization and expiring user access
 tokens. Register the exact callback
-`<management.publicOrigin>/management/api/github/callback` and provision its
+`<management.publicOrigin>/auth` and provision its
 OAuth client secret out of band in an external Kubernetes Secret. Set:
 
 ```yaml
 management:
    github:
-      clientId: "" # Set the App's actual OAuth client ID, not its numeric App ID.
-      clientSecret:
-         name: "" # Set the externally provisioned Secret name.
-         key: client-secret
+      clientId: "" # Set the App's OAuth client ID, not its numeric App ID.
+
+secretRefs:
+   managementGithubClientSecret:
+      name: <pre-provisioned-secret-name>
+      key: client-secret
 ```
 
 The client secret is referenced only by management, never by gateway or workers.
@@ -132,188 +136,144 @@ management** images together before an authorized rollout. Existing image pins
 are intentionally untouched. Install the updated source workflow and policy
 bindings together; an old client will not authenticate to the new gateway.
 
-Operators must inspect their ignored private values locally and remove obsolete
-`credentials.internal.gatewayClientToken`, `credentials.github.pullRequestPat`,
-and `management.repositories`, including empty mappings. Remove `githubAuth.mode`
-from ordinary overrides and old `GITHUB_AUTH_MODE`/`CODEFACTORY_AUTH_MODE` settings.
-Old `CODEFACTORY_AUTH_TOKEN`, `REPO_GITHUB_PAT`, and `PR_GITHUB_TOKEN` runtime
-settings and `X-Repository-Token` submissions are rejected, not ignored as
-fallbacks. Retire obsolete workflow secrets through separate authorization.
-Do not put the PEM or management service token in tracked examples.
+The chart API is reference-only. Raw PEMs, PATs, passwords, API keys, and
+`registry.create` values are rejected by strict schemas. Secret names and keys
+come from chart defaults; change references only in
+`helm/orchestrator/local.values.yaml` when needed. Provision fresh Secrets before
+rollout; do not point at Secrets owned by
+the old release, since the clean-break chart removes Helm-managed Secret objects.
+The preflight checks rendered Secret names, types, and required data keys before
+either chart is upgraded.
 
 **Drain or separately reconcile queued/running PAT-backed tasks before upgrading.**
 Old task credential artifacts are unsupported, cannot execute or retry as App
 tasks, and are not silently converted. Restoring an old worker template or Secret
 does not restore PAT support. Review task results and existing branch/PR artifacts
-before separately authorizing migration or new work. This implementation performs
-no task recovery, migration, Secret creation, live deployment, or remote edits.
+before separately authorizing migration or new work. Secret contents remain an
+out-of-band operator responsibility.
 
 ## Independent Credentials
 
 | Purpose | Configuration | Consumers |
 |---|---|---|
-| Repository access | `githubAuth` shared policy, optional restrictions and external or inline-managed App-key Secret | Gateway mints repository-scoped installation tokens |
+| Repository access | `githubAuth` shared policy and `secretRefs.githubAppKey` | Gateway mounts the externally provisioned App PEM and mints repository-scoped installation tokens |
 | Interactive GitHub identity | `management.github` OAuth client and external client-secret reference | Management keeps user tokens server-side; gateway verifies live access |
 | Actions submission | Runner-issued OIDC JWT | Gateway verifies identity and repository binding |
-| Management submission/status | External `githubAuth.managementServiceSecret` | Management and gateway only |
-| Internal supervisor trust | `credentials.internal.supervisorServiceToken` or `supervisorServiceSecret` | Supervisor and gateway only |
-| GHCR image pulls | `credentials.github.ghcrReadPackagesPat` or existing pull Secret | Kubelet only, `read:packages` |
-| Models | `credentials.models.openaiApiKey` / `openaiSecret` and `coderApiKey` / `coderSecret` | Respective model clients |
-| Human management login | `management.admin.password` / `passwordSecret` or `management.oidc` | Management only |
+| Management submission/status | `secretRefs.managementServiceToken` | Management and gateway only |
+| Internal supervisor trust | `secretRefs.supervisorServiceToken` | Supervisor and gateway only |
+| GHCR image pulls | `imagePullSecrets` in each namespace | Kubelet only; pull Secret is externally provisioned |
+| Models | Optional `secretRefs.openaiApiKey` and `secretRefs.coderApiKey` | Respective model clients |
+| Human management login | `secretRefs.managementAdminPassword` or `management.oidc` | Management only |
 
-GHCR PATs are not repository credentials. By default the chart creates independent
-supervisor-service and model-auth Secrets; external references opt out per Secret.
-Model keys may be empty only for
-unauthenticated endpoints. Management admin passwords retain the existing minimum
-eight-character/special-character rule, without whitespace or angle brackets.
+The charts never create credential Secrets. Model refs may be empty only when the
+configured endpoint is unauthenticated. Management admin password policy is
+validated by the management service at startup; the chart validates its reference.
 Human OIDC still requires the configured issuer/audience/JWKS and allowed subjects;
 invalid OIDC never falls back to Basic. Browser storage does not hold credentials.
 
-## Private Values
+## Values Layout
 
-Each setting has one override owner (chart defaults remain in each chart):
+Orchestrator configuration has chart defaults, one tracked starting example at
+`helm/orchestrator/example.values.yaml`, and one operator-local override at
+`helm/orchestrator/local.values.yaml`. The example omits `secretRefs`, so the
+reference-only chart defaults remain authoritative unless the local override
+intentionally changes a Secret name or key. The deploy script applies chart
+defaults plus the local override; copy desired nonsecret example settings into
+that local file before deployment. Inference normally uses its chart defaults.
 
-| Local file | Owns | Tracked starting point |
-|---|---|---|
-| `helm/local.values.yaml` | Shared nonsecret settings, such as registry creation and username | `helm/example.values.yaml` |
-| `helm/orchestrator/local.values.yaml` | App ID, OIDC audience and repository policy; images, routes, runtime behavior; management auth mode and human OIDC settings | `helm/orchestrator/example.values.yaml` |
-| `helm/local.secrets-values.yaml` | Independent credentials, management admin login, App-key source and `githubAuth.managementServiceSecret` reference | `helm/example.secrets-values.yaml` |
-
-Secret references are not secret material, but are intentionally kept beside
-credential configuration in the private override. By default the App PEM remains
-in a separately provisioned external Secret; the management service token always
-does. Inline App PEM is an explicit alternative, not a change to that default.
-Start from the tracked examples only when the corresponding local file does not
-exist; never overwrite an existing private file. All three local paths are ignored
-by Git. Restrict local-file permissions to the operator (`chmod 600`).
-
-The deployment script layers defaults, shared values, orchestrator-only values,
-then private credentials. Both charts receive shared credentials, so both schemas
-reject removed credential keys. GHCR Secret creation remains independent:
-`registry.create: true` requires a username and read-packages PAT and manages
-`ghcr-read-packages-pull-secret` in each namespace. Do not enable creation over
-an externally owned Secret or disable it without preparing replacement pulls.
-
-Keep settings out of multiple override files: the last value wins and can hide a
-stale value earlier in the chain. Never copy illustrative App IDs or repository
-policy into a real deployment. Missing audience and App identity must be filled
-with verified inputs; optional repository restrictions need verified IDs and
-bindings. Reorganizing files does not make them valid.
+Secret references are names and data-key identifiers, never secret material.
+Keep credential values out of all Helm values. The local override is ignored by
+Git; restrict its permissions to the operator (`chmod 600`). Avoid a second
+override or refs file, since later Helm values silently replace earlier values.
+Never copy illustrative App IDs or repository policy into a real deployment.
+Missing audience and App identity must be filled with verified inputs; optional
+repository restrictions need verified IDs and bindings.
 
 Local checks: `python3 -m unittest discover -s helm -p 'test_*.py' -v` tests the
-charts and example layering using synthetic credentials. For actual configuration,
-lint inference with shared values and secrets; lint orchestrator with shared,
-orchestrator-only, then secrets values, in that order. Capture and redact failures
-locally: Helm schema errors can echo private values. Tests do not verify that
-referenced external Secrets exist or contain the required keys.
+charts and default/example/local layering. Run `helm lint helm/inference` and
+`helm lint helm/orchestrator --values helm/orchestrator/example.values.yaml
+--values helm/orchestrator/local.values.yaml` for chart validation. The deploy
+preflight checks live Secret names, data keys, and types without printing Secret
+data.
 
-Helm release records contain supplied values and rendered Secrets. Restrict
-release/Secret RBAC and backups. Never dump real rendered manifests, run `helm get
-values`, enable `--debug` or shell tracing, or send secrets in command arguments.
-No Azure Key Vault or managed-identity integration is claimed here.
+Helm release records still contain nonsecret names and settings, but no credential
+values or rendered credential Secrets. Restrict release/Secret RBAC and backups.
+Never dump rendered manifests, run `helm get values`, enable `--debug` or shell
+tracing, or send secrets in command arguments. No secret-manager integration is
+installed by this repository.
 
-## Inline App PEM
+## Secret Provisioning
 
-Merge these fields into the existing `githubAuth` mapping in
-`helm/local.secrets-values.yaml`; preserve its management-service reference and
-all other credentials. Replace the placeholder line with the entire PEM, with
-each line indented under `|`. The placeholder is not a usable private key.
+The charts only reference pre-provisioned Kubernetes Secrets. They never create
+credential Secrets or accept credential values. For the current DEV process,
+the repository provides one local plaintext dotenv file and one apply command;
+it does not install an External Secrets operator or encrypt the local file.
 
-```yaml
-githubAuth:
-   privateKeyPem: |
-      REPLACE_WITH_YOUR_COMPLETE_PEM
-   privateKeySecret:
-      name: code-factory-github-app
-      key: private-key.pem
+| Secret | Namespace | Required data key | Purpose |
+|---|---|---|---|
+| `code-factory-ghcr-pull` | `inference`, `orchestrator` | `.dockerconfigjson` | GHCR image pulls; type `kubernetes.io/dockerconfigjson` |
+| `code-factory-github-app-key` | `orchestrator` | `private-key.pem` | GitHub App PEM; mounted only by gateway |
+| `code-factory-supervisor-auth` | `orchestrator` | `token` | Independent gateway/supervisor service token |
+| `code-factory-management-service` | `orchestrator` | `token` | Management/gateway service token when management is enabled |
+| `code-factory-management-admin-password` | `orchestrator` | `password` | Human admin login when admin auth is enabled |
+| configured model-key Secret | `orchestrator` | `api-key` | Optional OpenAI/coder endpoint credentials |
+| configured OAuth client Secret | `orchestrator` | `client-secret` | Optional management GitHub OAuth |
+
+Secret names and key identifiers live in chart defaults. The single tracked
+orchestrator example inherits those references, while local nonsecret overrides
+belong in `helm/orchestrator/local.values.yaml`. The tracked
+[dotenv template](../../helm/example.secret-bundle.env) contains placeholders
+only. Make the ignored local copy, replace every required placeholder with
+current DEV credentials, and keep the file mode restricted:
+
+```bash
+umask 077
+cp helm/example.secret-bundle.env helm/local.secret-bundle.env
+chmod 600 helm/local.secret-bundle.env
+${EDITOR:-vi} helm/local.secret-bundle.env
+./helm/apply-secret-bundle.sh
 ```
 
-The `privateKeySecret` mapping is optional for nonblank inline PEM: omitting it
-uses `code-factory-github-app` with key `private-key.pem`. An empty name also uses
-that inline default. A supplied name/key overrides the destination; no rename is
-required. Only orchestrator renders this Opaque Secret in its configured namespace,
-and only the gateway mounts it. Base64 encoding preserves the literal block's
-newlines exactly but is not encryption. Inference accepts the shared private
-values without rendering an App-key Secret. No `lookup` reads existing Secrets.
-The gateway validates the actual key at runtime; Helm checks the value type and
-Secret reference, not cryptographic validity.
+The local file is plaintext on disk, is excluded by `.gitignore`, and is never
+committed. The apply command refuses a tracked or non-ignored file, requires a
+regular file owned by the current user, and changes its permissions to `0600`
+before reading it. Do not put credentials in command arguments, shell history,
+tracked files, or logs; protect the workstation and its backups accordingly.
+Keep dotenv values double-quoted and encode PEM line breaks as `\\n`, as shown.
+Use a read-packages-only GHCR token, independent random management and supervisor
+tokens, the intended GitHub App PEM, and a valid management admin password.
+Leave optional model/OAuth values empty unless needed. Update the local copy
+directly when credentials change; do not create a second format or fallback path.
 
-Nonblank `privateKeyPem` automatically creates the Secret. Missing, empty, or
-whitespace-only PEM does not create it and uses the existing `privateKeySecret`
-name/key instead; external mode requires a nonempty, valid reference name and key.
-Whitespace is checked only for source selection; actual PEM
-bytes and newlines are preserved. External mode remains the default: clear PEM
-to `""` in every layer and retain the existing Secret reference.
-Do not adopt an externally owned Secret in place without a
-separately authorized ownership/migration plan. Switching away from inline mode
-removes the Helm-managed Secret on upgrade; prepare an externally managed
-replacement and reconcile references before that rollout.
+Applying the bundle provisions external Secrets and namespaces only. Deployment
+remains separate:
 
-**Inline PEM enters Helm values and release history**, including the inference
-release when the shared private layer is supplied to both charts. Keep the local
-file ignored and operator-readable only, restrict release/Secret access with
-least-privilege namespace-scoped RBAC, enable etcd encryption at rest, and protect
-backups. Never print real rendered manifests or debug output. Existing-Secret
-mode avoids passing the PEM to Helm only when all raw PEM values are cleared;
-it does not erase older release records or backups.
+```bash
+./helm/apply-secret-bundle.sh
+./helm/deploy.sh
+```
 
-## External Credential Migration
+The apply command strictly parses the local dotenv file without sourcing or shell
+expansion, renders Kubernetes objects in memory, and pipes them directly to
+`kubectl apply`; it does not print credential values. It uses chart-configured
+namespaces, pull Secret names, and orchestrator Secret names/data keys, and
+applies optional model/OAuth credentials only when nonempty. Model and OAuth refs
+may be empty only when those integrations do not need a key. The deploy command
+checks Secret names, types, and required keys before upgrading either release.
 
-The three values layers and deployment script do not need to change. Optional
-`name`/`key` references in the private layer let Kubernetes supply credentials
-without passing their contents to Helm. An empty reference name preserves the
-current Helm-managed Secret. A nonempty name skips that Secret's creation and
-uses `secretKeyRef` in every relevant workload. Raw values and external references
-for the same credential are mutually exclusive; clear the raw value in every
-layer. No Helm `lookup` or secret-manager controller is used or installed.
+`helm/deploy.sh` renders each chart and verifies Secret existence, namespace,
+type, and required data keys before either release upgrade begins. It does not
+read or print Secret values. It then upgrades both charts concurrently and keeps
+only one Helm history revision. That history limit is destructive to rollback
+capability, but removes prior credential-bearing release revisions after an
+upgrade. Rotate any credential previously supplied through Helm values, especially
+the GHCR PAT, at its issuing system; deleting local files or old Helm revisions is
+not credential rotation. Apply the same retention and rotation policy to backups.
 
-Conventional names are included as a commented migration block in the
-[private example](../../helm/example.secrets-values.yaml). They are not active
-defaults or verified live resources:
-
-| Reference | Proposed Secret | Key | Namespace |
-|---|---|---|---|
-| `credentials.internal.supervisorServiceSecret` | `code-factory-supervisor-service` | `token` | `orchestrator` |
-| `credentials.models.openaiSecret` | `code-factory-openai` | `api-key` | `orchestrator` |
-| `credentials.models.coderSecret` | `code-factory-coder` | `api-key` | `orchestrator` |
-| `management.admin.passwordSecret` | `code-factory-management-admin` | `password` | `orchestrator` |
-
-Before a separately authorized migration:
-
-1. Provision the needed Secrets through an approved out-of-band process. Use
-   separate names from Helm-owned Secrets: switching modes removes the old
-   managed resources on upgrade. Do not attempt to adopt them in place. Keep
-   the supervisor token independent from the management service token. Admin
-   passwords must still meet the same runtime password rules. Provision model
-   keys only when needed, or leave the existing empty-key behavior for public
-   endpoints. Restrict Secret access with namespace-scoped least-privilege RBAC,
-   enable etcd encryption at rest, and protect backups; base64 is not encryption.
-2. Verify Secret existence, type, required keys, and credential validity privately
-   without dumping contents. These local render tests do not perform that check.
-   Keep the existing `code-factory-github-app` / `private-key.pem` and
-   `code-factory-management-service` / `token` references; verify them too.
-3. Merge the desired reference mappings into the existing private values file,
-   setting their raw fields to `""`. Do not copy a duplicate `credentials` or
-   `management` mapping into YAML or overwrite existing local files. For admin
-   mode, keep the username and set only its password source; OIDC is unchanged.
-4. For GHCR, existing pull-Secret support already suffices. Provision a separate
-   externally owned `kubernetes.io/dockerconfigjson` Secret in **both** namespaces
-   first, for example `code-factory-ghcr-pull`. Set shared `registry.create: false`
-   and `registry.username: ""`, clear `credentials.github.ghcrReadPackagesPat`,
-   set shared `inference.imagePullSecrets: [{name: code-factory-ghcr-pull}]`, and
-   set orchestrator-only `imagePullSecrets: [{name: code-factory-ghcr-pull}]`.
-   These names also require verification before use.
-5. During an authorized rollout, supply all three layers without reusing old
-   secret-bearing values (`--reuse-values`), and verify startup, authentication,
-   and image pulls. Environment-sourced credentials require workload recreation
-   to pick up later Secret updates; running task Jobs need separate reconciliation.
-
-External references prevent credential contents entering **new** release records
-only after all raw credential fields are cleared from supplied values. Old Helm
-revisions and backups still retain earlier values and rendered Secrets. Review
-retention and rollback implications and separately authorize credential rotation
-and historical-record handling; this change does not delete history, revoke
-credentials, provision Secrets, change local settings, or deploy anything.
+Use separate random values for the management and supervisor tokens. Restrict
+Secret read/write RBAC, encrypt etcd and backups, use read-only mounts for file
+credentials, and avoid placing values in shell arguments or logs. Kubernetes
+Secret data is base64-encoded, not encrypted by that encoding.
 
 ## Identity And Broker Contract
 

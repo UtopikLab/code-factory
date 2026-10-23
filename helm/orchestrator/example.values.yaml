@@ -1,6 +1,5 @@
-# Orchestrator-only nonsecret overrides. Copy to orchestrator/local.values.yaml.
-# Replace illustrative identity/policy values; external Secret references live
-# in ../local.secrets-values.yaml and are applied last by deploy.sh.
+# Single orchestrator override example. Secret refs are names only; provision
+# their data with the encrypted bundle workflow.
 githubAuth:
   audience: https://gateway.example.com/tasks
   appId: "12"
@@ -9,6 +8,9 @@ githubAuth:
     workflow: .github/workflows/drain.yaml
     events: [ issues, workflow_dispatch ]
   repositories: []
+
+imagePullSecrets:
+- name: code-factory-ghcr-pull
 
 gateway:
   transportMode: edge-tls
@@ -25,9 +27,6 @@ management:
   enabled: false
   github:
     clientId: ""
-    clientSecret:
-      name: ""
-      key: client-secret
   authMode: admin
   oidc:
     issuer: ""

@@ -25,14 +25,81 @@
     },
     "title": "orchestrator values",
     "type": "object",
+    "additionalProperties": false,
+    "required": [
+        "secretRefs",
+        "imagePullSecrets"
+    ],
     "properties": {
+        "namespace": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+        },
+        "icon": {
+            "type": "string"
+        },
+        "secretRefs": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+                "githubAppKey",
+                "managementServiceToken",
+                "supervisorServiceToken",
+                "openaiApiKey",
+                "coderApiKey",
+                "managementAdminPassword",
+                "managementGithubClientSecret"
+            ],
+            "properties": {
+                "githubAppKey": {
+                    "$ref": "#/definitions/secretReference"
+                },
+                "managementServiceToken": {
+                    "$ref": "#/definitions/secretReference"
+                },
+                "supervisorServiceToken": {
+                    "$ref": "#/definitions/secretReference"
+                },
+                "openaiApiKey": {
+                    "$ref": "#/definitions/secretReference"
+                },
+                "coderApiKey": {
+                    "$ref": "#/definitions/secretReference"
+                },
+                "managementAdminPassword": {
+                    "$ref": "#/definitions/secretReference"
+                },
+                "managementGithubClientSecret": {
+                    "$ref": "#/definitions/secretReference"
+                }
+            }
+        },
+        "imagePullSecrets": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                    "name"
+                ],
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 253,
+                        "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+                    }
+                }
+            }
+        },
         "githubAuth": {
             "type": "object",
             "additionalProperties": false,
             "required": [
                 "audience",
-                "appId",
-                "managementServiceSecret"
+                "appId"
             ],
             "properties": {
                 "audience": {
@@ -44,15 +111,6 @@
                 "appId": {
                     "type": "string",
                     "pattern": "^[1-9][0-9]*$"
-                },
-                "privateKeyPem": {
-                    "type": "string"
-                },
-                "privateKeySecret": {
-                    "$ref": "#/definitions/secretReference"
-                },
-                "managementServiceSecret": {
-                    "$ref": "#/definitions/secretReference"
                 },
                 "workflowPolicy": {
                     "type": "object",
@@ -173,31 +231,7 @@
                         }
                     }
                 }
-            ],
-            "if": {
-                "required": [
-                    "privateKeyPem"
-                ],
-                "properties": {
-                    "privateKeyPem": {
-                        "pattern": "\\S"
-                    }
-                }
-            },
-            "else": {
-                "required": [
-                    "privateKeySecret"
-                ],
-                "properties": {
-                    "privateKeySecret": {
-                        "properties": {
-                            "name": {
-                                "minLength": 1
-                            }
-                        }
-                    }
-                }
-            }
+            ]
         },
         "management": {
             "type": "object",
@@ -207,35 +241,13 @@
                     "type": "object",
                     "additionalProperties": false,
                     "required": [
-                        "clientId",
-                        "clientSecret"
+                        "clientId"
                     ],
                     "properties": {
                         "clientId": {
                             "type": "string",
                             "maxLength": 256,
                             "pattern": "^[A-Za-z0-9_.-]*$"
-                        },
-                        "clientSecret": {
-                            "$ref": "#/definitions/secretReference"
-                        }
-                    },
-                    "if": {
-                        "properties": {
-                            "clientId": {
-                                "minLength": 1
-                            }
-                        }
-                    },
-                    "then": {
-                        "properties": {
-                            "clientSecret": {
-                                "properties": {
-                                    "name": {
-                                        "minLength": 1
-                                    }
-                                }
-                            }
                         }
                     }
                 },
@@ -255,30 +267,6 @@
                         "username": {
                             "type": "string",
                             "pattern": "^[A-Za-z0-9_.-]+$"
-                        },
-                        "password": {
-                            "type": "string"
-                        },
-                        "passwordSecret": {
-                            "$ref": "#/definitions/secretReference"
-                        }
-                    },
-                    "not": {
-                        "required": [
-                            "password",
-                            "passwordSecret"
-                        ],
-                        "properties": {
-                            "password": {
-                                "minLength": 1
-                            },
-                            "passwordSecret": {
-                                "properties": {
-                                    "name": {
-                                        "minLength": 1
-                                    }
-                                }
-                            }
                         }
                     }
                 },
@@ -380,33 +368,6 @@
                             "required": [
                                 "username"
                             ],
-                            "anyOf": [
-                                {
-                                    "required": [
-                                        "password"
-                                    ],
-                                    "properties": {
-                                        "password": {
-                                            "minLength": 8,
-                                            "pattern": "^[^<>\\s]*[^A-Za-z0-9<>\\s][^<>\\s]*$"
-                                        }
-                                    }
-                                },
-                                {
-                                    "required": [
-                                        "passwordSecret"
-                                    ],
-                                    "properties": {
-                                        "passwordSecret": {
-                                            "properties": {
-                                                "name": {
-                                                    "minLength": 1
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            ],
                             "properties": {
                                 "username": {
                                     "minLength": 1
@@ -495,158 +456,12 @@
                 }
             }
         },
-        "credentials": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "internal": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "supervisorServiceToken": {
-                            "type": "string",
-                            "pattern": "^$|^[^<>\\s]+$"
-                        },
-                        "supervisorServiceSecret": {
-                            "$ref": "#/definitions/secretReference"
-                        }
-                    },
-                    "not": {
-                        "required": [
-                            "supervisorServiceToken",
-                            "supervisorServiceSecret"
-                        ],
-                        "properties": {
-                            "supervisorServiceToken": {
-                                "minLength": 1
-                            },
-                            "supervisorServiceSecret": {
-                                "properties": {
-                                    "name": {
-                                        "minLength": 1
-                                    }
-                                }
-                            }
-                        }
-                    }
-                },
-                "github": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "ghcrReadPackagesPat": {
-                            "type": "string"
-                        }
-                    }
-                },
-                "models": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "openaiApiKey": {
-                            "type": "string",
-                            "pattern": "^$|^[^<>\\s]+$"
-                        },
-                        "coderApiKey": {
-                            "type": "string",
-                            "pattern": "^$|^[^<>\\s]+$"
-                        },
-                        "openaiSecret": {
-                            "$ref": "#/definitions/secretReference"
-                        },
-                        "coderSecret": {
-                            "$ref": "#/definitions/secretReference"
-                        }
-                    },
-                    "allOf": [
-                        {
-                            "not": {
-                                "required": [
-                                    "openaiApiKey",
-                                    "openaiSecret"
-                                ],
-                                "properties": {
-                                    "openaiApiKey": {
-                                        "minLength": 1
-                                    },
-                                    "openaiSecret": {
-                                        "properties": {
-                                            "name": {
-                                                "minLength": 1
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        {
-                            "not": {
-                                "required": [
-                                    "coderApiKey",
-                                    "coderSecret"
-                                ],
-                                "properties": {
-                                    "coderApiKey": {
-                                        "minLength": 1
-                                    },
-                                    "coderSecret": {
-                                        "properties": {
-                                            "name": {
-                                                "minLength": 1
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    ]
-                }
-            }
-        },
-        "registry": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-                "create",
-                "username"
-            ],
-            "properties": {
-                "create": {
-                    "type": "boolean"
-                },
-                "username": {
-                    "type": "string"
-                }
-            },
-            "if": {
-                "properties": {
-                    "create": {
-                        "const": true
-                    }
-                }
-            },
-            "then": {
-                "properties": {
-                    "username": {
-                        "minLength": 1,
-                        "pattern": "^[^<>\\s]+$"
-                    }
-                }
-            },
-            "else": {
-                "properties": {
-                    "username": {
-                        "maxLength": 0
-                    }
-                }
-            }
-        },
         "supervisor": {
             "type": "object",
             "properties": {
                 "auth": {
                     "not": {},
-                    "description": "Set credentials.internal.supervisorServiceToken in helm/local.secrets-values.yaml."
+                    "description": "Set secretRefs.supervisorServiceToken to a pre-provisioned Secret."
                 },
                 "config": {
                     "type": "object",
@@ -720,12 +535,47 @@
                 }
             }
         },
+        "metrics": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "port": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535
+                },
+                "external": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "gatewayNodePort": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535
+                        },
+                        "supervisorNodePort": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535
+                        },
+                        "workerNodePort": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 65535
+                        }
+                    }
+                }
+            }
+        },
         "worker": {
             "type": "object",
             "properties": {
                 "auth": {
                     "not": {},
-                    "description": "Set credentials.models.coderApiKey in helm/local.secrets-values.yaml if the endpoint requires authentication."
+                    "description": "Set secretRefs.coderApiKey when the endpoint requires authentication."
                 },
                 "coderUrl": {
                     "type": "string"
@@ -1167,6 +1017,31 @@
     },
     "allOf": [
         {
+            "properties": {
+                "secretRefs": {
+                    "properties": {
+                        "githubAppKey": {
+                            "properties": {
+                                "name": {
+                                    "minLength": 1
+                                }
+                            }
+                        },
+                        "supervisorServiceToken": {
+                            "properties": {
+                                "name": {
+                                    "minLength": 1
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "required": [
+                "secretRefs"
+            ]
+        },
+        {
             "if": {
                 "properties": {
                     "management": {
@@ -1176,13 +1051,16 @@
                             }
                         }
                     }
-                }
+                },
+                "required": [
+                    "management"
+                ]
             },
             "then": {
                 "properties": {
-                    "githubAuth": {
+                    "secretRefs": {
                         "properties": {
-                            "managementServiceSecret": {
+                            "managementServiceToken": {
                                 "properties": {
                                     "name": {
                                         "minLength": 1
@@ -1191,40 +1069,66 @@
                             }
                         }
                     }
-                }
+                },
+                "required": [
+                    "secretRefs"
+                ]
             }
         },
         {
             "if": {
                 "properties": {
-                    "registry": {
+                    "management": {
                         "properties": {
-                            "create": {
+                            "enabled": {
                                 "const": true
+                            },
+                            "authMode": {
+                                "const": "admin"
                             }
                         },
                         "required": [
-                            "create"
+                            "enabled",
+                            "authMode"
                         ]
                     }
                 },
                 "required": [
-                    "registry"
+                    "management"
                 ]
             },
             "then": {
                 "properties": {
-                    "credentials": {
+                    "secretRefs": {
+                        "properties": {
+                            "managementAdminPassword": {
+                                "properties": {
+                                    "name": {
+                                        "minLength": 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "required": [
+                    "secretRefs"
+                ]
+            }
+        },
+        {
+            "if": {
+                "properties": {
+                    "management": {
                         "properties": {
                             "github": {
                                 "properties": {
-                                    "ghcrReadPackagesPat": {
-                                        "minLength": 1,
-                                        "pattern": "^[^<>\\s]+$"
+                                    "clientId": {
+                                        "minLength": 1
                                     }
                                 },
                                 "required": [
-                                    "ghcrReadPackagesPat"
+                                    "clientId"
                                 ]
                             }
                         },
@@ -1234,51 +1138,27 @@
                     }
                 },
                 "required": [
-                    "credentials"
+                    "management"
                 ]
-            }
-        },
-        {
-            "properties": {
-                "credentials": {
-                    "properties": {
-                        "internal": {
-                            "anyOf": [
-                                {
-                                    "required": [
-                                        "supervisorServiceToken"
-                                    ],
-                                    "properties": {
-                                        "supervisorServiceToken": {
-                                            "minLength": 1
-                                        }
-                                    }
-                                },
-                                {
-                                    "required": [
-                                        "supervisorServiceSecret"
-                                    ],
-                                    "properties": {
-                                        "supervisorServiceSecret": {
-                                            "properties": {
-                                                "name": {
-                                                    "minLength": 1
-                                                }
-                                            }
-                                        }
+            },
+            "then": {
+                "properties": {
+                    "secretRefs": {
+                        "properties": {
+                            "managementGithubClientSecret": {
+                                "properties": {
+                                    "name": {
+                                        "minLength": 1
                                     }
                                 }
-                            ]
+                            }
                         }
-                    },
-                    "required": [
-                        "internal"
-                    ]
-                }
-            },
-            "required": [
-                "credentials"
-            ]
+                    }
+                },
+                "required": [
+                    "secretRefs"
+                ]
+            }
         }
     ]
 }
