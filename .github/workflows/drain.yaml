@@ -131,7 +131,10 @@ jobs:
                   conflict = json.loads(raw) if len(raw) <= 1048576 else {}
                   reasons = {
                     400: {"repository-token-header-unsupported", "invalid-task-or-result"},
-                    403: {"repository-not-authorized", "repository-mismatch", "task-authentication-unsupported"},
+                    403: {"repository-not-authorized", "repository-mismatch", "task-authentication-unsupported",
+                      "repository-credential-required", "repository-identity-mismatch",
+                      "repository-read-access-unverified", "repository-issue-mismatch",
+                      "repository-credential-denied", "repository-validation-unavailable"},
                     409: {"retry-already-created", "retry-requires-failed-task",
                           "retry-requires-lifecycle-sync", "issue-task-active"},
                   }[error.code]

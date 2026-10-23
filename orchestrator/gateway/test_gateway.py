@@ -744,13 +744,57 @@ def test_repository_validation_errors_are_sanitized(monkeypatch, status, reason)
     assert "repo-test-only" not in str(raised.value)
 
 
-def test_repository_validation_probes_with_only_originating_credential(monkeypatch):
-    github = Mock(side_effect=[{"full_name": "ORG/Repo", "permissions": {"pull": True, "push": False}}, [], [], [],
+@pytest.mark.parametrize("permission_metadata", [
+    {"permissions": {"pull": True, "push": False}},
+    {"permissions": {"pull": False, "push": False}},
+    {"permissions": {}},
+    {},
+])
+def test_repository_validation_probes_with_only_originating_credential(monkeypatch, permission_metadata):
+    github = Mock(side_effect=[{"full_name": "ORG/Repo", **permission_metadata}, [], [], [],
                                {"number": 2, "html_url": "https://github.com/org/repo/issues/2"}])
     monkeypatch.setattr(server, "_github", github)
     server._validate_repository("org/repo", 2, "repo-test-only")
-    assert len(github.call_args_list) == 5
+    assert [call.args[1] for call in github.call_args_list] == [
+        "/repos/org/repo", "/repos/org/repo/contents", "/repos/org/repo/pulls?per_page=1",
+        "/repos/org/repo/issues?per_page=1", "/repos/org/repo/issues/2",
+    ]
     assert all(call.args[0] == "GET" and call.kwargs == {"token": "repo-test-only"} for call in github.call_args_list)
+
+
+@pytest.mark.parametrize("probe_index", [1, 2, 3, 4])
+@pytest.mark.parametrize("failure,reason", [
+    (401, "repository-credential-denied"),
+    (403, "repository-credential-denied"),
+    (404, "repository-credential-denied"),
+    (503, "repository-validation-unavailable"),
+    ("transport", "repository-validation-unavailable"),
+])
+def test_repository_validation_requires_each_authenticated_probe(monkeypatch, probe_index, failure, reason):
+    responses = [{"full_name": "org/repo", "permissions": {"pull": False}}, [], [], [],
+                 {"number": 2, "html_url": "https://github.com/org/repo/issues/2"}]
+    responses[probe_index] = (OSError("repo-test-only") if failure == "transport" else
+                              server.urllib.error.HTTPError("https://api.github.com", failure, "repo-test-only", {}, None))
+    github = Mock(side_effect=responses)
+    monkeypatch.setattr(server, "_github", github)
+    with pytest.raises(server.CredentialError, match=reason) as raised:
+        server._validate_repository("org/repo", 2, "repo-test-only")
+    assert "repo-test-only" not in str(raised.value)
+    assert len(github.call_args_list) == probe_index + 1
+    assert all(call.kwargs == {"token": "repo-test-only"} for call in github.call_args_list)
+
+
+@pytest.mark.parametrize("remote", [
+    {"number": 3, "html_url": "https://github.com/org/repo/issues/2"},
+    {"number": 2, "html_url": "https://github.com/org/other/issues/2"},
+    {"number": 2, "html_url": "https://github.com/org/repo/issues/2", "pull_request": {}},
+    {},
+])
+def test_repository_validation_rejects_issue_mismatch_with_app_permissions(monkeypatch, remote):
+    github = Mock(side_effect=[{"full_name": "org/repo", "permissions": {"pull": False}}, [], [], [], remote])
+    monkeypatch.setattr(server, "_github", github)
+    with pytest.raises(server.CredentialError, match="repository-issue-mismatch"):
+        server._validate_repository("org/repo", 2, "repo-test-only")
 
 
 def test_kubernetes_errors_never_include_secret_response(monkeypatch):
@@ -918,6 +962,10 @@ def test_drain_workflow_identity_failures_are_safe_and_do_not_submit(
     pytest.param(403, b'{"error":"repository-not-authorized"}', ": repository-not-authorized", id="forbidden-policy"),
     pytest.param(403, b'{"error":"repository-mismatch"}', ": repository-mismatch", id="forbidden-repository"),
     pytest.param(403, b'{"error":"task-authentication-unsupported"}', ": task-authentication-unsupported", id="forbidden-legacy"),
+        *[pytest.param(403, json.dumps({"error": reason}).encode(), ": " + reason, id="forbidden-" + reason)
+            for reason in ("repository-credential-required", "repository-identity-mismatch",
+                                         "repository-read-access-unverified", "repository-issue-mismatch",
+                                         "repository-credential-denied", "repository-validation-unavailable")],
     pytest.param(403, b'{"error":"gateway-test-only repo-test-only"}', "", id="forbidden"),
     pytest.param(403, b'{"error":[],"task_id":"issue-' + b'a' * 32 + b'"}', "", id="forbidden-invalid-fields"),
     pytest.param(403, b'{"error":"retry-already-created"}', "", id="forbidden-not-conflict"),
@@ -1189,9 +1237,9 @@ def test_gateway_github_transport_uses_only_explicit_repository_token(monkeypatc
 
 @pytest.mark.parametrize("metadata,error", [
     ({"full_name": "org/other", "permissions": {"push": True}}, "identity-mismatch"),
-    ({"full_name": "org/repo"}, "read-access-unverified"),
+    ({"full_name": "org/repo", "archived": True}, "read-access-unverified"),
 ])
-def test_repository_validation_rejects_wrong_identity_or_missing_read_access(monkeypatch, metadata, error):
+def test_repository_validation_rejects_wrong_identity_or_archived_repository(monkeypatch, metadata, error):
     github = Mock(return_value=metadata)
     monkeypatch.setattr(server, "_github", github)
     with pytest.raises(server.CredentialError, match=error):
