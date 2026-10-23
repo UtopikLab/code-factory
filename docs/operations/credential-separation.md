@@ -290,6 +290,16 @@ and owner IDs, and exact workflow/ref/subject/event tuples must match. Fork/PR
 and environment subjects are not accepted by branch-only policies. A trusted
 workflow caller is authorized only for its configured repository, including retry.
 
+Branch-only bindings accept both GitHub default subject encodings:
+`repo:OWNER/REPO:ref:REF` and
+`repo:OWNER@OWNER_ID/REPO@REPOSITORY_ID:ref:REF`. Names, canonical positive
+decimal IDs, and the full ref suffix must match exactly; custom subjects are
+not supported. Immutable IDs must match the signed claims and independently
+configured repository policy IDs or live App-authenticated GitHub metadata.
+Explicit policy `sub` values remain in the canonical name-only form; the
+immutable form represents the same binding, not an additional permission.
+Combined workflow/repository policies must satisfy both sets of restrictions.
+
 Management sends identities, never user-supplied repository credentials. Its
 service token is an intentionally trusted operator-service credential with broad
 task status access; repository submission is still bounded by App policy. This

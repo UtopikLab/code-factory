@@ -100,8 +100,13 @@ def test_claim_binding(auth_setup, field, value, error):
         auth.authenticate(jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"}))
 
 
-def test_signature_algorithm_and_size(auth_setup):
+@pytest.mark.parametrize("subject", [
+    "repo:owner/repo:ref:refs/heads/main",
+    "repo:owner@456/repo@123:ref:refs/heads/main",
+])
+def test_signature_algorithm_and_size(auth_setup, subject):
     auth, _, claims, _ = auth_setup
+    claims["sub"] = subject
     other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     for token in (jwt.encode(claims, other, algorithm="RS256", headers={"kid": "test"}),
                   jwt.encode(claims, "test-secret", algorithm="HS256", headers={"kid": "test"}), "x" * 16385):
@@ -290,6 +295,116 @@ def test_dynamic_actions_and_user_success(installation_auth, restricted):
 def test_dynamic_actions_denies_untrusted_claims(auth_setup, field, value):
     auth, key, claims, _ = dynamic_auth(auth_setup)
     claims[field] = value
+    with pytest.raises(AuthorizationError):
+        auth.authenticate(jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"}))
+
+
+@pytest.mark.parametrize("mode", ["explicit", "workflow", "combined"])
+@pytest.mark.parametrize("subject", [
+    "repo:owner/repo:ref:refs/heads/main",
+    "repo:owner@456/repo@123:ref:refs/heads/main",
+])
+def test_default_subject_encodings(auth_setup, mode, subject):
+    auth, key, claims, _ = (auth_setup if mode == "explicit"
+                            else dynamic_auth(auth_setup, restricted=mode == "combined"))
+    claims["sub"] = subject
+    assert auth.authenticate(jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"})) == "owner/repo"
+
+
+@pytest.mark.parametrize("mode", ["explicit", "workflow", "combined"])
+@pytest.mark.parametrize("field,value", [
+    ("ref", "refs/heads/other"), ("event_name", "pull_request_target"),
+    ("workflow_ref", "owner/repo/.github/workflows/other.yaml@refs/heads/main"),
+    ("repository", "Owner/repo"),
+])
+def test_immutable_subject_preserves_exact_workflow_binding(auth_setup, mode, field, value):
+    auth, key, claims, _ = (auth_setup if mode == "explicit"
+                            else dynamic_auth(auth_setup, restricted=mode == "combined"))
+    claims["sub"] = "repo:owner@456/repo@123:ref:refs/heads/main"
+    claims[field] = value
+    with pytest.raises(AuthorizationError):
+        auth.authenticate(jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"}))
+
+
+@pytest.mark.parametrize("subject", [
+    "repo:owner@456/repo@123:ref:refs/heads/main",
+    "repo:owner/repo:environment:production",
+    "repo:owner/repo:ref:refs/heads/other",
+])
+def test_explicit_policy_subject_remains_canonical(auth_setup, subject):
+    auth, _, _, _ = auth_setup
+    policy = next(iter(auth.policies.values()))
+    policy["bindings"][0]["sub"] = subject
+    settings = {"GITHUB_OIDC_AUDIENCE": auth.audience, "GITHUB_APP_ID": auth.app_id,
+                "GITHUB_APP_PRIVATE_KEY_FILE": auth.key_file, "GITHUB_REPOSITORY_POLICIES": json.dumps([policy])}
+    with pytest.raises(ValueError, match="^github-auth-configuration-invalid$"):
+        GitHubAuth(settings)
+
+
+@pytest.mark.parametrize("mode", ["explicit", "workflow", "combined"])
+@pytest.mark.parametrize("subject", [
+    "repo:owner@999/repo@123:ref:refs/heads/main",
+    "repo:owner@456/repo@999:ref:refs/heads/main",
+    "repo:owner@123/repo@456:ref:refs/heads/main",
+    "repo:other@456/repo@123:ref:refs/heads/main",
+    "repo:owner@456/other@123:ref:refs/heads/main",
+    "repo:Owner@456/repo@123:ref:refs/heads/main",
+    "repo:owner@0456/repo@123:ref:refs/heads/main",
+    "repo:owner@456/repo@0123:ref:refs/heads/main",
+    "repo:owner@0/repo@123:ref:refs/heads/main",
+    "repo:owner@456/repo@-123:ref:refs/heads/main",
+    "repo:owner@@456/repo@123:ref:refs/heads/main",
+    "repo:owner@456/repo:ref:refs/heads/main",
+    "repo:owner/repo@123:ref:refs/heads/main",
+    "repo:owner@456/repo@123:ref:refs/heads/other",
+    "repo:owner@456/repo@123:environment:production",
+    "repo:owner@456/repo@123:pull_request",
+    "repo:owner@456/repo@123:ref:refs/heads/main:extra",
+    "repo:owner@456/repo@123:ref:refs%2Fheads%2Fmain",
+    "repository_id:123:repo:owner@456/repo@123:ref:refs/heads/main",
+    "repo:owner@456/repo@123:ref:refs/heads/main\n",
+])
+def test_default_subject_rejects_nonexact_identity(auth_setup, mode, subject):
+    auth, key, claims, calls = (auth_setup if mode == "explicit"
+                               else dynamic_auth(auth_setup, restricted=mode == "combined"))
+    claims["sub"] = subject
+    with pytest.raises(AuthorizationError):
+        auth.authenticate(jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"}))
+    assert [url for url, _ in calls] == [DISCOVERY_URL, JWKS_URL]
+
+
+@pytest.mark.parametrize("mode", ["explicit", "workflow", "combined"])
+@pytest.mark.parametrize("field,value", [
+    ("repository_id", "999"), ("repository_owner_id", "999"),
+    ("repository_id", "456"), ("repository_owner_id", "123"),
+    ("repository_id", "0123"), ("repository_owner_id", "0456"),
+    ("repository_id", 123), ("repository_owner_id", 456),
+])
+def test_immutable_subject_requires_independent_id_binding(auth_setup, mode, field, value):
+    auth, key, claims, _ = (auth_setup if mode == "explicit"
+                            else dynamic_auth(auth_setup, restricted=mode == "combined"))
+    claims[field] = value
+    claims["sub"] = f"repo:owner@{claims['repository_owner_id']}/repo@{claims['repository_id']}:ref:refs/heads/main"
+    with pytest.raises(AuthorizationError):
+        auth.authenticate(jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"}))
+
+
+@pytest.mark.parametrize("subject", [
+    "repo:owner/repo:ref:refs/heads/main",
+    "repo:owner@456/repo@123:ref:refs/heads/main",
+])
+def test_dynamic_subject_requires_exact_metadata_name(auth_setup, subject):
+    auth, key, claims, _ = dynamic_auth(auth_setup)
+    original = auth.fetch
+
+    def fetch(url, **kwargs):
+        result = original(url, **kwargs)
+        if url == "https://api.github.com/repos/owner/repo":
+            result["full_name"] = "Owner/repo"
+        return result
+
+    auth.fetch = fetch
+    claims["sub"] = subject
     with pytest.raises(AuthorizationError):
         auth.authenticate(jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"}))
 

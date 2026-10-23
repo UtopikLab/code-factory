@@ -18,6 +18,16 @@ WRITE_PERMISSIONS = {"contents": "write", "issues": "read", "pull_requests": "wr
 logger = logging.getLogger("gateway.github_auth")
 
 
+def default_subjects(repository, ref, repository_id, repository_owner_id):
+    legacy = "repo:" + repository + ":ref:" + ref
+    if not all(isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*", value)
+               for value in (repository_id, repository_owner_id)):
+        return (legacy,)
+    owner, name = repository.split("/")
+    immutable = "repo:" + owner + "@" + repository_owner_id + "/" + name + "@" + repository_id + ":ref:" + ref
+    return legacy, immutable
+
+
 class AuthenticationError(Exception):
     pass
 
@@ -208,7 +218,8 @@ class GitHubAuth:
                 ("ref", claims["ref"] == binding["ref"]),
                 ("event_name", claims["event_name"] in binding["events"]),
                 ("workflow_ref", claims["workflow_ref"] == repo + "/" + binding["workflow"] + "@" + binding["ref"]),
-                ("sub", claims["sub"] == "repo:" + repo + ":ref:" + binding["ref"]),
+                ("sub", claims["sub"] in default_subjects(repo, binding["ref"], claims["repository_id"],
+                                                        claims["repository_owner_id"])),
             )
             for field, matches in checks:
                 if not matches:
@@ -222,6 +233,7 @@ class GitHubAuth:
             checks = (
                 ("repository_id", str(metadata.get("id")) == claims["repository_id"]),
                 ("repository_owner_id", str(metadata.get("owner", {}).get("id")) == claims["repository_owner_id"]),
+                ("repository", metadata.get("full_name") == repo),
                 ("fork", metadata.get("fork") is False),
             )
             for field, matches in checks:
@@ -234,7 +246,10 @@ class GitHubAuth:
                 or claims["repository_id"] != policy["repository_id"]
                 or claims["repository_owner_id"] != policy["repository_owner_id"]
                 or not any(all(claims[field] == binding[field] for field in
-                               ("workflow_ref", "ref", "sub", "event_name")) for binding in policy["bindings"])):
+                               ("workflow_ref", "ref", "event_name"))
+                           and claims["sub"] in default_subjects(policy["repository"], binding["ref"],
+                                                                 policy["repository_id"], policy["repository_owner_id"])
+                           for binding in policy["bindings"])):
             logger.warning("github-authorization-denied stage=repository-binding field=identity-or-binding")
             raise AuthorizationError("github-workflow-not-authorized")
         return policy["repository"]
