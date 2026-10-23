@@ -245,6 +245,63 @@ lifecycle processing, use **Run workflow** with that failed task's ID to retry.
 
 ## Troubleshooting
 
+**Workflow fails with `GitHub Actions identity unavailable`:**
+- This happens before task submission, not during gateway authentication or worker
+  dispatch. Old copies hide every identity failure behind this single message;
+  update the source repository's workflow from the canonical
+  [drain workflow](../../.github/workflows/drain.yaml) to obtain a safe reason.
+- `CODEFACTORY_OIDC_AUDIENCE is not configured`: set the Actions **variable**
+  `CODEFACTORY_OIDC_AUDIENCE` to exactly the gateway's `githubAuth.audience`.
+- `runner OIDC environment missing`: retain `permissions: id-token: write` in the
+  executing workflow/job. GitHub supplies the runner URL/token; do not set them
+  manually or substitute repository credentials.
+- `runner OIDC endpoint rejected` or `token request rejected`: investigate the
+  runner endpoint/redirect behavior without printing the URL or headers. Keep the
+  HTTPS, GitHub Actions hostname, port, and no-redirect checks intact.
+- `token request failed: HTTP <status>`, `token endpoint unreachable`, or
+  `invalid token response`: investigate that token-service failure before changing
+  gateway policy. Only the status/reason is reported, never a response body or token.
+- Do not assume missing audience or permissions from the old generic message.
+  A newly started run using the updated workflow is needed to distinguish causes;
+  rerunning an old revision retains its old diagnostics.
+
+**Workflow fails with HTTP 400 and `repository-token-header-unsupported`:**
+- The source repository still sends the retired `X-Repository-Token` header.
+  The gateway rejects it before authentication or task creation; changing issue
+  metadata or redeploying the gateway does not migrate that client.
+- Replace the source repository workflow with the canonical
+  [drain workflow](../../.github/workflows/drain.yaml), including `id-token: write`,
+  and configure `CODEFACTORY_OIDC_AUDIENCE` and the repository's exact App/OIDC
+  policy bindings. Do not restore PAT intake or log credential values.
+- Old workflow copies may report only `Task intake failed: HTTP 400`; the current
+  canonical workflow displays this allowlisted reason without dumping the response.
+
+**Existing task failed with `task-authentication-unsupported`:**
+- A stored payload without `repository_auth: github-app` is a legacy task, not
+  an App-authenticated task. The supervisor fails it closed before worker dispatch.
+- Check its recorded status, lifecycle, and credential cleanup. A task already
+  `failed` with `lifecycle: synced` and `credential_cleanup: deleted` is settled,
+  not still running. Reopening the issue replays that same failed task.
+- Normal retry deliberately rejects legacy tasks even after the workflow is migrated.
+  There is no automatic legacy-to-App migration endpoint. Recovery of the same issue
+  requires a separately reviewed operator migration; do not delete task history,
+  rewrite the authentication marker, or reuse retired credentials to bypass this check.
+
+**Manual retry fails with HTTP 403:**
+- Invalid OIDC signature, issuer, audience, or lifetime produces HTTP 401
+  (`github-identity-invalid`), not the legacy-task retry denial. Repository or
+  workflow policy rejection produces HTTP 403 (`repository-not-authorized`)
+  before the gateway looks up the failed task.
+- After authentication and repository matching, a stored task without
+  `repository_auth: github-app` returns HTTP 403
+  (`task-authentication-unsupported`) before creating a retry. This is an intentional
+  migration boundary, not a reason to weaken OIDC policy or restore old credentials.
+- Older gateways collapse this legacy denial into `repository-mismatch`; older
+  source workflows hide all HTTP 403 reasons. A bare 403 cannot establish which
+  branch ran. Check the deployed handler and stored task before changing policy.
+- The canonical workflow displays only fixed, allowlisted 403 reasons. Updating
+  it and the gateway improves attribution but does not migrate or unblock legacy tasks.
+
 **Workflow fails with 401 Unauthorized:**
 - Check `id-token: write`, runner identity availability, audience and JWT validity
 - Do not substitute a repository or registry credential

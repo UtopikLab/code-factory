@@ -100,10 +100,11 @@ class TaskAPI:
             original = gateway.json.loads(task["payload"])
         finally:
             db.close()
-        if original.get("repository_auth") != "github-app":
-            raise PermissionError("task-authentication-unsupported")
         if handler.actions_repo and handler.actions_repo.lower() != (task["repo"] or "").lower():
             raise PermissionError("repository-mismatch")
+        if original.get("repository_auth") != "github-app":
+            handler._json(403, {"error": "task-authentication-unsupported"})
+            return
         original.pop("task_id", None)
         original.pop("repository_auth")
         self.spawn(original, retry_of=task["task_id"], retry_key=payload["retry_key"])

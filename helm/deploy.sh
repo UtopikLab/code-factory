@@ -121,16 +121,7 @@ validate_release() {
     warn "could not read workload status in namespace '$namespace'"
     return 1
   fi
-  if ! jq -e '
-    [.items[] | {
-      kind,
-      name: .metadata.name,
-      desired: (if .kind == "DaemonSet" then (.status.desiredNumberScheduled // 0) else (.spec.replicas // 1) end),
-      ready: (if .kind == "DaemonSet" then (.status.numberReady // 0) elif .kind == "StatefulSet" then (.status.readyReplicas // 0) else (.status.availableReplicas // 0) end)
-    }] as $workloads
-    | ($workloads | length) > 0
-      and all($workloads[]; .ready >= .desired and (.kind != "DaemonSet" or .desired > 0))
-  ' <<<"$workloads" >/dev/null; then
+  if ! jq -e -f "$SCRIPT_DIR/workload-readiness.jq" <<<"$workloads" >/dev/null; then
     warn "one or more workloads are not ready in namespace '$namespace'"
     kubectl get deployments,statefulsets,daemonsets -n "$namespace" -o wide >&2 || true
     return 1
@@ -204,5 +195,7 @@ kubectl get pods -n "$NAMESPACE_IN"   --show-labels=false 2>/dev/null | tail -n 
 kubectl get pods -n "$NAMESPACE_O"    --show-labels=false 2>/dev/null | tail -n +2
 # log "next: install NFD, then set gpu: \"1\" in helm/inference/values.yaml and re-run this script."
 
+kubectl -n "$NAMESPACE_IN" delete pods --field-selector=status.phase=Succeeded >/dev/null
+kubectl -n "$NAMESPACE_IN" delete pods --field-selector=status.phase=Failed >/dev/null
 kubectl -n "$NAMESPACE_O" delete pods --field-selector=status.phase=Succeeded >/dev/null
 kubectl -n "$NAMESPACE_O" delete pods --field-selector=status.phase=Failed >/dev/null

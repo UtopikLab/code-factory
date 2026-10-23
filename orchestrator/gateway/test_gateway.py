@@ -12,6 +12,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 import server
@@ -151,6 +152,19 @@ def test_actions_retry_cannot_cross_repository(task_gateway, monkeypatch):
     assert task_request("POST", "/api/v1/tasks/" + task["task_id"] + "/retry", {"retry_key": "run-1"})[0] == 403
 
 
+def test_legacy_workflow_header_is_rejected_before_authentication(task_gateway, monkeypatch):
+    authorize = Mock(side_effect=AssertionError("Legacy headers must be rejected before authentication"))
+    monkeypatch.setattr(server.Handler, "_authorized", authorize)
+    status, result = task_request("POST", "/api/v1/tasks/spawn",
+                                  {"repo": "org/repo", "issue_number": 2},
+                                  repository_token="repo-test-only")
+    assert (status, result) == (400, {"error": "repository-token-header-unsupported"})
+    authorize.assert_not_called()
+    server._github_app().mint.assert_not_called()
+    with server._task_db() as db:
+        assert db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
 def test_actions_submission_is_bound_to_verified_repository(task_gateway):
     app = server._github_app()
     app.authenticate.return_value = "org/repo"
@@ -187,7 +201,12 @@ def test_user_token_stays_out_of_task_storage_and_is_rechecked(task_gateway, mon
     assert app.authorize_user.call_count == 2
 
 
-def test_old_task_cannot_renew_or_retry_as_app_task(task_gateway, monkeypatch):
+@pytest.mark.parametrize("identity,error", [
+    ("org/repo", "task-authentication-unsupported"),
+    ("other/repo", "repository-mismatch"),
+    (None, "task-authentication-unsupported"),
+])
+def test_old_task_cannot_renew_or_retry_as_app_task(task_gateway, monkeypatch, identity, error):
     _, task = task_request("POST", "/api/v1/tasks/spawn", issue_payload())
     task_id = task["task_id"]
     db = server._task_db()
@@ -197,8 +216,22 @@ def test_old_task_cannot_renew_or_retry_as_app_task(task_gateway, monkeypatch):
     app.mint.reset_mock()
     assert task_request("POST", f"/api/v1/tasks/{task_id}/credentials", {})[0] == 403
     finish_failed_task(task_gateway, monkeypatch, task_id)
-    assert task_request("POST", f"/api/v1/tasks/{task_id}/retry", {"retry_key": "run-1"})[0] == 403
+    app.authenticate.return_value = identity
+    app.authorize_user.reset_mock()
+    server._k8s_request.reset_mock()
+    with server._task_db() as db:
+        before = dict(db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone())
+    authorization = "Bearer signed-test-only" if identity else None
+    assert task_request("POST", f"/api/v1/tasks/{task_id}/retry", {"retry_key": "run-1"},
+                        authorization=authorization) == (403, {"error": error})
+    if identity:
+        app.authenticate.assert_called_once_with("signed-test-only")
     app.mint.assert_not_called()
+    app.authorize_user.assert_not_called()
+    server._k8s_request.assert_not_called()
+    with server._task_db() as db:
+        assert db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+        assert dict(db.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()) == before
 
 
 def test_app_chart_lint_render_and_schema(helm_values):
@@ -787,6 +820,12 @@ def test_drain_workflow_credential_headers_and_https(monkeypatch, tmp_path, caps
         build.assert_not_called()
         return
     namespace = runpy.run_path(str(script_file))
+    identity_request = opener.open.call_args_list[0].args[0]
+    assert identity_request.get_method() == "GET"
+    assert identity_request.get_header("Authorization") == "Bearer runner-test-only"
+    assert urlsplit(identity_request.full_url).hostname == "runner.actions.githubusercontent.com"
+    assert parse_qsl(urlsplit(identity_request.full_url).query) == [("audience", "https://gateway.test/tasks")]
+    assert opener.open.call_args_list[0].kwargs == {"timeout": 15}
     request = opener.open.call_args.args[0]
     assert request.full_url == url.rstrip("/") + "/api/v1/tasks/spawn"
     assert request.get_header("Authorization") == "Bearer identity-test-only"
@@ -798,9 +837,92 @@ def test_drain_workflow_credential_headers_and_https(monkeypatch, tmp_path, caps
     assert all(value not in output + request.data.decode() for value in ("gateway-test-only", "repo-test-only", "registry-test-only", "legacy-test-only"))
 
 
+@pytest.mark.parametrize("problem,detail", [
+    ("audience", "CODEFACTORY_OIDC_AUDIENCE is not configured"),
+    ("request-url", "runner OIDC environment missing; require id-token: write"),
+    ("request-token", "runner OIDC environment missing; require id-token: write"),
+    ("hostname", "runner OIDC endpoint rejected"),
+    ("port", "runner OIDC endpoint rejected"),
+    ("http", "token request failed: HTTP 403"),
+    ("transport", "token endpoint unreachable"),
+    ("redirect", "token request rejected"),
+    ("json", "invalid token response"),
+    ("non-object", "invalid token response"),
+    ("missing-token", "invalid token response"),
+    ("whitespace-token", "invalid token response"),
+    ("oversized-response", "invalid token response"),
+])
+def test_drain_workflow_identity_failures_are_safe_and_do_not_submit(
+        monkeypatch, tmp_path, capsys, workflow_identity, problem, detail):
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/drain.yaml").read_text())
+    step = next(step for step in workflow["jobs"]["send-to-orchestrator"]["steps"] if step.get("shell") == "python")
+    assert workflow["permissions"]["id-token"] == "write"
+    assert step["env"]["CODEFACTORY_OIDC_AUDIENCE"] == "${{ vars.CODEFACTORY_OIDC_AUDIENCE }}"
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"repository": {"full_name": "org/repo"}, "issue": {"number": 2}}))
+    for key, value in {
+        "CODEFACTORY_URL": "https://intake.test", "GITHUB_EVENT_PATH": str(event),
+        "GITHUB_REPOSITORY": "org/repo", "GITHUB_EVENT_NAME": "issues",
+    }.items():
+        monkeypatch.setenv(key, value)
+    if problem == "audience":
+        monkeypatch.setenv("CODEFACTORY_OIDC_AUDIENCE", "")
+    elif problem in ("request-url", "request-token"):
+        monkeypatch.delenv("ACTIONS_ID_TOKEN_REQUEST_" + ("URL" if problem == "request-url" else "TOKEN"))
+    elif problem in ("hostname", "port"):
+        monkeypatch.setenv("ACTIONS_ID_TOKEN_REQUEST_URL", "https://runner.actions.githubusercontent.com" +
+                           (".untrusted.test/token" if problem == "hostname" else ":444/token"))
+    response = workflow_identity.__enter__.return_value
+    response.read.return_value = {
+        "json": b"not-json identity-test-only", "non-object": b"[]", "missing-token": b"{}",
+        "whitespace-token": b'{"value":"identity-test-only invalid"}', "oversized-response": b"x" * 32769,
+    }.get(problem, response.read.return_value)
+    opener = Mock()
+    if problem == "http":
+        opener.open.side_effect = server.urllib.error.HTTPError(
+            "https://runner.actions.githubusercontent.com/token", 403, "runner-test-only", {},
+            io.BytesIO(b"identity-test-only"),
+        )
+    elif problem == "transport":
+        opener.open.side_effect = server.urllib.error.URLError("runner-test-only")
+    elif problem == "redirect":
+        opener.open.side_effect = ValueError("Intake redirect rejected runner-test-only")
+    else:
+        opener.open.side_effect = [workflow_identity]
+    monkeypatch.setattr(server.urllib.request, "build_opener", Mock(return_value=opener))
+    script_file = tmp_path / "intake.py"
+    script_file.write_text(step["run"])
+    with pytest.raises(SystemExit) as raised:
+        runpy.run_path(str(script_file))
+    assert str(raised.value) == "GitHub Actions identity unavailable: " + detail
+    assert opener.open.call_count == (0 if problem in {"audience", "request-url", "request-token", "hostname", "port"} else 1)
+    if opener.open.called:
+        assert opener.open.call_args.args[0].get_method() == "GET"
+    output = capsys.readouterr()
+    assert output.out == output.err == ""
+
+
 @pytest.mark.parametrize("status,response_body,detail", [
+    pytest.param(400, b'{"error":"repository-token-header-unsupported"}',
+                 ": repository-token-header-unsupported", id="bad-request-legacy-header"),
+    pytest.param(400, b'{"error":"invalid-task-or-result"}',
+                 ": invalid-task-or-result", id="bad-request-invalid-payload"),
+    pytest.param(400, b'{"error":"gateway-test-only repo-test-only"}', "", id="bad-request-secret"),
+    pytest.param(400, b'{"error":[],"task_id":"issue-' + b'a' * 32 + b'"}', "", id="bad-request-invalid-fields"),
+    pytest.param(400, b'{"status":"failed","replayed":true}', "", id="bad-request-not-conflict"),
+    pytest.param(400, b'not json gateway-test-only', "", id="bad-request-invalid-json"),
+    pytest.param(400, b'x' * 1048577, "", id="bad-request-oversized-body"),
     pytest.param(401, b'{"error":"gateway-test-only repo-test-only"}', "", id="unauthorized"),
+    pytest.param(403, b'{"error":"repository-not-authorized"}', ": repository-not-authorized", id="forbidden-policy"),
+    pytest.param(403, b'{"error":"repository-mismatch"}', ": repository-mismatch", id="forbidden-repository"),
+    pytest.param(403, b'{"error":"task-authentication-unsupported"}', ": task-authentication-unsupported", id="forbidden-legacy"),
     pytest.param(403, b'{"error":"gateway-test-only repo-test-only"}', "", id="forbidden"),
+    pytest.param(403, b'{"error":[],"task_id":"issue-' + b'a' * 32 + b'"}', "", id="forbidden-invalid-fields"),
+    pytest.param(403, b'{"error":"retry-already-created"}', "", id="forbidden-not-conflict"),
+    pytest.param(403, b'[]', "", id="forbidden-non-object"),
+    pytest.param(403, b'not json gateway-test-only', "", id="forbidden-invalid-json"),
+    pytest.param(403, b'x' * 1048577, "", id="forbidden-oversized-body"),
     pytest.param(404, b'{"error":"gateway-test-only repo-test-only"}', "", id="not-found"),
     pytest.param(503, b'{"error":"gateway-test-only repo-test-only"}', "", id="unavailable"),
     pytest.param(409, b'{"error":"gateway-test-only repo-test-only"}', "", id="conflict-secret"),
@@ -841,10 +963,10 @@ def test_drain_workflow_http_errors_report_only_safe_details(monkeypatch, tmp_pa
     script_file.write_text(step["run"])
     with pytest.raises(SystemExit) as raised:
         runpy.run_path(str(script_file))
-    assert str(raised.value) == f"Task intake failed: HTTP {status}" + (detail if status == 409 else "")
+    assert str(raised.value) == f"Task intake failed: HTTP {status}" + detail
     output = capsys.readouterr()
     assert output.out == output.err == ""
-    assert body.tell() == (min(len(response_body), 1048577) if status == 409 else 0)
+    assert body.tell() == (min(len(response_body), 1048577) if status in (400, 403, 409) else 0)
 
 
 @pytest.mark.parametrize("task_id,valid", [("issue-" + "a" * 32, True), ("../../another/path", False), ("", False)])
