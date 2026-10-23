@@ -168,14 +168,14 @@ secretRefs:
     name: code-factory-supervisor-auth
     key: token
   openaiApiKey:
-    name: ""
+    name: code-factory-openai-api-key
     key: api-key
   coderApiKey:
-    name: ""
+    name: code-factory-coder-api-key
     key: api-key
   managementAdminPassword:
     name: code-factory-management-admin-password
     key: password
   managementGithubClientSecret:
-    name: ""
+    name: code-factory-management-github-client-secret
     key: client-secret

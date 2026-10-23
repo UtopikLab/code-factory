@@ -21,6 +21,11 @@ OPTIONAL_KEYS = {
     "CODER_API_KEY",
     "MANAGEMENT_GITHUB_CLIENT_SECRET",
 }
+OPTIONAL_REF_DEFAULTS = {
+    "openaiApiKey": "code-factory-openai-api-key",
+    "coderApiKey": "code-factory-coder-api-key",
+    "managementGithubClientSecret": "code-factory-management-github-client-secret",
+}
 ALL_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
 ASSIGNMENT = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
 
@@ -196,6 +201,7 @@ def render(bundle, inference_values, orchestrator_values):
         if not value:
             continue
         name, key = configured_ref(orchestrator_values, ref_name)
+        name = name or OPTIONAL_REF_DEFAULTS[ref_name]
         add_secret(
             secrets,
             orchestrator_namespace,

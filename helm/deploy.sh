@@ -50,8 +50,12 @@ deploy_release() {
   # `--install` so it creates the release on a fresh cluster and overwrites on a
   # re-run.
   local -a values_args=()
+  local -a reset_values_args=()
   if [[ "$3" == "orchestrator" && -f "${ORCHESTRATOR_VALUES_FILE}" ]]; then
     values_args+=(--values "${ORCHESTRATOR_VALUES_FILE}")
+  fi
+  if [[ "$3" == "inference" ]]; then
+    reset_values_args+=(--reset-values)
   fi
   # Delete the controller-owned Job before the upgrade. Helm's strategic-merge
   # patch on a Job conflicts with the immutable fields the controller stamps on
@@ -60,11 +64,11 @@ deploy_release() {
   # "field is immutable". Removing the Job first lets it be recreated cleanly on
   # the next deploy. The Job name is "<release>-worker" (e.g. orchestrator-worker).
   kubectl delete job "${2}-worker" -n "$1" >/dev/null 2>&1 || true
-  if helm upgrade --install --namespace "$1" "$2" "$HELM_DIR/$3" "${values_args[@]}" --wait --timeout "$HELM_TIMEOUT" --history-max 1; then
+  if helm upgrade --install "${reset_values_args[@]}" --namespace "$1" "$2" "$HELM_DIR/$3" "${values_args[@]}" --wait --timeout "$HELM_TIMEOUT" --history-max 1; then
     log "release '$2' ready in namespace '$1'"
   else
     local upgrade_status=$?
-    warn "release '$2' failed readiness validation (timeout: $HELM_TIMEOUT)"
+    warn "Helm upgrade/install failed for release '$2'"
     kubectl get pods -n "$1" -o wide >&2 || true
     kubectl get events -n "$1" --sort-by=.metadata.creationTimestamp >&2 || true
     return "$upgrade_status"

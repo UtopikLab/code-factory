@@ -71,15 +71,56 @@ class SecretBundleRenderTests(unittest.TestCase):
                 self.bundle, self.inference_values, self.orchestrator_values
             )
 
-    def test_populated_optional_value_reports_empty_optional_ref_path(self):
-        self.bundle["OPENAI_API_KEY"] = "test-optional-value"
+    def test_populated_optional_values_render_using_chart_default_names(self):
+        optional_values = {
+            "openaiApiKey": ("OPENAI_API_KEY", "code-factory-openai-api-key", "api-key"),
+            "coderApiKey": ("CODER_API_KEY", "code-factory-coder-api-key", "api-key"),
+            "managementGithubClientSecret": (
+                "MANAGEMENT_GITHUB_CLIENT_SECRET",
+                "code-factory-management-github-client-secret",
+                "client-secret",
+            ),
+        }
+        for ref_name, (env_key, _, _) in optional_values.items():
+            self.bundle[env_key] = f"test-{ref_name}"
 
-        with self.assertRaisesRegex(
-            ValueError, "secretRefs\\.openaiApiKey\\.name is empty in chart values"
-        ):
-            render_secret_bundle.render(
-                self.bundle, self.inference_values, self.orchestrator_values
-            )
+        documents = render_secret_bundle.render(
+            self.bundle, self.inference_values, self.orchestrator_values
+        )
+        secrets = {document["metadata"]["name"]: document for document in documents
+                   if document["kind"] == "Secret"}
+
+        for ref_name, (env_key, secret_name, secret_key) in optional_values.items():
+            with self.subTest(ref_name=ref_name):
+                self.assertEqual(
+                    secrets[secret_name]["stringData"][secret_key], self.bundle[env_key]
+                )
+
+    def test_populated_optional_values_use_default_names_if_overlay_blanks_them(self):
+        optional_values = {
+            "openaiApiKey": ("OPENAI_API_KEY", "code-factory-openai-api-key", "api-key"),
+            "coderApiKey": ("CODER_API_KEY", "code-factory-coder-api-key", "api-key"),
+            "managementGithubClientSecret": (
+                "MANAGEMENT_GITHUB_CLIENT_SECRET",
+                "code-factory-management-github-client-secret",
+                "client-secret",
+            ),
+        }
+        for ref_name, (env_key, _, _) in optional_values.items():
+            self.bundle[env_key] = f"test-{ref_name}"
+            self.orchestrator_values["secretRefs"][ref_name]["name"] = ""
+
+        documents = render_secret_bundle.render(
+            self.bundle, self.inference_values, self.orchestrator_values
+        )
+        secrets = {document["metadata"]["name"]: document for document in documents
+                   if document["kind"] == "Secret"}
+
+        for ref_name, (env_key, secret_name, secret_key) in optional_values.items():
+            with self.subTest(ref_name=ref_name):
+                self.assertEqual(
+                    secrets[secret_name]["stringData"][secret_key], self.bundle[env_key]
+                )
 
     def test_empty_inference_pull_secret_reports_values_path(self):
         self.inference_values["inference"]["imagePullSecrets"][0]["name"] = ""

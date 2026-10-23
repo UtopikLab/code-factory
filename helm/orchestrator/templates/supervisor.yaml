@@ -60,13 +60,12 @@ spec:
               cpu: {{ .Values.supervisor.config.cpuLimit | default "2500m" }}
               memory: {{ .Values.supervisor.config.memoryLimit | default "5Gi" }}
           env:
-            {{- if .Values.secretRefs.openaiApiKey.name }}
             - name: OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.secretRefs.openaiApiKey.name | quote }}
+                  name: {{ .Values.secretRefs.openaiApiKey.name | default "code-factory-openai-api-key" | quote }}
                   key: {{ .Values.secretRefs.openaiApiKey.key | quote }}
-            {{- end }}
+                  optional: true
             - name: ACCEPTOR_URL
               valueFrom:
                 configMapKeyRef:

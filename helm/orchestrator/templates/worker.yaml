@@ -79,13 +79,12 @@ spec:
               mountPath: /etc/code-factory/agent-catalog
               readOnly: true
           env:
-            {{- if .Values.secretRefs.coderApiKey.name }}
             - name: CODER_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.secretRefs.coderApiKey.name | quote }}
+                  name: {{ .Values.secretRefs.coderApiKey.name | default "code-factory-coder-api-key" | quote }}
                   key: {{ .Values.secretRefs.coderApiKey.key | quote }}
-            {{- end }}
+                  optional: true
             - name: ACCEPTOR_URL
               valueFrom:
                 configMapKeyRef:
